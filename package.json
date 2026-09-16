@@ -1,0 +1,95 @@
+{
+  "name": "@zakkster/lite-logn",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "version": "0.1.0",
+  "description": "Zero-dependency, zero-GC family of O(log n) data structures that proves its logarithm: BinaryHeap (array-embedded O(log n) push/pop min-heap), Fenwick/BIT (O(log n) point-update AND prefix-sum via the i & -i walk), SegmentTree (O(log n) associative range-query + point-update), and SkipList (pointer-free expected-O(log n) ordered map) -- planned -- with a log-linear O(log n) Witness harness that fits nsPerOp = intercept + slope*log2(n) and shows the straight log line while an O(n) foil leaves it. Tree-shakeable named exports.",
+  "type": "module",
+  "main": "./LogN.js",
+  "module": "./LogN.js",
+  "types": "./LogN.d.ts",
+  "exports": {
+    ".": {
+      "types": "./LogN.d.ts",
+      "node": "./LogN.js",
+      "import": "./LogN.js",
+      "default": "./LogN.js"
+    }
+  },
+  "files": [
+    "LogN.js",
+    "LogN.d.ts",
+    "llms.txt",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js test/Bench.test.mjs",
+    "test:types": "tsc -p test/types/tsconfig.json",
+    "torture": "node --expose-gc test/torture.mjs",
+    "witness": "node test/witness.mjs",
+    "test:perf": "node --expose-gc --max-semi-space-size=4 --test test/perf/PerfGate.test.mjs",
+    "bench": "node benchmark/Bench.mjs",
+    "bench:report": "node benchmark/Bench.mjs && node benchmark/Report.mjs",
+    "verify": "npm test && npm run test:types && npm run torture && npm run witness && npm run test:perf"
+  },
+  "keywords": [
+    "binary-heap",
+    "heap",
+    "priority-queue",
+    "d-ary-heap",
+    "fenwick",
+    "bit",
+    "binary-indexed-tree",
+    "prefix-sum",
+    "segment-tree",
+    "range-query",
+    "range-sum",
+    "skip-list",
+    "ordered-set",
+    "balanced-bst",
+    "bst",
+    "log-n",
+    "logarithmic",
+    "order-statistics",
+    "rank-select",
+    "data-structures",
+    "zero-gc",
+    "gc",
+    "typed-array",
+    "soa",
+    "tree-shakeable",
+    "witness",
+    "performance",
+    "lightweight",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@zakkster/lite-gc-profiler": "^1.16.0",
+    "@zakkster/lite-leak": "^1.10.0",
+    "@zakkster/lite-perf-gate": "^1.4.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  },
+  "homepage": "https://github.com/PeshoVurtoleta/lite-logn#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-logn.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-logn/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "sideEffects": false
+}

@@ -1,0 +1,63 @@
+# @zakkster/lite-logn
+
+Version: 0.1.0
+License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
+Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
+Node: >= 18.
+
+## What it is
+
+A tree-shakeable, zero-GC family of O(log n) data structures that PROVES its
+logarithm instead of asserting it. The complexity class is the product: every
+hot op is O(log n) worst-case (or expected / amortized where stated) and
+allocates zero bytes after construction, and a shipped witness harness fits
+`nsPerOp = intercept + slope * log2(n)` and demonstrates the straight log line
+against a built-in O(n) foil that leaves it.
+
+It is the O(log n) sibling of @zakkster/lite-o1: lite-o1 holds the constant (a
+FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
+line on that same axis, one added level per doubling of n).
+
+v0.1.0 is the SCAFFOLD release. It ships only the `VERSION` const -- no member
+yet. The planned roster (one member per session, each landing append-only):
+
+- BinaryHeap (v0.1.0)  -- array-embedded O(log n) push / pop min-heap over a
+  flat Float64Array; children at 2i+1 / 2i+2; nothing allocated per op; peek
+  O(1). The cleanest witness in the family and the one that calibrates the
+  shared R^2 floor + slope band gate.
+- Fenwick / BIT (v0.2.0) -- BOTH point-update AND prefix-sum in O(log n) over a
+  single flat array via the lowest-set-bit walk (`i & -i`); rangeSum is two
+  prefix queries. Two straight log lines.
+- SegmentTree (v0.3.0) -- general associative range-query (min / max / sum / gcd)
+  + point-update over a flat, array-embedded tree, O(log n) worst-case; the fold
+  is chosen once at construction.
+- SkipList (v0.4.0) -- the ordered map (get / set / delete / successor /
+  rangeIter), pointer-free over a shared node pool (parallel Uint32Array `next`
+  columns), expected O(log n), deterministic seed, tail reported.
+
+## Exports (from the single main file LogN.js)
+
+- `VERSION` -- string. The package version; one of the three version sites
+  (package.json / LogN.js VERSION const / this file's `Version:` header).
+
+Member exports (one tree-shakeable class each) are appended here as each member
+ships. At v0.1.0 there are none.
+
+## Design bounds
+
+- Zero runtime deps; node:test only; ASCII-only source.
+- Single PascalCase main file LogN.js; sideEffects: false; tree-shakeable named
+  exports, no barrel.
+- Fixed, preallocated capacity (node / element count, not bytes). Fail closed on
+  every unverified state; `null` is not zero.
+- typeof-guard FIRST, before any coercion, at the door of every mutating op.
+- Zero allocation on every steady-state hot path (0 B/op), proven by
+  `node --expose-gc test/torture.mjs`.
+
+## Cross-package boundaries
+
+- @zakkster/lite-o1 -- the O(1) sibling and intended pair. Any BOUNDED-INTEGER
+  priority queue is O(1) and belongs there (Dial's bucket queue); lite-logn's
+  heap is the GENERAL comparator PQ at O(log n).
+- @zakkster/lite-filter -- owns approximate / probabilistic membership;
+  lite-logn owns exact ordered structures. No overlap.
