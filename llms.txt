@@ -18,13 +18,16 @@ It is the O(log n) sibling of @zakkster/lite-o1: lite-o1 holds the constant (a
 FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
-v0.1.0 is the SCAFFOLD release. It ships only the `VERSION` const -- no member
-yet. The planned roster (one member per session, each landing append-only):
+v0.1.0 ships its first member, BinaryHeap. The planned roster (one member per
+session, each landing append-only):
 
-- BinaryHeap (v0.1.0)  -- array-embedded O(log n) push / pop min-heap over a
-  flat Float64Array; children at 2i+1 / 2i+2; nothing allocated per op; peek
-  O(1). The cleanest witness in the family and the one that calibrates the
-  shared R^2 floor + slope band gate.
+- BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
+  min|max binary heap over three parallel typed arrays (`_key` Float64Array,
+  `_id` Uint32Array, `_pos` Int32Array reverse map) with children at 2i+1 / 2i+2.
+  push / pop / changeKey / remove are O(log n); peek / topKey / keyOf / has are
+  O(1); nothing allocated per op. The reverse-index map makes changeKey / remove
+  addressable by a caller-supplied entity id. The cleanest witness in the family
+  and the one that calibrates the shared R^2 floor + slope band gate (pop).
 - Fenwick / BIT (v0.2.0) -- BOTH point-update AND prefix-sum in O(log n) over a
   single flat array via the lowest-set-bit walk (`i & -i`); rangeSum is two
   prefix queries. Two straight log lines.
@@ -39,9 +42,26 @@ yet. The planned roster (one member per session, each landing append-only):
 
 - `VERSION` -- string. The package version; one of the three version sites
   (package.json / LogN.js VERSION const / this file's `Version:` header).
+- `BinaryHeap` -- class. An indexed binary heap (addressable priority queue).
+  - `new BinaryHeap(capacity, kind = 'min')` -- capacity is an integer in
+    [1, 2^31-1]; kind is 'min' or 'max'. Allocates the three typed arrays once.
+  - `push(id, key)` -> void. id integer in [0, capacity), not already present;
+    key finite. Throws on out-of-range/duplicate id, non-finite key, full heap.
+  - `pop()` -> id | undefined. Removes the extremum; undefined if empty (no throw).
+  - `peek()` -> id | undefined. `topKey()` -> key | undefined. Read-only.
+  - `keyOf(id)` -> key | undefined. `has(id)` -> boolean. Out-of-range id throws.
+  - `changeKey(id, newKey)` -> void. Reprioritize a present entity (auto-direction
+    sift); a non-member id throws (never a silent no-op).
+  - `remove(id)` -> boolean. Idempotent: false if absent, true if removed.
+  - `size` / `capacity` / `kind` getters; `clear()`; `forEach(fn)` and
+    `[Symbol.iterator]()` yield live ids in UNSPECIFIED (heap-array) order -- NOT
+    sorted / pop order.
+  - `BinaryHeap.build(kind, ids, keys, capacity)` -> BinaryHeap. Floyd O(n) bulk
+    build from parallel arrays; fails closed on duplicate/out-of-range id,
+    non-finite key, or count > capacity.
 
 Member exports (one tree-shakeable class each) are appended here as each member
-ships. At v0.1.0 there are none.
+ships.
 
 ## Design bounds
 

@@ -10,19 +10,22 @@
  *                                   and does the hot path allocate? 0 B/op,
  *                                   maxMajor 0, maxPauseMs <= 2 is the gate.
  *
- * v0.1.0 is the SCAFFOLD release: there is NO member yet, so this harness runs
- * GREEN and EMPTY. Phase 1 (retention) tracks nothing and tracker.size() stays
- * 0; phase 2 (GC budget) profiles a plain integer accumulator that allocates
- * nothing, so alloc = 0 B/op and gc major = 0. The BinaryHeap session fills both
- * phases in place: phase 1 tracks a heap instance per churn cycle (cleanup MUST
- * NOT close over the tracked instance -- the held-value contract), phase 2 steps
- * a single out-of-loop instance's push / pop and gates 0 B/op via measureAllocs.
+ * v0.1.0 ships BinaryHeap: phase 1 (retention) tracks a fresh heap per churn
+ * cycle -- the cleanup closes over NOTHING (the held-value contract), so the heap
+ * finalizes and tracker.size() returns to 0. Phase 2 steps a single out-of-loop
+ * heap's push / pop / changeKey / remove and gates 0 B/op via measureAllocs, then
+ * profiles a steady churn window for gc major = 0, and asserts the backing
+ * arrayBuffers do not grow across fill/clear cycles.
  * Never widen a budget to make this pass -- a budget that moves is not a gate.
  *
  * ENTRY CONTRACT: --expose-gc is mandatory (the GC gate is meaningless without
  * it); the devDeps are imported AFTER the guard so a fresh clone that skipped
  * `npm install` fails with a remedy, not a stack trace.
  */
+
+// Module-scope release: closes over NOTHING (no reference to any tracked heap),
+// so it never defeats finalization -- the held-value contract (torture-harness).
+function noopRelease() {}
 
 async function main() {
     if (typeof globalThis.gc !== 'function') {
@@ -43,31 +46,38 @@ async function main() {
     const { GcProfiler, checkNoGc, measureAllocs } =
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
-    // >>> WIRE: the members under test. None at v0.1.0 (scaffold).
-    const { VERSION } = await import('../LogN.js');
+    // >>> WIRE: the members under test.
+    const { VERSION, BinaryHeap } = await import('../LogN.js');
 
-    const CYCLES = 4096;    // retention churn (BinaryHeap fills the body)
+    const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
+    const CAP = 4096;       // hot-path heap capacity
+    const MASK = CAP - 1;   // id & MASK is always in [0, CAP)
 
     const leaks = [];
     const warns = [];
     const tracker = createLeakTracker({
         name: 'lite-logn',
-        onLeak: (r) => leaks.push(r.kind + ':' + String(r.tag)),
         onWarning: (w) => warns.push(w.kind + ':' + w.reason),
     });
-    // No kernels: an array-embedded member owns only its typed arrays (no timer,
-    // listener, observer, or DOM node), so being collected is the DESIRED
-    // outcome, not a resource orphan. The retention proof is finalization
-    // itself -- tracker.size() returning to 0.
+    // No onLeak, no kernels: a BinaryHeap owns only its three typed arrays (no
+    // timer, listener, observer, or DOM node), so being collected is the DESIRED
+    // outcome, not a resource orphan. The retention proof is finalization itself
+    // -- tracker.size() returning to 0 means every tracked heap was reclaimed.
 
     // ---- phase 1: retention torture ---------------------------------------
-    // Scaffold: no member to construct, so the churn body is empty and the
-    // tracker holds nothing. BinaryHeap replaces this with a `new BinaryHeap`
-    // per cycle, tracked with a cleanup that closes over NOTHING.
+    // A fresh BinaryHeap per cycle, exercised then dropped. The cleanup closes
+    // over NOTHING (a no-op: a heap owns only its typed arrays, no external
+    // resource), and the tag is a primitive -- neither captures the tracked heap,
+    // so finalization is not defeated. tracker.size() -> 0 is the retention proof.
     function fillTracker() {
         for (let i = 0; i < CYCLES; i++) {
-            // no member yet -- nothing constructed, nothing tracked
+            const heap = new BinaryHeap(64, (i & 1) ? 'max' : 'min');
+            for (let k = 0; k < 32; k++) heap.push(k, (k * 2654435761) & 0xffff);
+            heap.changeKey(0, 7);
+            heap.pop();
+            heap.remove(5);
+            tracker.track(heap, noopRelease, i, { audit: true });
         }
         return tracker.size();
     }
@@ -85,21 +95,58 @@ async function main() {
     const findings = tracker.audit();
 
     // ---- phase 2a: per-call allocation on the hot path (0 B/op) ------------
-    // Scaffold: no member hot op exists, so the measured step is a plain int
-    // accumulator (zero allocation). BinaryHeap replaces `step` with an
-    // out-of-loop instance's push / pop and asserts bytesPerCall === 0.
-    let acc = VERSION.length | 0;
-    const step = () => { acc = (acc + 1) | 0; };
-    const allocRes = measureAllocs(step, { iterations: 100000, batches: 8 });
-    const bpc = allocRes.bytesPerCall === null ? 0 : allocRes.bytesPerCall;
-    const allocBytes = Math.max(0, Math.round(bpc));
+    // A single out-of-loop heap prefilled to capacity. Each measured lane is a
+    // real hot op (or a size-preserving pair) that MUST allocate zero bytes.
+    const inst = new BinaryHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) inst.push(i, (i * 2654435761) & 0xffff);
+
+    let tk = (VERSION.length | 0);
+    // push/pop churn: pop the extremum, push that id back -> steady full heap.
+    const stepPushPop = () => {
+        const id = inst.pop();
+        inst.push(id, (tk * 2654435761) & 0xffff);
+        tk = (tk + 1) | 0;
+    };
+    // changeKey: reprioritize a resident id (heap stays full) -> auto-direction sift.
+    const stepChangeKey = () => {
+        inst.changeKey(tk & MASK, (tk * 40503) & 0xffff);
+        tk = (tk + 1) | 0;
+    };
+    // remove + push back: addressable delete then re-insert -> steady full heap.
+    const stepRemove = () => {
+        const id = tk & MASK;
+        if (inst.remove(id)) inst.push(id, (tk * 2246822519) & 0xffff);
+        tk = (tk + 1) | 0;
+    };
+    // read mix: peek / topKey / keyOf / has folded into an int accumulator.
+    let racc = 0;
+    const stepRead = () => {
+        const id = tk & MASK;
+        racc = (racc + inst.peek() + inst.topKey() + inst.keyOf(id) + (inst.has(id) ? 1 : 0)) | 0;
+        tk = (tk + 1) | 0;
+    };
+
+    let allocBytes = 0;
+    for (const step of [stepPushPop, stepChangeKey, stepRemove, stepRead]) {
+        const r = measureAllocs(step, { iterations: 100000, batches: 8 });
+        const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
+        const b = Math.max(0, Math.round(bpc));
+        if (b > allocBytes) allocBytes = b;
+    }
+    if (racc === 0x7fffffff) throw new Error('unreachable'); // keep racc live
     const allocOk = allocBytes === 0;
 
     // ---- phase 2b: GC budget over a steady-state window --------------------
+    // A representative churn mix on the out-of-loop heap: push/pop every op, a
+    // changeKey every 8th, a remove+push every 64th. Steady full heap, zero alloc.
     const gc = new GcProfiler().start();
-    let sink = acc | 0;
+    let sink = racc | 0;
     for (let i = 0; i < HOT; i++) {
-        sink = (sink + i) | 0;
+        const id = inst.pop();
+        inst.push(id, (i * 2654435761) & 0xffff);
+        if ((i & 7) === 0) inst.changeKey(i & MASK, (i * 40503) & 0xffff);
+        if ((i & 63) === 0) { const rid = i & MASK; if (inst.remove(rid)) inst.push(rid, i & 0xffff); }
+        sink = (sink + id) | 0;
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -110,13 +157,18 @@ async function main() {
     gc.stop();
 
     // ---- phase 2c: arrayBuffers must not grow ------------------------------
-    // Scaffold: no backing store to grow. BinaryHeap fills / clears its heap in
-    // a loop here and asserts arrayBuffers grows by 0.
+    // Fill / clear ONE reused heap in a loop: the three typed arrays are fixed at
+    // construction, so no fill/clear cycle allocates a new backing store and
+    // arrayBuffers must not grow.
+    const abHeap = new BinaryHeap(1024, 'min');
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
     const abBefore = process.memoryUsage().arrayBuffers;
-    // no member: nothing allocates a backing store
+    for (let r = 0; r < 2000; r++) {
+        for (let i = 0; i < 1024; i++) abHeap.push(i, (i * 2654435761) & 0xffff);
+        abHeap.clear();
+    }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
     const abDelta = abAfter - abBefore;
@@ -133,7 +185,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (scaffold: no member; sink=' + sink + ' abGrowth=' + abDelta + ')');
+        ' (BinaryHeap; sink=' + sink + ' abGrowth=' + abDelta + ')');
 
     if (!ok) {
         for (const v of report.violations) {

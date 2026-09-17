@@ -37,13 +37,14 @@ test('VERSION is exactly 0.1.0 at the scaffold release', () => {
     assert.equal(VERSION, '0.1.0');
 });
 
-// --- frozen export surface: VERSION only (no member yet) --------------------
+// --- frozen export surface: VERSION + the shipped members (1 member) --------
 
-test('LogN.js exports exactly VERSION at v0.1.0 -- no member has leaked in', () => {
+test('LogN.js exports exactly VERSION and BinaryHeap at v0.1.0 (1 member)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['VERSION'],
-        'LogN.js export surface drifted from the frozen scaffold surface (VERSION only)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap)');
     assert.equal(typeof VERSION, 'string');
+    assert.equal(typeof LogNModule.BinaryHeap, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------

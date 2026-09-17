@@ -96,7 +96,46 @@ For amortized / randomized members the witness also prints the MAX single-op tim
 | --- | --- | --- | --- |
 | `VERSION` | `string` | `'0.1.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
-Member signatures (constructors, hot ops, and a per-member constants table) are appended here as each member ships.
+### BinaryHeap
+
+An **indexed binary heap** (an addressable priority queue): a min|max binary heap over three parallel, pointer-free typed arrays -- `_key` (`Float64Array`, the priority at each heap slot), `_id` (`Uint32Array`, the entity id at each slot), and `_pos` (`Int32Array`, the reverse map entity-id -> slot, sentinel `-1` == absent). A plain binary heap gives O(log n) `push` / `pop` but cannot find an arbitrary element to reprioritize; the reverse-index map buys O(log n) `changeKey` / `remove` by a caller-supplied entity id. Children of slot `i` are `2i+1` / `2i+2`. Entity ids are integers in `[0, capacity)`; keys are finite numbers. Every hot op allocates zero bytes after construction (hole-punching sift -- one write per level, no 3-write swap).
+
+```js
+import { BinaryHeap } from '@zakkster/lite-logn';
+
+const pq = new BinaryHeap(1024, 'min');   // capacity 1024, min-heap
+pq.push(7, 5.0);                          // entity 7 at priority 5.0
+pq.push(3, 2.5);
+pq.push(9, 8.0);
+pq.peek();        // -> 3   (id of the extremum)
+pq.topKey();      // -> 2.5 (its key)
+pq.changeKey(9, 1.0);   // reprioritize entity 9 to the front
+pq.pop();         // -> 9   (removes and returns the new extremum)
+pq.remove(7);     // -> true (addressable delete by id)
+
+// Floyd O(n) bulk build from parallel arrays:
+const heap = BinaryHeap.build('max', [0, 1, 2, 3], [4.0, 1.0, 9.0, 2.0], 16);
+heap.pop();       // -> 2   (the id whose key 9.0 is the max)
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new BinaryHeap(capacity, kind = 'min')` | O(capacity) | `capacity` integer in `[1, 2^31-1]`; `kind` is `'min'` or `'max'`. Allocates the three typed arrays once; `_pos.fill(-1)`. |
+| `push` | `push(id, key) -> void` | O(log n) | id in `[0, capacity)`, not already present; key finite. Throws on out-of-range/duplicate id, non-finite key, or full heap. |
+| `pop` | `pop() -> number \| undefined` | O(log n) | Removes and returns the extremum's id; `undefined` if empty (no throw). |
+| `peek` | `peek() -> number \| undefined` | O(1) | The extremum's id; `undefined` if empty. |
+| `topKey` | `topKey() -> number \| undefined` | O(1) | The extremum's key; `undefined` if empty. |
+| `keyOf` | `keyOf(id) -> number \| undefined` | O(1) | The key associated with id; `undefined` if absent. Out-of-range id throws. |
+| `has` | `has(id) -> boolean` | O(1) | True iff id is resident. Out-of-range id throws. |
+| `changeKey` | `changeKey(id, newKey) -> void` | O(log n) | Reprioritize a present entity (auto-direction sift); a non-member id throws. |
+| `remove` | `remove(id) -> boolean` | O(log n) | Idempotent: `false` if absent, `true` if removed. |
+| `clear` | `clear() -> void` | O(capacity) | Resets size and the reverse map. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(id, key)` in UNSPECIFIED (heap-array) order -- NOT sorted / pop order. |
+| `[Symbol.iterator]` | `for (const id of heap)` | O(n) | Yields live ids in UNSPECIFIED order. |
+| `size` / `capacity` / `kind` | getters | O(1) | Live count / fixed capacity / `'min'` \| `'max'`. |
+| `BinaryHeap.build` | `build(kind, ids, keys, capacity) -> BinaryHeap` | O(n) | Floyd bulk build from parallel arrays; fails closed on duplicate/out-of-range id, non-finite key, or `count > capacity`. |
+
+Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
 
@@ -106,7 +145,8 @@ Member signatures (constructors, hot ops, and a per-member constants table) are 
 
 | Op class | Allocation |
 | --- | --- |
-| (v0.1.0 scaffold: no member yet) | n/a |
+| `BinaryHeap` push / pop / peek / topKey / keyOf / has / changeKey / remove | 0 B/op |
+| `BinaryHeap` constructor / `build` / `clear` | O(capacity) typed arrays, once (cold) |
 
 The allocation table is filled in per member as each lands, with the gated `R^2` / slope numbers from its witness run.
 

@@ -15,14 +15,30 @@
  * reaches for, shown losing as n grows). For amortized / randomized members it
  * also prints the MAX single-op time -- the honesty hook a mean cannot hide.
  *
- * v0.1.0 is the SCAFFOLD release: the fit machinery (least-squares log-linear
- * R^2 + slope) and a reference O(n) foil are in place, but there is NO member to
- * fit, so the harness runs GREEN and EMPTY and gates NOTHING. The R^2 floor +
- * slope band are DELIBERATELY not set here: they are calibrated empirically in
- * the BinaryHeap session (decision D-02) and become the shared FAMILY gate every
- * later member inherits. This is an OFFLINE proof tool, never a hot-path
- * dependency.
+ * v0.1.0 ships BinaryHeap, the family CALIBRATOR. Its measured operation is POP
+ * (delete-extremum -- the full-height sift-down, the heap's tallest honest walk).
+ * The R^2 floor + slope band are FROZEN here from the BinaryHeap calibration run
+ * (decision D-02) and become the shared FAMILY gate every later member inherits:
+ *
+ *   BINARYHEAP_R2_FLOOR = 0.958   (calibration measured R^2 ~ 0.988, minus 0.03)
+ *   BINARYHEAP_SLOPE_BAND = [5.76, 13.44] ns/level
+ *       (central tendency: MEDIAN slope over N=15 pop-fit runs = 9.60 ns/level;
+ *        band = median * [0.6, 1.4]. Centered on the MEDIAN -- NOT a high sample
+ *        -- so a legitimately faster future O(log n) member near ~6 ns/level
+ *        still clears the floor. The R^2 floor independently rejects non-log
+ *        shapes, and a too-flat O(1)-looking member sits near slope 0 and is
+ *        still caught, so lowering the slope floor loses no teeth.)
+ *
+ * The gate: BinaryHeap pop must sit ON the line (R^2 >= floor AND slope in band)
+ * and the sorted-array-insert O(n) foil must LEAVE it (foil R^2 < floor). The
+ * gated pop sweep is pinned to the steady band [1e4 .. 1e6] (the L1 micro-floor
+ * and the memory wall above ~1e6 both flake the fit -- lite-o1 ADR-0004 domain
+ * discipline); the foil sweep stays where an O(n^2) build is affordable. Never
+ * widen a budget to make this pass -- a budget that moves is not a gate. This is
+ * an OFFLINE proof tool, never a hot-path dependency.
  */
+
+import { BinaryHeap } from '../LogN.js';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
 // x is log2(n); y is nsPerOp. Returns { slope, intercept, r2 }. Pure, alloc-
@@ -64,33 +80,142 @@ export function sortedArrayInsert(arr, len, key) {
     return len + 1;
 }
 
+// --- FROZEN family gate (D-02, calibrated in the BinaryHeap session) ---------
+// These thresholds are the SHARED family gate: every later member's witness is
+// checked against them (each member may narrow, never widen). Do NOT retune to
+// paper over a regression -- a budget that moves is not a gate.
+// R^2 floor: calibration measured R^2 ~ 0.988, minus 0.03 (foil R^2 ~ 0.82 < it).
+export const BINARYHEAP_R2_FLOOR = 0.958;
+// Slope band, centered on the CENTRAL TENDENCY (not a high sample): MEDIAN slope
+// over N=15 pop-fit runs = 9.60 ns/level; band = median * [0.6, 1.4]. Anchoring
+// on the median (not the ~10 high side) keeps the floor honestly low so a faster
+// future O(log n) member near ~6 ns/level is not false-failed; no teeth are lost
+// (R^2 floor rejects non-log shapes; a too-flat member near slope 0 is caught).
+export const BINARYHEAP_SLOPE_LO = 5.76;           // median 9.60 * 0.6
+export const BINARYHEAP_SLOPE_HI = 13.44;          // median 9.60 * 1.4
+
+// Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
+// memory wall above ~1e6 both flake the fit). The foil sweep stays where an
+// O(n^2) sorted-array build is affordable.
+const POP_SWEEP = [1e4, 3e4, 1e5, 3e5, 1e6];
+const FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+
+// --- deterministic measurement helpers (offline; alloc off the timed body) --
+function nowNs() { return Number(process.hrtime.bigint()); }
+
+// mulberry32 -- a small deterministic PRNG so the sweep is reproducible.
+function mulberry32(seed) {
+    let s = seed >>> 0;
+    return function () {
+        s = (s + 0x6D2B79F5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), s | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+// Measure pure POP: build a heap of size n (Floyd, OUTSIDE timing), time a full
+// drain, accumulate across rebuilds until ~4e6 pops are timed (a stable mean,
+// height ~ log2(n)). The rebuild is excluded from the timed window.
+function measurePop(n) {
+    const reps = Math.max(4, Math.ceil(4e6 / n));
+    const ids = new Uint32Array(n);
+    const keys = new Float64Array(n);
+    const rnd = mulberry32(0x1234 ^ n);
+    for (let i = 0; i < n; i++) { ids[i] = i; keys[i] = rnd(); }
+    { const h = BinaryHeap.build('min', ids, keys, n); while (h.size > 0) h.pop(); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const h = BinaryHeap.build('min', ids, keys, n);
+        const t0 = nowNs();
+        while (h.size > 0) sink += h.pop();
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// The O(n) foil: sorted-array insert (the default that buys O(1) extract-min at
+// the price of an O(n) shift per insert). O(n^2) total, so the sweep stays small;
+// on the log2(n) axis its per-op cost is EXPONENTIAL, so a straight-line fit must
+// MISS the R^2 floor.
+function measureFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const arr = new Float64Array(n + 1);
+    const src = new Float64Array(n);
+    const rnd = mulberry32(0x9E37 ^ n);
+    for (let i = 0; i < n; i++) src[i] = rnd();
+    { let len = 0; for (let i = 0; i < n; i++) len = sortedArrayInsert(arr, len, src[i]); } // warm
+    let elapsed = 0, count = 0;
+    for (let r = 0; r < reps; r++) {
+        let len = 0;
+        const t0 = nowNs();
+        for (let i = 0; i < n; i++) len = sortedArrayInsert(arr, len, src[i]);
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
-// Each member session appends { name, band, run(n) -> { nsPerOp, maxNs },
-// foil(n) -> nsPerOp } here. Empty at v0.1.0 -- nothing to fit.
-const MEMBERS = [];
+// Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
+// slopeHi, run(n), foil(n) } here.
+const MEMBERS = [
+    {
+        name: 'BinaryHeap',
+        op: 'pop',
+        sweep: POP_SWEEP,
+        foilSweep: FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,
+        slopeLo: BINARYHEAP_SLOPE_LO,
+        slopeHi: BINARYHEAP_SLOPE_HI,
+        run: measurePop,
+        foil: measureFoil,
+        foilName: 'sorted-array insert (O(n) shift)',
+    },
+];
 
 function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.1.0 (scaffold)\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.1.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
-    if (MEMBERS.length === 0) {
-        process.stdout.write(
-            'WITNESS members=0 -- no member to fit yet (scaffold); ' +
-            'R^2 floor + slope band are calibrated in BinaryHeap (D-02). ok\n');
-        return;
-    }
-    // BinaryHeap fills this loop: sweep, fit, gate R^2 >= floor && slope in band,
-    // assert the foil misses the floor, print MAX single-op for amortized members.
     let ok = true;
     for (const m of MEMBERS) {
         const xs = [], ys = [];
-        for (const n of WITNESS_NS) { xs.push(Math.log2(n)); ys.push(m.run(n).nsPerOp); }
+        for (const n of m.sweep) { xs.push(Math.log2(n)); ys.push(m.run(n)); }
         const fit = fitLogLinear(xs, ys);
+        const fxs = [], fys = [];
+        for (const n of m.foilSweep) { fxs.push(Math.log2(n)); fys.push(m.foil(n)); }
+        const ffit = fitLogLinear(fxs, fys);
+
+        const onLine = fit.r2 >= m.r2Floor && fit.slope >= m.slopeLo && fit.slope <= m.slopeHi;
+        const foilOff = ffit.r2 < m.r2Floor;
+        const memberOk = onLine && foilOff;
+        ok = ok && memberOk;
+
         process.stdout.write(
-            m.name + ' R^2=' + fit.r2.toFixed(4) + ' slope=' + fit.slope.toFixed(3) + ' ns/level\n');
-        // gate wiring lands with D-02; scaffold does not gate
-        void fit; void ok;
+            m.name + '.' + m.op + ' R^2=' + fit.r2.toFixed(4) +
+            ' slope=' + fit.slope.toFixed(3) + ' ns/level' +
+            '  (floor R^2 >= ' + m.r2Floor.toFixed(3) +
+            ', slope in [' + m.slopeLo.toFixed(2) + ', ' + m.slopeHi.toFixed(2) + '])' +
+            '  ' + (onLine ? 'ON-LINE' : 'OFF-LINE') + '\n');
+        process.stdout.write(
+            '  foil ' + m.foilName + ' R^2=' + ffit.r2.toFixed(4) +
+            ' slope=' + ffit.slope.toFixed(1) + ' ns/level' +
+            '  ' + (foilOff ? 'OFF-LINE (misses floor -- good)' : 'ON-LINE (foil did NOT leave!)') + '\n');
+
+        if (!memberOk) {
+            if (!onLine) process.stderr.write(
+                '  violation ' + m.name + ' off the line: R^2=' + fit.r2.toFixed(4) +
+                ' floor=' + m.r2Floor + ' slope=' + fit.slope.toFixed(3) +
+                ' band=[' + m.slopeLo + ',' + m.slopeHi + ']\n');
+            if (!foilOff) process.stderr.write(
+                '  violation foil R^2=' + ffit.r2.toFixed(4) + ' >= floor ' + m.r2Floor +
+                ' (the O(n) foil must MISS the log floor)\n');
+        }
     }
-    process.stdout.write('WITNESS ok\n');
+    process.stdout.write('WITNESS ' + (ok ? 'ok' : 'FAIL') + '\n');
+    if (!ok) process.exitCode = 1;
 }
 
 main();

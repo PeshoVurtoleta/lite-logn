@@ -6,13 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_The first member, BinaryHeap, lands here (still v0.1.0 -- the scaffold reserves
-the version for it)._
-
 ## [0.1.0] - 2026-09-17
 
 ### Added
 
+- **BinaryHeap** -- the first member: an indexed binary min|max heap (addressable
+  priority queue) over three parallel typed arrays (`_key` Float64Array, `_id`
+  Uint32Array, `_pos` Int32Array reverse map). Surface: `push` / `pop` / `peek` /
+  `topKey` / `keyOf` / `has` / `changeKey` / `remove`, `size` / `capacity` /
+  `kind` getters, `clear`, `forEach` / `[Symbol.iterator]` (unspecified order),
+  and a static `BinaryHeap.build(kind, ids, keys, capacity)` Floyd O(n) bulk
+  build. changeKey / remove address elements by caller-supplied entity id via the
+  reverse-index map. push / pop / changeKey / remove are O(log n) with
+  hole-punching sift; peek / topKey / keyOf / has are O(1). Fixed-capacity
+  fail-closed (overflow, duplicate id, non-member changeKey, out-of-range id, and
+  non-finite key all throw `[lite-logn]`; never a silent drop). Zero allocation on
+  every hot path.
 - **Scaffold release.** Stands up the repo for the O(log n) family, the sibling
   of `@zakkster/lite-o1`. Ships the six `files[]` entries: `LogN.js` (header +
   the `VERSION` const, no member yet), `LogN.d.ts`, `llms.txt`, `README.md`,
