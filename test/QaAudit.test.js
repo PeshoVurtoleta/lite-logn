@@ -33,20 +33,21 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.3.0 at the SegmentTree release', () => {
-    assert.equal(VERSION, '0.3.0');
+test('VERSION is exactly 0.4.0 at the SkipList release', () => {
+    assert.equal(VERSION, '0.4.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (3 members) --------
+// --- frozen export surface: VERSION + the shipped members (4 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick and SegmentTree at v0.3.0 (3 members)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree and SkipList at v0.4.0 (4 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'SegmentTree', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
     assert.equal(typeof LogNModule.SegmentTree, 'function');
+    assert.equal(typeof LogNModule.SkipList, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -165,4 +166,43 @@ test('SegmentTree fails closed with a [lite-logn]-tagged throw on every coercion
     assert.throws(() => SegmentTree.build([1, NaN], 'sum'), /\[lite-logn\]/);
     assert.throws(() => SegmentTree.build([1, 2], 'bad'), /\[lite-logn\]/);
     assert.throws(() => SegmentTree.build([4, -2], 'gcd'), /\[lite-logn\]/);
+});
+
+// --- SkipList (v0.4.0): coercion + [lite-logn] fail-closed tag ----------------
+
+test('SkipList fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { SkipList } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 0x04000000]) {
+        assert.throws(() => new SkipList(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    // constructor: bad seed (unsigned 32-bit integer only)
+    for (const bad of [-1, 1.5, NaN, Infinity, '7', null, {}, Symbol('s'), 3n, 0x100000000]) {
+        assert.throws(() => new SkipList(8, bad), /\[lite-logn\]/, 'ctor seed ' + String(bad));
+    }
+    const sl = new SkipList(8, 1);
+    // non-finite / non-number key, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => sl.get(bad), /\[lite-logn\]/, 'get ' + String(bad));
+        assert.throws(() => sl.set(bad, 1), /\[lite-logn\]/, 'set key ' + String(bad));
+        assert.throws(() => sl.delete(bad), /\[lite-logn\]/, 'delete ' + String(bad));
+        assert.throws(() => sl.successor(bad), /\[lite-logn\]/, 'successor ' + String(bad));
+        assert.throws(() => sl.predecessor(bad), /\[lite-logn\]/, 'predecessor ' + String(bad));
+    }
+    // non-finite / non-number value, typeof-first
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => sl.set(0, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+    }
+    // rangeIter bounds: NaN + non-number fail closed; lo > hi fails closed;
+    // +-Infinity are legal unbounded ends
+    for (const bad of [NaN, '0', null, undefined, {}, Symbol('b'), 3n]) {
+        assert.throws(() => sl.rangeIter(bad, 5), /\[lite-logn\]/, 'rangeIter lo ' + String(bad));
+        assert.throws(() => sl.rangeIter(0, bad), /\[lite-logn\]/, 'rangeIter hi ' + String(bad));
+    }
+    assert.throws(() => sl.rangeIter(5, 2), /\[lite-logn\]/); // lo > hi
+    assert.doesNotThrow(() => [...sl.rangeIter(-Infinity, Infinity)]);
+    // full pool fails closed (never a silent drop)
+    const full = new SkipList(2, 1);
+    full.set(1, 1); full.set(2, 2);
+    assert.throws(() => full.set(3, 3), /\[lite-logn\]/);
 });

@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.3.0 ships three members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), and SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array); SkipList (pointer-free expected-O(log n) ordered map) is planned -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.4.0 ships four members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), and SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,7 +19,7 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.3.0 ships three members: BinaryHeap, Fenwick and SegmentTree.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
+**v0.4.0 ships four members: BinaryHeap, Fenwick, SegmentTree and SkipList.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
@@ -58,6 +58,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
   - [BinaryHeap](#binaryheap)
   - [Fenwick](#fenwick)
   - [SegmentTree](#segmenttree)
+  - [SkipList](#skiplist)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -82,14 +83,14 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 
 ## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.3.0, BinaryHeap, Fenwick and SegmentTree are shipped; SkipList is planned.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.4.0, BinaryHeap, Fenwick, SegmentTree and SkipList are shipped.
 
 | Member | Version | Status | Shape | Hot ops |
 | --- | --- | --- | --- | --- |
 | **BinaryHeap** | 0.1.0 | shipped | array-embedded complete binary min|max heap over a flat `Float64Array` | `push` / `pop` O(log n), `peek` O(1) |
 | **Fenwick** (BIT) | 0.2.0 | shipped | flat `Float64Array`, lowest-set-bit walk (`i & -i`) | `update` / `prefix` / `rangeSum` / `at` / `set` O(log n) |
 | **SegmentTree** | 0.3.0 | shipped | single flat `Float64Array(2n)` (leaves n..2n-1); associative fold (min/max/sum/gcd) chosen at construction | `query` / `update` O(log n), `at` O(1) |
-| **SkipList** | 0.4.0 | planned | pointer-free over a shared node pool; expected O(log n) | `get` / `set` / `delete` / `successor` |
+| **SkipList** | 0.4.0 | shipped | pointer-free over a private free-list node pool; expected O(log n) | `get` / `set` / `delete` / `successor` / `predecessor` |
 
 Later tiers (Treap / Scapegoat, OrderStatTree, IndexedHeap, SortedArray, MinMaxHeap, SplayTree, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
 
@@ -101,7 +102,7 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.3.0 the witness gates five ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), and SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`) all ON the line. SegmentTree's gated sweep is pinned to EXACT powers of two in `[2^10, 2^16]` (a segment-tree op touches a node per level spread across the `2n` array, so above ~2^16 the tree leaves the steady cache band, and exact powers keep the range decomposition a regular node count). Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap) foil runs R^2 ~ 0.77-0.84, the Fenwick foils (prefix-array rebuild, naive re-sum) hold steadier at R^2 ~ 0.75-0.76, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.75-0.85 -- all foil families sit comfortably under the 0.958 floor.
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.4.0 the witness gates seven ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), and SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`) all ON the line. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
 
 ## API reference
 
@@ -109,7 +110,7 @@ For amortized / randomized members the witness also prints the MAX single-op tim
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.3.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.4.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -221,6 +222,40 @@ The iterative `2n` layout is **order-agnostic** -- `query` mixes left- and right
 | `length` / `kind` | getters | O(1) | Element count / the frozen fold `'min'` \| `'max'` \| `'sum'` \| `'gcd'`. |
 | `SegmentTree.build` | `build(values, kind) -> SegmentTree` | O(n) | Bottom-up bulk build (seed leaves, then fold each internal node once deepest-first -- NOT n incremental updates); fails closed on a non-array-like, any non-finite value, or (gcd) any negative / non-integer. |
 
+### SkipList
+
+A **skip list**: a pointer-free **ordered map** (key -> value) whose `get` / `set` / `delete` / `successor` / `predecessor` are **expected O(log n)** via a probabilistic tower of forward links -- the family's first randomized member and its first pointer-based one. Where the array-embedded members bury a fixed-shape tree in index arithmetic, a skip list's shape is random, so it needs real per-node links; the trick that keeps it zero-GC is storing those links as slot **indices** in flat `Uint32Array` columns over a private free-list (`NodePool`), never as heap objects. `NIL = 0`, slot 0 is the head sentinel, and level generation is one step of the repo's Numerical-Recipes LCG whose high bits draw a geometric height (`1 + clz32(word)`) -- deterministic from an instance-local seed, no `Math.random`. Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed); values are finite numbers; `set` on an existing key updates the value in place (no new node). Every hot op allocates zero bytes after construction.
+
+Honesty note: the hot ops are **expected** O(log n), not worst-case -- an unlucky seed can build a tall thin tower and spike a single op. The witness fits the clean average line **and** separately prints the MAX single insert over a realistic randomized build trace, so the expectation is never sold as a guarantee.
+
+```js
+import { SkipList } from '@zakkster/lite-logn';
+
+const sl = new SkipList(1000, 42);   // capacity 1000, seed 42 (deterministic)
+sl.set(50, 500);                     // insert key 50 -> value 500
+sl.set(20, 200);
+sl.set(80, 800);
+sl.get(20);            // -> 200
+sl.set(20, 222);       // update value in place (no new node)
+sl.successor(20);      // -> 50   (smallest key strictly greater)
+sl.predecessor(80);    // -> 50   (largest key strictly less)
+[...sl.rangeIter(20, 60)];  // -> [20, 50]  (keys in [lo, hi], ascending)
+sl.delete(50);         // -> true (idempotent: false if absent)
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new SkipList(capacity, seed?)` | O(capacity) | `capacity` integer in `[1, 2^26-1]` (slot indices are `Uint32`, `NIL = 0` reserves slot 0, the `MAXLEVEL`-column stride must stay addressable); `seed` an unsigned 32-bit integer (default fixed). Allocates the typed-array columns + private pool once. |
+| `get` | `get(key) -> number \| undefined` | expected O(log n) | The value under `key`, or `undefined` if absent (no throw). Non-finite key throws. |
+| `set` | `set(key, value) -> this` | expected O(log n) | Insert `key -> value`, or update the value in place if `key` exists. Non-finite key/value throws; a full pool throws. |
+| `delete` | `delete(key) -> boolean` | expected O(log n) | Idempotent: `false` if absent, `true` if removed. Non-finite key throws. |
+| `successor` | `successor(key) -> number \| undefined` | expected O(log n) | The smallest key STRICTLY greater than `key`, or `undefined`. `key` need not be present. |
+| `predecessor` | `predecessor(key) -> number \| undefined` | expected O(log n) | The largest key STRICTLY less than `key`, or `undefined`. `key` need not be present. |
+| `rangeIter` | `rangeIter(lo, hi) -> IterableIterator<number>` | O(log n + k) | Version-stamped iterator over keys in `[lo, hi]` INCLUSIVE, ascending. Bounds may be `+-Infinity` (unbounded ends); `NaN` or `lo > hi` throws; a structural mutation mid-iteration throws. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(key, value, list)` in ascending key order. |
+| `clear` | `clear() -> this` | O(capacity) | Empties the list, keeps capacity, resets the PRNG to its initial seed. |
+| `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
+
 Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
@@ -239,8 +274,12 @@ Member signatures for later members are appended here as each ships.
 | `SegmentTree` query / update / at | 0 B/op |
 | `SegmentTree` constructor / `build` / `clear` | O(length) typed array (`2n` cells), once (cold) |
 | `SegmentTree` forEach | 0 B/op in the loop body (pass a hoisted callback) |
+| `SkipList` get / set / delete / successor / predecessor | 0 B/op (links are slot indices from a private free-list, never heap objects) |
+| `SkipList` constructor / `clear` | O(capacity) typed arrays + pool, once (cold) |
+| `SkipList` forEach | 0 B/op in the loop body (pass a hoisted callback) |
+| `SkipList` rangeIter | one iterator + `{value, done}` per step (the documented per-protocol allocator; transient, not retained) |
 
-Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`). The allocation table is extended per member as each lands.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`). The allocation table is extended per member as each lands.
 
 ## Testing
 

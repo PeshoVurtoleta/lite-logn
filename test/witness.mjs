@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
 // x is log2(n); y is nsPerOp. Returns { slope, intercept, r2 }. Pure, alloc-
@@ -125,6 +125,35 @@ export const SEGTREE_UPDATE_SLOPE_HI = 5.35;       // median 3.83 * 1.4
 export const SEGTREE_QUERY_SLOPE_LO = 4.30;        // median 7.17 * 0.6
 export const SEGTREE_QUERY_SLOPE_HI = 10.04;       // median 7.17 * 1.4
 
+// --- SkipList (v0.4.0): shared R^2 floor, OWN per-op slope bands + sweeps (D-06) -
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-
+// wide; each op declares its OWN slope band = median-of-N(15) fit-runs * [0.6, 1.4]
+// on this machine. SkipList is the family's first RANDOMIZED, POINTER-BASED member,
+// and its two ops have DIFFERENT honest steady windows -- so, unlike the array
+// members, get and set are gated over DIFFERENT sweeps (the witness already gives
+// each member its own sweep):
+//   - get is a pure search (a ~log2(n) pointer-chasing descent). A search touches
+//     ~log2(n) scattered nodes but NO per-op randomness, so its signal is clean;
+//     it needs a LARGER n range (2^11..2^17) for enough dynamic range above the
+//     timing floor. Measured over 1024 spread targets, cache-warmed by hammering.
+//   - set is the INSERT+DELETE churn (two descents + a random-height splice). The
+//     per-insert tower height is RANDOM (the LCG), which adds per-op variance, so
+//     set is gated over a SMALLER, fully CACHE-RESIDENT window (2^9..2^14) where
+//     the structural level count -- not DRAM latency across a working set that
+//     outgrows cache -- is what the fit sees. (At 2^16 a double-descent insert is
+//     DRAM-bound and the fit flakes; at 2^9 a bare search is too fast to fit -- each
+//     op is measured where its logarithm is visible, not where the cache wall is.)
+// Both slopes are HIGHER than the array-embedded members' (a random slot INDEX per
+// level is less cache-friendly than an arithmetic index) -- expected, which is why
+// only the R^2 floor is shared. Because the member is EXPECTED (not worst-case)
+// O(log n), the harness ALSO prints the MAX single insert over a realistic random
+// build trace -- the unlucky-tower tail a mean hides. Bands = median-of-15 * [0.6,
+// 1.4] (medians recorded inline).
+export const SKIPLIST_GET_SLOPE_LO = 5.27;         // median 8.78 * 0.6
+export const SKIPLIST_GET_SLOPE_HI = 12.30;        // median 8.78 * 1.4
+export const SKIPLIST_SET_SLOPE_LO = 8.36;         // median 13.93 * 0.6
+export const SKIPLIST_SET_SLOPE_HI = 19.50;        // median 13.93 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -147,6 +176,18 @@ const FEN_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // stay on the small O(n^2) sweep.
 const SEG_SWEEP = [10, 11, 12, 13, 14, 15, 16].map((k) => 2 ** k);
 const SEG_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// SkipList's gated sweeps: EXACT powers of two, but a DIFFERENT window per op (each
+// op measured where its logarithm is visible). get needs the larger 2^11..2^17 for
+// dynamic range above the timing floor; set (a heavier double-descent insert with a
+// random-height splice) is pinned to the smaller, fully cache-resident 2^9..2^14 so
+// the fit sees the structural level count, not DRAM latency. Above these windows the
+// working set leaves the steady cache band and the fit flakes (lite-o1 ADR-0004);
+// exact powers keep the expected height (~log2 n) an integer so the staircase maps
+// cleanly onto the log2(n) axis. The O(n) foils (linear scan / sorted-array insert)
+// stay on the small O(n^2) sweep.
+const SL_GET_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const SL_SET_SWEEP = [9, 10, 11, 12, 13, 14].map((k) => 2 ** k);
+const SL_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -419,6 +460,141 @@ function measureSegQueryFoil(n) {
     return elapsed / count;
 }
 
+// --- SkipList measurement (get + set hot ops, their O(n) foils, MAX single-op) -
+// Both ops are hammered like the array-embedded members, but over a spread of
+// RANDOM positions (a skip list chases a random slot INDEX per level, so a single
+// hot path would understate the pointer-chasing cost). The list is built OUTSIDE
+// timing and held at steady size n; the timed window is the op only.
+//   - get: a search for a random RESIDENT key (a full ~log2(n) descent), cycled
+//     over 1024 random targets so many paths are averaged.
+//   - set: the steady-state INSERT+DELETE churn -- insert a fresh key at a random
+//     position then delete it, keeping size n. Both halves are the O(log n)
+//     mutation descent, so the slope reflects the addressable-mutation pair (the
+//     honest destructive-op analogue of BinaryHeap's drain); its foil is the
+//     sorted-array insert, whose O(n) shift leaves the line.
+const SL_ITERS = 200000;   // hammered ops per timed batch
+const SL_BATCH = 25;       // min-over-batches (rejects ambient interference)
+const SL_TARGETS = 1024;   // distinct random targets cycled per batch (pow2 mask)
+
+// A module-level capture for the MAX single insert observed across the set sweep --
+// the honesty hook the randomized member must not hide behind its mean.
+let SKIPLIST_MAX_INSERT_NS = 0;
+
+// get: hammer a search for random resident keys over a dense 0..n-1 list. Return
+// the MIN per-op time over SL_BATCH batches.
+function measureSkipGet(n) {
+    const sl = new SkipList(n, (0x51ED ^ n) >>> 0);
+    for (let i = 0; i < n; i++) sl.set(i, i);
+    const tg = new Float64Array(SL_TARGETS);
+    const rnd = mulberry32(0x33A5 ^ n);
+    for (let i = 0; i < SL_TARGETS; i++) tg[i] = (rnd() * n) | 0;
+    let sink = 0;
+    for (let w = 0; w < SL_ITERS; w++) sink += sl.get(tg[w & (SL_TARGETS - 1)]); // warm
+    let best = Infinity;
+    for (let b = 0; b < SL_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SL_ITERS; i++) sink += sl.get(tg[i & (SL_TARGETS - 1)]);
+        const e = (nowNs() - t0) / SL_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// set: hammer the steady-state INSERT+DELETE churn -- insert a fresh fractional key
+// at a random position, then delete it, over a list held at size n. Return the MIN
+// per-op time over SL_BATCH batches. Also samples the MAX single insert into the
+// module capture -- the unlucky-tower tail an EXPECTED-O(log n) member must disclose.
+function measureSkipSet(n) {
+    const sl = new SkipList(n + 1, (0x71ED ^ n) >>> 0);
+    for (let i = 0; i < n; i++) sl.set(i, i);                    // resident 0..n-1
+    const pk = new Float64Array(SL_TARGETS);
+    const rnd = mulberry32(0x99C3 ^ n);
+    for (let i = 0; i < SL_TARGETS; i++) pk[i] = ((rnd() * n) | 0) + 0.5; // random fractional slot
+    for (let w = 0; w < SL_ITERS; w++) { const k = pk[w & (SL_TARGETS - 1)]; sl.set(k, w); sl.delete(k); } // warm
+    let best = Infinity;
+    for (let b = 0; b < SL_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SL_ITERS; i++) { const k = pk[i & (SL_TARGETS - 1)]; sl.set(k, i); sl.delete(k); }
+        const e = (nowNs() - t0) / SL_ITERS;
+        if (e < best) best = e;
+    }
+    // MAX single insert -- sampled over a REALISTIC randomized BUILD trace (not the
+    // hot fixed churn path): build a fresh list from n keys in RANDOM order, timing
+    // EVERY individual insert, and keep the tallest. This is the genuine unlucky-seed
+    // tail (a random tall tower on a fresh, cache-cold list), the honest worst single
+    // op an EXPECTED-O(log n) member must disclose. It is a DISCLOSURE, not gated.
+    sampleSkipMaxInsert(n);
+    return best;
+}
+
+// Build a list of n keys in RANDOM insertion order, timing each insert, and fold the
+// tallest into the module capture. The random order + fresh list make this the
+// realistic unlucky-tower tail, distinct from the hot fixed-path average-line fit.
+function sampleSkipMaxInsert(n) {
+    const keys = new Float64Array(n);
+    for (let i = 0; i < n; i++) keys[i] = i;
+    const rnd = mulberry32(0xF00D ^ n);
+    for (let i = n - 1; i > 0; i--) {                            // Fisher-Yates shuffle
+        const j = (rnd() * (i + 1)) | 0;
+        const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+    }
+    const sl = new SkipList(n, (0xC0DE ^ n) >>> 0);
+    for (let i = 0; i < n; i++) {
+        const t0 = nowNs();
+        sl.set(keys[i], i);
+        const e = nowNs() - t0;
+        if (e > SKIPLIST_MAX_INSERT_NS) SKIPLIST_MAX_INSERT_NS = e;
+    }
+}
+
+// get FOIL: a naive LINEAR SCAN for the max key over a plain Float64Array = O(n) per
+// search (the default before you know the skip-list trick). Exponential on the
+// log2(n) axis, so a straight-line fit MISSES the R^2 floor. O(n^2) total.
+function measureSkipGetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = i;
+    const target = n - 1;
+    { let idx = -1; for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } } if (idx < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let idx = -1;
+            for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } }
+            sink += idx;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// set FOIL: sorted-array insert -- the O(n) default that keeps keys ordered by
+// shifting on every insert. Search is O(log n) (a sorted array can bisect), but the
+// INSERT shift is O(n), so on the log2(n) axis its per-op cost is exponential and a
+// straight-line fit MISSES the floor. Reuses the same sortedArrayInsert BinaryHeap
+// uses -- the honest ordered-insert foil a SkipList replaces. O(n^2) total.
+function measureSkipSetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const arr = new Float64Array(n + 1);
+    const src = new Float64Array(n);
+    const rnd = mulberry32(0x9E37 ^ n);
+    for (let i = 0; i < n; i++) src[i] = rnd();
+    { let len = 0; for (let i = 0; i < n; i++) len = sortedArrayInsert(arr, len, src[i]); } // warm
+    let elapsed = 0, count = 0;
+    for (let r = 0; r < reps; r++) {
+        let len = 0;
+        const t0 = nowNs();
+        for (let i = 0; i < n; i++) len = sortedArrayInsert(arr, len, src[i]);
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -483,10 +659,34 @@ const MEMBERS = [
         foil: measureSegQueryFoil,
         foilName: 'scan-fold (O(n) per query)',
     },
+    {
+        name: 'SkipList',
+        op: 'get',
+        sweep: SL_GET_SWEEP,
+        foilSweep: SL_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-06 inherits D-08)
+        slopeLo: SKIPLIST_GET_SLOPE_LO,        // own band
+        slopeHi: SKIPLIST_GET_SLOPE_HI,
+        run: measureSkipGet,
+        foil: measureSkipGetFoil,
+        foilName: 'linear scan (O(n) per search)',
+    },
+    {
+        name: 'SkipList',
+        op: 'set',
+        sweep: SL_SET_SWEEP,
+        foilSweep: SL_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-06 inherits D-08)
+        slopeLo: SKIPLIST_SET_SLOPE_LO,        // own band
+        slopeHi: SKIPLIST_SET_SLOPE_HI,
+        run: measureSkipSet,
+        foil: measureSkipSetFoil,
+        foilName: 'sorted-array insert (O(n) shift)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.3.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.4.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -530,6 +730,15 @@ async function main() {
                 '  violation foil R^2=' + ffit.r2.toFixed(4) + ' >= floor ' + m.r2Floor +
                 ' (the O(n) foil must MISS the log floor)\n');
         }
+    }
+    // SkipList honesty print: the MAX single insert observed across the set sweep.
+    // An EXPECTED-O(log n) member must not masquerade as worst-case -- an unlucky
+    // tall tower spikes one op even while the mean holds the fitted line. This is a
+    // DISCLOSURE, not a gate.
+    if (SKIPLIST_MAX_INSERT_NS > 0) {
+        process.stdout.write(
+            'SkipList MAX single insert observed = ' + SKIPLIST_MAX_INSERT_NS.toFixed(0) +
+            ' ns (expected O(log n) -- disclosed, not gated)\n');
     }
     process.stdout.write('WITNESS ' + (ok ? 'ok' : 'FAIL') + '\n');
     if (!ok) process.exitCode = 1;

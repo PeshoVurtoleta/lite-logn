@@ -10,17 +10,19 @@
  *                                   and does the hot path allocate? 0 B/op,
  *                                   maxMajor 0, maxPauseMs <= 2 is the gate.
  *
- * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree. Phase 1
- * (retention) tracks a fresh heap, a fresh Fenwick AND a fresh SegmentTree per
- * churn cycle -- the cleanup closes over NOTHING (the held-value contract), so all
- * three finalize and tracker.size() returns to 0. Phase 2 steps a single
- * out-of-loop heap (push / pop / changeKey / remove), a single out-of-loop Fenwick
- * (update / prefix / at / rangeSum / set / forEach) and a single out-of-loop
- * SegmentTree (update / query / at / forEach) and gates 0 B/op via measureAllocs
- * -- a deliberately-allocating CONTROL lane must report > 0 bytes, proving the
- * instrument has teeth. It then profiles a steady churn window mixing all three
- * members for gc major = 0, and asserts the backing arrayBuffers do not grow
- * across fill/clear cycles for any member.
+ * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
+ * adds SkipList. Phase 1 (retention) tracks a fresh heap, Fenwick, SegmentTree AND
+ * SkipList per churn cycle -- the cleanup closes over NOTHING (the held-value
+ * contract), so all four finalize and tracker.size() returns to 0. Phase 2 steps a
+ * single out-of-loop heap (push / pop / changeKey / remove), Fenwick (update /
+ * prefix / at / rangeSum / set / forEach), SegmentTree (update / query / at /
+ * forEach) and SkipList (get / set / delete / successor / rangeIter) and gates
+ * 0 B/op via measureAllocs -- a deliberately-allocating CONTROL lane must report
+ * > 0 bytes, proving the instrument has teeth. It then profiles a steady churn
+ * window mixing all four members for gc major = 0, asserts the backing arrayBuffers
+ * do not grow across fill/clear cycles for any member, and asserts the SkipList's
+ * private free-list conservation invariant (activeSlots + freeListLength ===
+ * capacity) after every soak cycle.
  * Never widen a budget to make this pass -- a budget that moves is not a gate.
  *
  * ENTRY CONTRACT: --expose-gc is mandatory (the GC gate is meaningless without
@@ -52,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -101,6 +103,15 @@ async function main() {
             seg.query(10, 40);
             seg.at(7);
             tracker.track(seg, noopRelease, 2 * CYCLES + i, { audit: true });
+            // A fresh SkipList per cycle, exercised then dropped. Same held-value
+            // contract: a SkipList owns only its typed arrays + a private NodePool
+            // (no external resource), so the no-op cleanup never defeats finalization.
+            const sl = new SkipList(64, (i & 0xffff) >>> 0);
+            for (let k = 0; k < 32; k++) sl.set((k * 2654435761) & 63, k);
+            sl.get(7);
+            sl.successor(3);
+            sl.delete(5);
+            tracker.track(sl, noopRelease, 3 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -224,6 +235,49 @@ async function main() {
     function segForEachCb(value, index) { sfeAcc = (sfeAcc + value + index) | 0; }
     const stepSegForEach = () => { seg.forEach(segForEachCb); };
 
+    // SkipList: one out-of-loop list prefilled to half capacity (a warmed, stable
+    // tower). Each lane is a real hot op that MUST allocate zero RETAINED bytes --
+    // links are slot INDICES from a private free-list, never heap objects, and the
+    // rangeIter generator's per-step {value, done} objects are TRANSIENT (consumed
+    // and dropped), so retained growth is 0.
+    const HALF = CAP >> 1;              // keys 0..HALF-1 resident; MASK>>1 stays in range
+    const HMASK = HALF - 1;
+    const sl = new SkipList(CAP, 0x9E3779B9);
+    for (let i = 0; i < HALF; i++) sl.set(i, (i * 2654435761) & 0xffff);
+
+    let lk = 0, lacc = 0;
+    // get: a hit on a resident cycling key, folded into an accumulator.
+    const stepSlGet = () => {
+        lacc = (lacc + (sl.get(lk & HMASK) | 0)) | 0;
+        lk = (lk + 1) | 0;
+    };
+    // set: an in-place value update of a resident key (no new node) -- the pure
+    // set hot path, zero allocation.
+    const stepSlSet = () => {
+        sl.set(lk & HMASK, lk & 0xffff);
+        lk = (lk + 1) | 0;
+    };
+    // delete + re-set: addressable delete then re-insert of the SAME key -> steady
+    // size, exercising the private free-list alloc/free (a slot INDEX, no heap object).
+    const stepSlDelete = () => {
+        const key = lk & HMASK;
+        if (sl.delete(key)) sl.set(key, (lk * 2246822519) & 0xffff);
+        lk = (lk + 1) | 0;
+    };
+    // successor: a strictly-greater lookup on a cycling key, folded in.
+    const stepSlSuccessor = () => {
+        const v = sl.successor(lk & HMASK);
+        lacc = (lacc + (v === undefined ? 0 : v | 0)) | 0;
+        lk = (lk + 1) | 0;
+    };
+    // rangeIter: fully consume a small fixed-width window; the generator is
+    // transient (dropped each call), so retained growth is 0.
+    const stepSlRangeIter = () => {
+        const lo = lk & (HMASK >> 1);
+        for (const key of sl.rangeIter(lo, lo + 8)) lacc = (lacc + (key | 0)) | 0;
+        lk = (lk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -239,7 +293,8 @@ async function main() {
     let allocBytes = 0;
     for (const step of [stepPushPop, stepChangeKey, stepRemove, stepRead,
         stepUpdate, stepPrefix, stepAt, stepRangeSum, stepSet,
-        stepSegUpdate, stepSegQuery, stepSegAt]) {
+        stepSegUpdate, stepSegQuery, stepSegAt,
+        stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -247,8 +302,10 @@ async function main() {
     }
     // forEach is O(n) per call (n = CAP = 4096) -- a far heavier body than the
     // O(log n) lanes above, so the two forEach lanes get their own (smaller)
-    // iteration budget. The gate is identical: 0 B/op or the whole verdict fails.
-    for (const step of [stepForEach, stepSegForEach]) {
+    // iteration budget. rangeIter walks a window and drives the generator protocol,
+    // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
+    // verdict fails.
+    for (const step of [stepForEach, stepSegForEach, stepSlRangeIter]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -259,6 +316,7 @@ async function main() {
     if (feAcc === 0x7fffffff) throw new Error('unreachable'); // keep feAcc live
     if (sacc === 0x7fffffff) throw new Error('unreachable'); // keep sacc live
     if (sfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep sfeAcc live
+    if (lacc === 0x7fffffff) throw new Error('unreachable'); // keep lacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -289,6 +347,13 @@ async function main() {
         seg.update(i & MASK, i & 0xffff);
         { const lo = i & (MASK >> 1); sink = (sink + (seg.query(lo, lo + 100) | 0)) | 0; }
         if ((i & 7) === 0) sink = (sink + (seg.at(i & MASK) | 0)) | 0;
+        // SkipList churn every op: an in-place value set and a get, plus a
+        // delete+re-set every 64th (pool alloc/free) and a successor every 8th.
+        // Steady tower, zero alloc.
+        sl.set(i & HMASK, i & 0xffff);
+        sink = (sink + (sl.get(i & HMASK) | 0)) | 0;
+        if ((i & 7) === 0) { const v = sl.successor(i & HMASK); sink = (sink + (v === undefined ? 0 : v | 0)) | 0; }
+        if ((i & 63) === 0) { const key = i & HMASK; if (sl.delete(key)) sl.set(key, i & 0xffff); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -305,10 +370,14 @@ async function main() {
     const abHeap = new BinaryHeap(1024, 'min');
     const abFen = new Fenwick(1024);
     const abSeg = new SegmentTree(1024, 'sum');
+    const abSl = new SkipList(1024, 0x1234);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
     const abBefore = process.memoryUsage().arrayBuffers;
+    // Conservation invariant: the SkipList's private free-list must balance
+    // (activeSlots + freeListLength === capacity) after EVERY fill/clear soak cycle.
+    let conservationOk = true;
     for (let r = 0; r < 2000; r++) {
         for (let i = 0; i < 1024; i++) abHeap.push(i, (i * 2654435761) & 0xffff);
         abHeap.clear();
@@ -316,6 +385,19 @@ async function main() {
         abFen.clear();
         for (let i = 0; i < 1024; i++) abSeg.update(i, (i * 2654435761) & 0xffff);
         abSeg.clear();
+        for (let i = 0; i < 1024; i++) abSl.set((i * 2654435761) & 1023, i);
+        if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
+        // Exercise the free() path directly: a fill-then-bulk-clear cycle alone
+        // NEVER calls NodePool.free() (clear() resets the pool in one shot instead),
+        // so a broken free() (e.g. a dropped activeSlots decrement) would sail
+        // through this check untested. Half the slots go through a real
+        // delete() -> free() -> set() -> alloc() round trip every soak cycle.
+        for (let i = 0; i < 512; i++) abSl.delete((i * 2654435761) & 1023);
+        if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abSl.set((i * 2654435761) & 1023, i);
+        if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
+        abSl.clear();
+        if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -324,7 +406,7 @@ async function main() {
 
     // ---- verdict + GATE line ----------------------------------------------
     const ok = report.ok && live === 0 && leaks.length === 0 &&
-        findings.length === 0 && allocOk && controlOk && abOk;
+        findings.length === 0 && allocOk && controlOk && abOk && conservationOk;
 
     console.log(
         'GATE leak=size ' + live + '/0 findings=' + findings.length +
@@ -333,8 +415,8 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree; control=' + controlBytes + ' B/op sink=' + sink +
-        ' abGrowth=' + abDelta + ')');
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList; control=' + controlBytes + ' B/op sink=' + sink +
+        ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {
         for (const v of report.violations) {
@@ -345,6 +427,7 @@ async function main() {
         if (!allocOk) console.error('  alloc ' + allocBytes + ' B/op on a hot lane (expected 0)');
         if (!controlOk) console.error('  control lane read ' + controlBytes + ' B/op (expected > 0 -- instrument is blind)');
         if (!abOk) console.error('  arrayBuffers growth ' + abDelta + ' (expected <= 0)');
+        if (!conservationOk) console.error('  SkipList conservation invariant broke (activeSlots + freeListLength !== capacity)');
         process.exitCode = 1;
     }
 }

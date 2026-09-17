@@ -12,15 +12,19 @@
  * the lowest-set-bit walk (`i & -i`). v0.3.0 adds the THIRD member: SegmentTree,
  * a flat `Float64Array(2n)` (leaves at n..2n-1) whose range-query AND point-update
  * are BOTH O(log n) via iterative bottom-up walks, with the associative fold
- * (min / max / sum / gcd) chosen ONCE at construction. Members land append-only,
- * leaving this header and the `VERSION` const the only prior lines that ever
- * change. Roster: BinaryHeap (v0.1.0, array-embedded O(log n) push / pop min|max
- * heap), Fenwick / BIT (v0.2.0, O(log n) point-update AND prefix-sum via the
- * `i & -i` walk), SegmentTree (v0.3.0, O(log n) associative range-query +
- * point-update over a flat 2n array, fold chosen at construction), and
- * SkipList (planned, pointer-free expected-O(log n) ordered map). Members are
- * independent (no shared mutable module state), so a bundler that imports one
- * drops the others (`sideEffects: false`).
+ * (min / max / sum / gcd) chosen ONCE at construction. v0.4.0 adds the FOURTH
+ * member: SkipList, a pointer-free ordered map (get / set / delete / successor /
+ * predecessor / rangeIter) whose links are slot INDICES in flat `Uint32Array`
+ * columns over a private free-list (NodePool), giving EXPECTED O(log n) with zero
+ * per-op allocation and a deterministic instance-local PRNG. Members land
+ * append-only, leaving this header and the `VERSION` const the only prior lines
+ * that ever change. Roster: BinaryHeap (v0.1.0, array-embedded O(log n) push / pop
+ * min|max heap), Fenwick / BIT (v0.2.0, O(log n) point-update AND prefix-sum via
+ * the `i & -i` walk), SegmentTree (v0.3.0, O(log n) associative range-query +
+ * point-update over a flat 2n array, fold chosen at construction), and SkipList
+ * (v0.4.0, pointer-free expected-O(log n) ordered map over a private free-list
+ * node pool). Members are independent (no shared mutable module state), so a
+ * bundler that imports one drops the others (`sideEffects: false`).
  *
  * The family delta: lite-o1 proves a FLAT ops/ms line on a log-x axis (the
  * constant, slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one
@@ -35,13 +39,13 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
 // Fenwick     (v0.2.0 session) -- O(log n) point-update + prefix-sum  (BELOW)
 // SegmentTree (v0.3.0 session) -- O(log n) associative range-query + point-update  (BELOW)
-// SkipList    (v0.4.0)         -- pointer-free expected-O(log n) ordered map
+// SkipList    (v0.4.0 session) -- pointer-free expected-O(log n) ordered map  (BELOW)
 
 /** Max heap capacity: slot indices 0..cap-1 must fit the Int32Array _pos map. */
 const BH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
@@ -930,5 +934,479 @@ export class SegmentTree {
     _badGcdValue(value) {
         throw new RangeError(
             '[lite-logn] SegmentTree gcd value must be a nonnegative integer, got ' + String(value));
+    }
+}
+
+/**
+ * Advance a 32-bit Numerical-Recipes LCG one step: `s' = (s*1664525 + 1013904223)
+ * mod 2^32`, kept as a SIGNED int32. The repo's single PRNG -- deterministic,
+ * instance-local, no Math.random, no module state, no new generator. Two integer
+ * disciplines keep it zero-alloc:
+ *   - `Math.imul` does the multiply as a 32-bit integer op (the low 32 bits of the
+ *     product), so no large intermediate double is ever formed (`s * 1664525` would
+ *     reach ~7.1e15); and
+ *   - the result is folded with `| 0` (a SIGNED int32), NOT `>>> 0`: a `>>> 0`
+ *     Uint32 exceeds the Smi range (2^31) about half the time and would box as a
+ *     transient HeapNumber every step (the perf-gate scavenge counter catches it),
+ *     whereas an `| 0` signed int32 always stays an unboxed Smi.
+ * The 32-BIT WORD is identical either way, so the sequence is unchanged: `Math.imul`
+ * gives the same low 32 bits as the plain multiply, and mod-2^32 addition is
+ * sign-agnostic. SkipList draws a node level from the HIGH bits via `Math.clz32`,
+ * which does ToUint32 internally -- so the signed int32 and its Uint32 twin yield
+ * the IDENTICAL level. The LOW bits of any power-of-two-modulus LCG are periodic
+ * (here the lowest bit strictly alternates, since a is odd and c is odd), so
+ * counting halvings from the low end would be non-random -- the high bits are the
+ * well-mixed ones.
+ * @param {number} s current state, a signed 32-bit integer
+ * @returns {number} the next state, a signed 32-bit integer (same 32-bit word)
+ */
+function _lcgNext(s) {
+    return (Math.imul(s, 1664525) + 1013904223) | 0;
+}
+
+/** SkipList tower-height ceiling: at most this many parallel `_next` columns. */
+const SL_MAXLEVEL = 32;
+
+/**
+ * Column count actually allocated for a `capacity`-slot SkipList: `ceil(log2 cap)`
+ * plus one column of headroom for the geometric tail, clamped to SL_MAXLEVEL.
+ * Fixed at construction so `_next` NEVER reallocates -- the memory risk (a full
+ * cap * 32 column set) is avoided by sizing to the capacity's real need, and level
+ * generation clamps to it, so there is no lazy grow to threaten the 0-B/op gate
+ * (decisions/0006-skiplist.md). The clamp only ever bites the extreme geometric
+ * tail (probability ~ 2^-log2(cap)), which cannot change ordering or membership --
+ * a node merely stops gaining express lanes above the ceiling.
+ * @param {number} capacity data-slot count
+ * @returns {number} column count in [1, SL_MAXLEVEL]
+ */
+function _levelCap(capacity) {
+    let l = 1;
+    while ((1 << l) < capacity && l < SL_MAXLEVEL) l++;
+    l += 1; // one column of headroom above ceil(log2 cap)
+    return l > SL_MAXLEVEL ? SL_MAXLEVEL : l;
+}
+
+/** SkipList default PRNG seed when the caller does not supply one. */
+const SL_DEFAULT_SEED = 0x9E3779B9;
+
+/**
+ * A private, pointer-free slot allocator: a free-list (a LIFO free-stack over a
+ * `Uint32Array`) that hands out a slot INDEX in [1, capacity] rather than a heap
+ * object, so nothing is collected per insert. `NIL = 0`; slot 0 is RESERVED (the
+ * SkipList head sentinel) and is never allocatable. `alloc()` returns 0 when the
+ * pool is exhausted so the caller can fail closed. The conservation invariant
+ * `activeSlots + freeListLength === capacity` holds after every operation.
+ *
+ * D-01 bind (decisions/0006-skiplist.md): this is DESIGN-PARITY with
+ * `@zakkster/lite-o1`'s private pools (FreqO1 / BucketQueue / TimerWheel) and its
+ * deferred `SlotPool` -- the identical free-list contract (allocate an index,
+ * `NIL = 0`, slot 0 reserved) and the same conservation invariant -- NOT shared
+ * code. A runtime dependency on lite-o1 was REJECTED: the suite's zero-runtime-deps
+ * law forbids it, and lite-o1's `SlotPool` was never made public. Shaped so a later
+ * pointer member (Treap) can reuse it, without over-engineering it now.
+ */
+class NodePool {
+    /** @param {number} capacity allocatable data-slot count (excludes slot 0). */
+    constructor(capacity) {
+        this._cap = capacity;
+        this._free = new Uint32Array(capacity);      // free-stack of slot indices
+        this._freeLen = capacity;
+        for (let i = 0; i < capacity; i++) this._free[i] = capacity - i; // top = slot 1
+        this._active = 0;
+    }
+
+    /** Allocatable data-slot count (excludes the reserved slot 0). O(1). */
+    get capacity() { return this._cap; }
+    /** Slots currently handed out and not yet freed. O(1). */
+    get activeSlots() { return this._active; }
+    /** Slots currently on the free-stack. O(1). */
+    get freeListLength() { return this._freeLen; }
+
+    /**
+     * Hand out a free slot INDEX in [1, capacity], or 0 (NIL) if exhausted. O(1),
+     * zero allocation.
+     * @returns {number}
+     */
+    alloc() {
+        const n = this._freeLen;
+        if (n === 0) return 0;                       // NIL: exhausted -> caller fails closed
+        const slot = this._free[n - 1];
+        this._freeLen = n - 1;
+        this._active++;
+        return slot;
+    }
+
+    /**
+     * Return a slot INDEX to the free-stack. O(1), zero allocation. The caller owns
+     * correctness: a slot must be live and freed at most once (the SkipList only
+     * frees a node it just unlinked).
+     * @param {number} slot a slot previously returned by alloc()
+     */
+    free(slot) {
+        const n = this._freeLen;
+        this._free[n] = slot;
+        this._freeLen = n + 1;
+        this._active--;
+    }
+
+    /** Reset to all-free (O(capacity) cold path), restoring the conservation invariant. */
+    clear() {
+        const cap = this._cap, free = this._free;
+        for (let i = 0; i < cap; i++) free[i] = cap - i;
+        this._freeLen = cap;
+        this._active = 0;
+    }
+}
+
+/**
+ * Max SkipList capacity: `0x03FFFFFF` (2^26 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns, so an index must fit an unsigned
+ * 32-bit word; `NIL = 0` reserves slot 0 as the head sentinel, so live slots run
+ * [1, capacity]. The backing `_next` is a SINGLE flat `Uint32Array` of
+ * `columns * (capacity + 1)` cells, stride-indexed `lvl*(capacity + 1) + slot`; the
+ * 2^26 ceiling keeps `columns * (capacity + 1)` an addressable typed-array length
+ * (at most ~27 columns for the largest capacity) and every stride offset an exact
+ * integer. The index arithmetic (Uint32 slot indices + `NIL = 0` + the MAXLEVEL
+ * column width), not the byte count, is the hard ceiling -- the same "the
+ * arithmetic caps it" reasoning as the array-embedded members, one column-set wider.
+ */
+const SL_MAX_CAPACITY = 0x03FFFFFF; // 2^26 - 1
+
+/**
+ * A SKIP LIST: a pointer-free ordered map (key -> value) whose get / set / delete /
+ * successor / predecessor are EXPECTED O(log n) via a probabilistic tower of
+ * forward links -- the family's first randomized member and its first pointer-based
+ * one. Where BinaryHeap / Fenwick / SegmentTree embed a FIXED-shape tree in index
+ * arithmetic, a skip list's shape is random, so it needs real per-node links; the
+ * trick that keeps it zero-GC is storing those links as slot INDICES in flat
+ * `Uint32Array` columns over a private free-list (NodePool), never as heap objects.
+ *
+ * Storage (allocated once, sized to capacity):
+ *   - `_key` / `_val` `Float64Array(capacity + 1)` -- key and value at each slot.
+ *   - `_next` a SINGLE flat `Uint32Array(columns * (capacity + 1))`, stride-indexed
+ *     `lvl*(capacity + 1) + slot`: the forward link of `slot` at level `lvl`, or
+ *     `NIL = 0` for end-of-list. Slot 0 is the HEAD sentinel (its links are the
+ *     first node at each level); no real node's link ever points AT the head, so a
+ *     link value of 0 unambiguously means NIL.
+ *   - `_pool` NodePool -- the free-list handing out slot indices [1, capacity].
+ *   - `_update` `Uint32Array(columns)` -- reused predecessor scratch for the ONE
+ *     structural descent (`_find`); preallocated so set / delete allocate nothing.
+ *
+ * Level generation is one LCG step (the repo's NR generator) whose HIGH bits pick a
+ * geometric height: `level = 1 + clz32(word)`, clamped to the allocated column
+ * count (the low bits of a power-of-two LCG are periodic -- see `_lcgNext`). The
+ * seed is instance-local, so a fixed seed replays an IDENTICAL structure and a
+ * different seed diverges -- deterministic, never Math.random.
+ *
+ * Honesty (randomized member): a hot op is EXPECTED O(log n), not worst-case. An
+ * unlucky seed can build a tall thin tower and spike a single op; the witness prints
+ * that MAX single-op alongside the fitted line so the expectation never masquerades
+ * as a worst-case guarantee (decisions/0006-skiplist.md).
+ *
+ * Keys are FINITE numbers (typeof-guarded BEFORE coercion -- Symbol / BigInt / NaN /
+ * +-Infinity fail closed with a `[lite-logn]` throw); values are Float64 (zero-GC).
+ * `set` on an EXISTING key updates its value in place (no new node). An empty or
+ * missing query returns `undefined` (never throws). Fixed capacity: a full pool
+ * throws, never silently drops. `rangeIter` is a VERSION-STAMPED iterator -- any
+ * structural mutation mid-iteration throws `[lite-logn]` rather than yield garbage.
+ */
+export class SkipList {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^26-1].
+     * @param {number} [seed]    PRNG seed; unsigned 32-bit integer (default fixed).
+     */
+    constructor(capacity, seed) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > SL_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] SkipList capacity must be an integer in [1, 2^26-1], got ' +
+                String(capacity));
+        }
+        let s;
+        if (seed === undefined) {
+            s = SL_DEFAULT_SEED;
+        } else if (typeof seed !== 'number' || !Number.isInteger(seed) ||
+            seed < 0 || seed > 0xFFFFFFFF) {
+            throw new RangeError(
+                '[lite-logn] SkipList seed must be an unsigned 32-bit integer, got ' +
+                String(seed));
+        } else {
+            s = seed >>> 0;
+        }
+        s = s | 0; // store the LCG state as a SIGNED int32 (an unboxed Smi) -- see _lcgNext
+        const cols = _levelCap(capacity);
+        this._cap = capacity;                        // max live entries
+        this._stride = capacity + 1;                 // slots 0..capacity (0 = head)
+        this._maxLevel = cols;                       // allocated column count
+        this._key = new Float64Array(capacity + 1);  // key at each slot
+        this._val = new Float64Array(capacity + 1);  // value at each slot
+        this._next = new Uint32Array(cols * (capacity + 1)); // links; all NIL (0)
+        this._update = new Uint32Array(cols);        // reused predecessor scratch
+        this._pool = new NodePool(capacity);         // free-list over slots [1, capacity]
+        this._level = 1;                             // current live tower height
+        this._size = 0;                              // live entries
+        this._version = 0;                           // iterator invalidation stamp
+        this._seed0 = s;                             // initial seed (clear resets to it)
+        this._seed = s;                              // live LCG state
+    }
+
+    /** Live entry count. O(1). */
+    get size() { return this._size; }
+
+    /** The fixed capacity this list was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /**
+     * The value stored under `key`, or `undefined` if absent (never throws on a
+     * missing / empty query). EXPECTED O(log n): a top-down descent that at each
+     * level advances while the next key is strictly less than `key`. Fails closed:
+     * a non-number / non-finite key (typeof-guarded first) throws `[lite-logn]`.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    get(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const next = this._next, K = this._key, stride = this._stride;
+        let slot = 0; // head
+        for (let lvl = this._level - 1; lvl >= 0; lvl--) {
+            const base = lvl * stride;
+            let nx = next[base + slot];
+            while (nx !== 0 && K[nx] < key) { slot = nx; nx = next[base + slot]; }
+        }
+        const cand = next[slot]; // level-0 next (base 0)
+        return (cand !== 0 && K[cand] === key) ? this._val[cand] : undefined;
+    }
+
+    /**
+     * Insert `key -> value`, or UPDATE the value in place if `key` already exists
+     * (no new node). EXPECTED O(log n). Fails closed: a non-finite key or value
+     * (typeof-guarded first), or a full pool, each throw `[lite-logn]` as a no-op.
+     * @param {number} key    a finite number
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(key, value) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        const cand = this._find(key); // fills _update with per-level predecessors
+        const K = this._key;
+        if (cand !== 0 && K[cand] === key) { // existing key: update value in place
+            this._val[cand] = value;
+            this._version = (this._version + 1) | 0;
+            return this;
+        }
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        // One LCG step; HIGH bits pick a geometric height, clamped to the columns.
+        const word = this._seed = _lcgNext(this._seed);
+        let nl = 1 + Math.clz32(word);
+        if (nl > this._maxLevel) nl = this._maxLevel;
+        const upd = this._update, next = this._next, stride = this._stride;
+        if (nl > this._level) {
+            for (let lvl = this._level; lvl < nl; lvl++) upd[lvl] = 0; // head is predecessor
+            this._level = nl;
+        }
+        K[slot] = key;
+        this._val[slot] = value;
+        for (let lvl = 0; lvl < nl; lvl++) {
+            const base = lvl * stride;
+            const p = upd[lvl];
+            next[base + slot] = next[base + p]; // splice slot after predecessor p
+            next[base + p] = slot;
+        }
+        this._size++;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove `key`. EXPECTED O(log n). Idempotent: returns `false` if `key` is
+     * absent (no throw), `true` if it was present and removed. Fails closed on a
+     * non-finite key (typeof-guarded first) with a `[lite-logn]` throw.
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    delete(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const cand = this._find(key); // fills _update
+        const K = this._key;
+        if (cand === 0 || K[cand] !== key) return false; // absent (no throw)
+        const next = this._next, stride = this._stride, upd = this._update;
+        for (let lvl = 0; lvl < this._level; lvl++) {
+            const base = lvl * stride;
+            const p = upd[lvl];
+            if (next[base + p] === cand) next[base + p] = next[base + cand];
+        }
+        // Shrink the live height while the top levels are empty (head link == NIL).
+        let lv = this._level;
+        while (lv > 1 && next[(lv - 1) * stride] === 0) lv--;
+        this._level = lv;
+        this._pool.free(cand);
+        this._size--;
+        this._version = (this._version + 1) | 0;
+        return true;
+    }
+
+    /**
+     * The smallest key STRICTLY greater than `key`, or `undefined` if none. EXPECTED
+     * O(log n). `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    successor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const next = this._next, K = this._key, stride = this._stride;
+        let slot = 0;
+        for (let lvl = this._level - 1; lvl >= 0; lvl--) {
+            const base = lvl * stride;
+            let nx = next[base + slot];
+            while (nx !== 0 && K[nx] <= key) { slot = nx; nx = next[base + slot]; }
+        }
+        const cand = next[slot];
+        return cand !== 0 ? K[cand] : undefined;
+    }
+
+    /**
+     * The largest key STRICTLY less than `key`, or `undefined` if none. EXPECTED
+     * O(log n). `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    predecessor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const next = this._next, K = this._key, stride = this._stride;
+        let slot = 0;
+        for (let lvl = this._level - 1; lvl >= 0; lvl--) {
+            const base = lvl * stride;
+            let nx = next[base + slot];
+            while (nx !== 0 && K[nx] < key) { slot = nx; nx = next[base + slot]; }
+        }
+        return slot !== 0 ? K[slot] : undefined; // slot = largest key < key, or head
+    }
+
+    /**
+     * A VERSION-STAMPED iterator over the keys in `[lo, hi]` INCLUSIVE, in ascending
+     * order. Bounds may be any number INCLUDING +-Infinity (an unbounded end);
+     * `NaN` (unordered) fails closed, as does `lo > hi`. The generator captures the
+     * list's version and throws `[lite-logn]` if any STRUCTURAL mutation (set of a
+     * new key, delete, clear -- or any value update) happens mid-iteration, rather
+     * than yield stale / recycled data. The one documented per-protocol allocator
+     * (a {value, done} per step); the loop body itself allocates nothing.
+     * @param {number} lo  lower bound (inclusive); may be -Infinity
+     * @param {number} hi  upper bound (inclusive); may be +Infinity
+     * @returns {IterableIterator<number>} the keys in [lo, hi], ascending
+     */
+    rangeIter(lo, hi) {
+        if (typeof lo !== 'number' || Number.isNaN(lo)) return this._badBound(lo);
+        if (typeof hi !== 'number' || Number.isNaN(hi)) return this._badBound(hi);
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._rangeGen(lo, hi);
+    }
+
+    /** @private version-stamped range generator (see rangeIter). */
+    *_rangeGen(lo, hi) {
+        const ver = this._version;
+        const next = this._next, K = this._key, stride = this._stride;
+        let slot = 0;
+        for (let lvl = this._level - 1; lvl >= 0; lvl--) {
+            const base = lvl * stride;
+            let nx = next[base + slot];
+            while (nx !== 0 && K[nx] < lo) { slot = nx; nx = next[base + slot]; }
+        }
+        slot = next[slot]; // first slot with key >= lo
+        while (slot !== 0 && K[slot] <= hi) {
+            if (this._version !== ver) {
+                throw new Error('[lite-logn] SkipList mutated during iteration');
+            }
+            yield K[slot];
+            slot = next[slot]; // level-0 next (base 0)
+        }
+    }
+
+    /**
+     * Visit every live `(key, value)` pair in ASCENDING key order. O(n) cold scan,
+     * allocation-free in the loop body (pass a hoisted callback). Unlike rangeIter
+     * this is NOT version-stamped -- mutating from within the callback is the
+     * caller's responsibility (matching the other members' forEach).
+     * @param {(key:number, value:number, list:SkipList)=>void} fn
+     */
+    forEach(fn) {
+        const next = this._next, K = this._key, V = this._val;
+        let slot = next[0]; // level-0 first (base 0, head)
+        while (slot !== 0) {
+            fn(K[slot], V[slot], this);
+            slot = next[slot];
+        }
+    }
+
+    /**
+     * Empty the list, keeping the fixed capacity. O(capacity) cold path: returns
+     * every node to the pool, points the head's links at NIL, resets the live
+     * height, and restores the PRNG to its initial seed (a cleared list replays a
+     * fresh one). @returns {this}
+     */
+    clear() {
+        this._pool.clear();
+        const next = this._next, stride = this._stride, cols = this._maxLevel;
+        for (let lvl = 0; lvl < cols; lvl++) next[lvl * stride] = 0; // head links -> NIL
+        this._level = 1;
+        this._size = 0;
+        this._seed = this._seed0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    // ---- private structural descent (hot body) -----------------------------
+
+    /**
+     * The ONE structural descent (set / delete): walk top-down, at each level
+     * advancing while the next key is strictly less than `key`, recording the
+     * predecessor per level in the reused `_update` scratch. Returns the level-0
+     * candidate (first slot with key >= `key`, or NIL). Zero allocation.
+     * @private
+     */
+    _find(key) {
+        const next = this._next, K = this._key, stride = this._stride, upd = this._update;
+        let slot = 0; // head
+        for (let lvl = this._level - 1; lvl >= 0; lvl--) {
+            const base = lvl * stride;
+            let nx = next[base + slot];
+            while (nx !== 0 && K[nx] < key) { slot = nx; nx = next[base + slot]; }
+            upd[lvl] = slot;
+        }
+        return next[slot]; // level-0 next (base 0)
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] SkipList key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] SkipList value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badBound(b) {
+        throw new TypeError(
+            '[lite-logn] SkipList rangeIter bound must be a number (not NaN), got ' + String(b));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] SkipList rangeIter needs lo <= hi, got lo=' + String(lo) +
+            ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] SkipList full (capacity ' + this._cap + ')');
     }
 }

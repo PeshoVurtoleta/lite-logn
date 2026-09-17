@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.3.0
+Version: 0.4.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -18,8 +18,8 @@ It is the O(log n) sibling of @zakkster/lite-o1: lite-o1 holds the constant (a
 FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
-v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree. The
-roster (one member per session, each landing append-only):
+v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
+adds SkipList. The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -38,9 +38,15 @@ roster (one member per session, each landing append-only):
   construction (ctor-cached small-int `_k` combined by an inline switch). The
   complement to Fenwick: Fenwick's rangeSum needs an INVERSE (subtraction), so it
   is sum-only; SegmentTree folds any associative + commutative op over a range.
-- SkipList (v0.4.0) -- the ordered map (get / set / delete / successor /
-  rangeIter), pointer-free over a shared node pool (parallel Uint32Array `next`
-  columns), expected O(log n), deterministic seed, tail reported.
+- SkipList (v0.4.0) -- a pointer-free ordered map (key -> value): get / set /
+  delete / successor / predecessor / rangeIter, EXPECTED O(log n) via a
+  probabilistic tower of forward links stored as slot INDICES in flat Uint32Array
+  columns (`NIL = 0`, slot 0 the head sentinel) over a PRIVATE free-list (NodePool,
+  design-parity with lite-o1's private pools, NOT a runtime dep). Level generation
+  is one NR-LCG step, HIGH bits -> geometric height (`1 + clz32`), instance-local
+  seed, deterministic. set updates an existing key's value in place. EXPECTED (not
+  worst-case) O(log n): the witness fits the average line AND prints the MAX single
+  insert. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -111,6 +117,29 @@ roster (one member per session, each landing append-only):
     (seed leaves, then fold each internal node once deepest-first -- NOT n
     incremental updates); fails closed on a non-array-like, any non-finite value,
     or (gcd) any negative / non-integer.
+
+- `SkipList` -- class. A pointer-free ordered map (key -> value) whose get / set /
+  delete / successor / predecessor are EXPECTED O(log n) via a probabilistic tower
+  of forward links stored as slot INDICES in a single flat `Uint32Array` of
+  `columns * (capacity + 1)` cells (`NIL = 0`, slot 0 the head sentinel) over a
+  PRIVATE free-list (NodePool) -- no heap object per op. Keys are finite numbers
+  (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed);
+  values are finite numbers. EXPECTED, not worst-case (an unlucky seed can spike one
+  op; the witness prints the MAX single insert).
+  - `new SkipList(capacity, seed?)` -- capacity an integer in [1, 2^26-1] (slot
+    indices are Uint32, `NIL = 0` reserves slot 0); seed an unsigned 32-bit integer
+    (default fixed). Level columns sized to ceil(log2 cap)+1 up front (never grown).
+  - `get(key)` -> value | undefined. Absent -> undefined (no throw).
+  - `set(key, value)` -> this. Insert, or update the value in place if key exists
+    (no new node). Non-finite key/value throws; a full pool throws.
+  - `delete(key)` -> boolean. Idempotent: false if absent, true if removed.
+  - `successor(key)` -> key | undefined. Smallest key STRICTLY greater than key.
+  - `predecessor(key)` -> key | undefined. Largest key STRICTLY less than key.
+  - `rangeIter(lo, hi)` -> iterator of keys in [lo, hi] INCLUSIVE, ascending;
+    VERSION-STAMPED (mutation mid-iteration throws). Bounds may be +-Infinity;
+    NaN or lo > hi throws.
+  - `size` / `capacity` getters; `clear()` -> this (empty, keep capacity, reset the
+    PRNG to its initial seed); `forEach(fn)` visits (key, value, list) ascending.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

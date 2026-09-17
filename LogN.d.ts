@@ -130,3 +130,44 @@ export class SegmentTree {
     /** O(n) bottom-up bulk build from a finite-number array-like and a fold kind. */
     static build(values: ArrayLike<number>, kind: 'min' | 'max' | 'sum' | 'gcd'): SegmentTree;
 }
+
+/**
+ * A skip list: a pointer-free ordered map (key -> value) whose get / set / delete /
+ * successor / predecessor are EXPECTED O(log n) via a probabilistic tower of forward
+ * links stored as slot INDICES in flat Uint32Array columns over a private free-list
+ * (no heap objects per op). Keys are finite numbers (typeof-guarded before coercion;
+ * Symbol / BigInt / NaN / +-Infinity fail closed); values are finite numbers. set on
+ * an existing key updates the value in place. An unsupplied seed defaults to a fixed
+ * constant; a fixed seed replays an identical structure. Fixed capacity: a full pool
+ * throws. Every hot op allocates zero bytes.
+ */
+export class SkipList {
+    /** @param capacity exact max live entries; integer in [1, 2^26-1].
+     *  @param seed PRNG seed; unsigned 32-bit integer (default fixed). */
+    constructor(capacity: number, seed?: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this list was sized for. */
+    readonly capacity: number;
+
+    /** The value under key, or undefined if absent (no throw). Non-finite key throws. */
+    get(key: number): number | undefined;
+    /** Insert key -> value, or update the value in place if key exists. Non-finite
+     *  key/value throws; a full pool throws. */
+    set(key: number, value: number): this;
+    /** Remove key; true if it was present, false if absent (idempotent). Non-finite key throws. */
+    delete(key: number): boolean;
+    /** The smallest key strictly greater than key, or undefined. Non-finite key throws. */
+    successor(key: number): number | undefined;
+    /** The largest key strictly less than key, or undefined. Non-finite key throws. */
+    predecessor(key: number): number | undefined;
+    /** A version-stamped iterator over keys in [lo, hi] inclusive, ascending. Bounds
+     *  may be +-Infinity (unbounded ends); NaN or lo > hi throws; mutation during
+     *  iteration throws. */
+    rangeIter(lo: number, hi: number): IterableIterator<number>;
+    /** Visit every (key, value) pair in ascending key order. */
+    forEach(fn: (key: number, value: number, list: SkipList) => void): void;
+    /** Empty the list, keeping capacity (resets the PRNG to its initial seed). */
+    clear(): this;
+}

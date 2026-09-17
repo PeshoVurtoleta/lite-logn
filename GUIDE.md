@@ -1,11 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.3.0 three members have
-shipped -- BinaryHeap, Fenwick and SegmentTree -- so this guide carries their
-per-member sections; SkipList is still a skeleton row that fills in per release.
-It is NOT an API encyclopedia (that is the README + `LogN.d.ts`); it answers
-"which member, and is my logarithm real?"
+avoid, and how to measure the logarithm yourself. At v0.4.0 four members have
+shipped -- BinaryHeap, Fenwick, SegmentTree and SkipList -- so this guide carries
+their per-member sections. It is NOT an API encyclopedia (that is the README +
+`LogN.d.ts`); it answers "which member, and is my logarithm real?"
 
 Scope discipline (mirrors lite-o1's GUIDE): a decision flowchart + a picker
 table up top, then reach-for / avoid + measure-it per member. No re-documenting
@@ -61,8 +60,8 @@ START -- what do you need?
 | Ordered map / successor / range iterate | SkipList | expected O(log n) | 0.4.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
-each member release (BinaryHeap's section is pending; Fenwick's and SegmentTree's
-are below).
+each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's
+and SkipList's are below).
 
 ---
 
@@ -143,6 +142,49 @@ band, and exact powers keep the range decomposition a regular node count. Both
 O(n) foils -- a whole-tree rebuild per update, a scan-fold per query -- must MISS
 the floor. If your workload's fit leaves the line, your `n` is above the steady
 cache band or your access pattern is memory-bound.
+
+---
+
+## SkipList -- an ordered map with successor / predecessor / range iteration
+
+**Reach for it when** you need a KEY-ADDRESSED ordered collection: get / set /
+delete by an arbitrary numeric key, PLUS ordered queries the array-embedded members
+cannot give -- `successor(k)` (next key up), `predecessor(k)` (next key down), and
+`rangeIter(lo, hi)` (every key in a window, in order). Canonical uses: a sorted
+index that keeps changing, "the next event at or after time t", nearest-key lookups,
+an ordered set / map where you also iterate in order. Keys are arbitrary finite
+numbers (not dense indices), which is exactly what Fenwick / SegmentTree cannot do
+-- they are indexed by position in `[0, length)`. Deterministic from an
+instance-local seed, so a fixed seed replays an identical structure.
+
+**Avoid it when:**
+
+- You only need MIN / MAX with insert (a priority queue), not key-addressed lookup
+  or ordered iteration. **BinaryHeap** (v0.1.0) is leaner and worst-case O(log n);
+  a skip list is expected O(log n) and carries per-node link columns it does not
+  need.
+- Your keys are dense integer INDICES in `[0, length)` and you want prefix sums or
+  range folds. Use **Fenwick** (v0.2.0) or **SegmentTree** (v0.3.0) -- indexed, flat,
+  worst-case O(log n), no pointer columns.
+- You need a WORST-CASE bound. A skip list is EXPECTED O(log n): an unlucky seed can
+  build a tall thin tower and spike a single op (the witness prints that MAX single
+  insert). If a hard worst-case matters, reach for a balanced BST member (a later
+  tier) instead.
+- Your keys are bounded small integers and you want O(1). That is `@zakkster/lite-o1`
+  territory (SparseSet / a bucketed structure), not an O(log n) ordered map.
+
+**Measure it yourself:** `npm run witness` fits `get` and `set` against
+`nsPerOp = intercept + slope*log2(n)`. Both must clear the shared R^2 floor (0.958)
+and sit inside their own slope bands (`get [5.27, 12.30]`, `set [8.36, 19.50]`
+ns/level -- steeper than the array members because a skip list chases a random slot
+INDEX per level, not an arithmetic one; see
+[`decisions/0006-skiplist.md`](./decisions/0006-skiplist.md)). The two ops are gated
+over DIFFERENT sweeps -- `get` (a clean search) over `[2^11, 2^17]` for dynamic
+range; `set` (a heavier insert+delete churn with a random-height splice) over the
+cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM
+latency. Both O(n) foils -- a linear scan per search, a sorted-array insert per write
+-- must MISS the floor. The witness ALSO prints the MAX single insert (the unlucky-
+tower tail): if your workload cares about the tail, not the mean, read that bar.
 
 ---
 

@@ -6,6 +6,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-17
+
+### Added
+
+- **SkipList** -- the fourth member and the family's FIRST randomized, pointer-based
+  member: a pointer-free ordered map (key -> value) whose `get` / `set` / `delete` /
+  `successor` / `predecessor` are EXPECTED O(log n) via a probabilistic tower of
+  forward links stored as slot INDICES in a SINGLE flat `Uint32Array` of
+  `columns * (capacity + 1)` cells (stride-indexed `lvl*(capacity + 1) + slot`,
+  `NIL = 0`, slot 0 the head sentinel) over a private free-list (`NodePool`) -- never
+  a heap object per op. Surface: `get` / `set` (updates the value in place on an
+  existing key) / `delete` (idempotent) / `successor` (strictly greater) /
+  `predecessor` (strictly less) / `rangeIter(lo, hi)` (a VERSION-STAMPED iterator
+  over `[lo, hi]` inclusive, ascending; `+-Infinity` bounds allowed, mutation
+  mid-iteration throws) / `forEach` / `clear`, and `size` / `capacity` getters. Keys
+  are finite numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN /
+  +-Infinity fail closed with a `[lite-logn]` throw); values are finite numbers.
+  Level generation is ONE step of the repo's Numerical-Recipes LCG whose HIGH bits
+  draw a geometric height (`1 + clz32(word)`), instance-local seed, deterministic (a
+  fixed seed replays an identical structure; the low bits of the LCG are periodic, so
+  the high bits are used -- validated by a deterministic chi-square test, df = 15,
+  p > 0.001, over ~1e6 levels). `SL_MAX_CAPACITY = 0x03FFFFFF` (2^26 - 1: slot
+  indices fit a `Uint32`, `NIL = 0` reserves slot 0, and the column stride stays an
+  addressable length). Level columns are sized to `ceil(log2 cap) + 1` up front (NOT
+  grown lazily), so `_next` never reallocates -- trivially 0 B/op. `get` / `set` /
+  `delete` / `successor` / `predecessor` allocate zero bytes after construction.
+  Verified: torture 0 B/op on every hot lane (+ a 32 B/op control lane proving the
+  instrument has teeth), the private-pool conservation invariant `activeSlots +
+  freeListLength === capacity` after every soak cycle, leak `size 0/0`,
+  `gc major = 0`.
+- **Witness: two more log lines.** `test/witness.mjs` gains SkipList's `get` and
+  `set` entries. Measured on this machine (shared R^2 floor 0.958): `get` R^2 ~
+  0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, median 8.78 x [0.6, 1.4]),
+  gated over `[2^11, 2^17]` for dynamic range; `set` R^2 ~ 0.97-0.99, slope ~ 14
+  ns/level (band `[8.36, 19.50]`, median 13.93 x [0.6, 1.4]), gated over the
+  cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM
+  latency (each op is measured where its logarithm is visible, not where the cache
+  wall is). Both O(n) foils leave the line: the linear-scan search foil (O(n) per
+  search) and the sorted-array insert foil (O(n) shift), each below the floor.
+  Because the member is EXPECTED (not worst-case) O(log n), the witness ALSO prints
+  the MAX single insert over a realistic randomized build trace -- the unlucky-tower
+  tail a mean hides.
+- **ADR.** [`decisions/0006-skiplist.md`](./decisions/0006-skiplist.md) (D-06):
+  binds D-01 to an IN-FILE PRIVATE `NodePool` as DESIGN-PARITY with lite-o1's private
+  pools (identical free-list contract + conservation invariant), NOT a runtime dep on
+  lite-o1 (rejected: zero-runtime-deps law; SlotPool never shipped); records the PRNG
+  choice (NR LCG, high bits for the level), the randomized-honesty note (MAX
+  single-op + chi-square df), and the level-column memory decision (size up front,
+  never grow lazily, to protect the 0-B/op gate).
+
+### Unchanged
+
+- **BinaryHeap, Fenwick and SegmentTree are byte-identical.** The v0.1.0 / v0.2.0 /
+  v0.3.0 member class bodies are untouched; only the file header roster, the
+  `VERSION` const, and the appended SkipList block (plus the `_lcgNext` / `NodePool`
+  / `_levelCap` helpers) changed in `LogN.js`.
+
 ## [0.3.0] - 2026-09-17
 
 ### Added
@@ -125,7 +182,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [`decisions/0003-pack.md`](./decisions/0003-pack.md) (D-07: `files[]` ships the
   six files only; `test/`, `benchmark/`, `decisions/`, `demo/` are repo-only).
 
-[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PeshoVurtoleta/lite-logn/releases/tag/v0.1.0

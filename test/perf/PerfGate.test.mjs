@@ -8,9 +8,11 @@
  * BinaryHeap; update / prefix for Fenwick; ...), scavenge-scaled at N and k*N
  * with the old-gen and external / arrayBuffers lanes pinned to 0.
  *
- * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick. This file gates each member's hot
- * ops (BinaryHeap push / pop / changeKey / peek / topKey / keyOf / has; Fenwick
- * update / prefix / at / rangeSum) with the backing typed arrays fixed at
+ * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
+ * adds SkipList. This file gates each member's hot ops (BinaryHeap push / pop /
+ * changeKey / peek / topKey / keyOf / has; Fenwick update / prefix / at / rangeSum;
+ * SegmentTree update / query / at; SkipList get / set / delete / successor) with
+ * the backing typed arrays (and the SkipList's private free-stack) fixed at
  * construction, so the `grows` counter (buffer byte length) shows a 0 delta
  * across the whole window. The teeth (`mustFail`) carry an allocating loop that
  * MUST trip the gate, proving the instrument can fail (suite law 8: every gate
@@ -18,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -241,6 +243,96 @@ const segGrowsMix = {
     statsOf(s) { return { grows: segGrows(s) }; },
 };
 
+/** SkipList's zero-alloc counter: its typed-array buffers plus the private pool's
+ *  free-stack, all fixed at construction, so the delta across the window must be 0. */
+function slGrows(s) {
+    const sl = s.sl;
+    return sl._next.buffer.byteLength + sl._key.buffer.byteLength +
+        sl._val.buffer.byteLength + sl._pool._free.buffer.byteLength;
+}
+
+/** A SkipList prefilled to half capacity (a warmed, stable tower). */
+function slFill() {
+    const sl = new SkipList(CAP, 0x9E3779B9);
+    for (let i = 0; i < (CAP >> 1); i++) sl.set(i, (i * 2654435761) & 0xffff);
+    return sl;
+}
+
+const SLMASK = (CAP >> 1) - 1; // keys 0..CAP/2-1 resident
+
+/**
+ * get churn: a hit on a resident cycling key, folded into an int32 accumulator.
+ * The descent chases slot INDICES (no heap object); zero allocation.
+ */
+const slGetChurn = {
+    name: 'SkipList get churn',
+    setup() { return { sl: slFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sl = s.sl;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) { acc = (acc + (sl.get(t & SLMASK) | 0)) | 0; t = (t + 1) | 0; }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: slGrows(s) }; },
+};
+
+/**
+ * set churn: an in-place value update of a resident cycling key (no new node) --
+ * the pure set hot path, zero allocation.
+ */
+const slSetChurn = {
+    name: 'SkipList set churn (in-place update)',
+    setup() { return { sl: slFill(), tick: 0 }; },
+    hot(s, n) {
+        const sl = s.sl;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { sl.set(t & SLMASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: slGrows(s) }; },
+};
+
+/**
+ * delete + re-set churn: addressable delete then re-insert of the SAME key ->
+ * steady size, exercising the private free-list alloc/free (a slot INDEX, no heap
+ * object). Zero allocation.
+ */
+const slDeleteChurn = {
+    name: 'SkipList delete + re-set churn',
+    setup() { return { sl: slFill(), tick: 0 }; },
+    hot(s, n) {
+        const sl = s.sl;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & SLMASK;
+            if (sl.delete(key)) sl.set(key, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: slGrows(s) }; },
+};
+
+/**
+ * successor churn: a strictly-greater lookup on a resident cycling key, folded
+ * into an int32 accumulator. Zero allocation.
+ */
+const slSuccessorChurn = {
+    name: 'SkipList successor churn',
+    setup() { return { sl: slFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sl = s.sl;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const v = sl.successor(t & SLMASK);
+            acc = (acc + (v === undefined ? 0 : v | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: slGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -272,6 +364,7 @@ zgcSuite({
     maxRetainedKB: 64,
     scenarios: [pushPopChurn, changeKeyChurn, readMix,
         fenUpdateChurn, fenPrefixChurn, fenAtRangeMix,
-        segUpdateChurn, segQueryChurn, segGrowsMix],
+        segUpdateChurn, segQueryChurn, segGrowsMix,
+        slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn],
     mustFail: [teethMustFailAlloc],
 });
