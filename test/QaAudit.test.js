@@ -33,18 +33,19 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.1.0 at the scaffold release', () => {
-    assert.equal(VERSION, '0.1.0');
+test('VERSION is exactly 0.2.0 at the Fenwick release', () => {
+    assert.equal(VERSION, '0.2.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (1 member) --------
+// --- frozen export surface: VERSION + the shipped members (2 members) --------
 
-test('LogN.js exports exactly VERSION and BinaryHeap at v0.1.0 (1 member)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap and Fenwick at v0.2.0 (2 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
+    assert.equal(typeof LogNModule.Fenwick, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -97,3 +98,33 @@ test('LogN.js is ASCII-only (U+00D7 and U+00B5 the sole permitted exceptions)', 
 });
 
 // --- member coercion / boundary blocks land below (one per member) ----------
+
+// --- Fenwick (v0.2.0): coercion + [lite-logn] fail-closed tag ----------------
+
+test('Fenwick fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { Fenwick } = LogNModule;
+    // constructor: bad length (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x')]) {
+        assert.throws(() => new Fenwick(bad), /\[lite-logn\]/, 'ctor ' + String(bad));
+    }
+    const f = new Fenwick(8);
+    // non-finite / non-number delta and value, typeof-first (no Symbol coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k')]) {
+        assert.throws(() => f.update(0, bad), /\[lite-logn\]/, 'update delta ' + String(bad));
+        assert.throws(() => f.set(0, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+    }
+    // out-of-range indices on every index-taking op
+    for (const bad of [-1, 8, 100, 1.5, NaN, '0', null, Symbol('i')]) {
+        assert.throws(() => f.update(bad, 1), /\[lite-logn\]/, 'update i ' + String(bad));
+        assert.throws(() => f.at(bad), /\[lite-logn\]/, 'at ' + String(bad));
+        assert.throws(() => f.set(bad, 1), /\[lite-logn\]/, 'set i ' + String(bad));
+        assert.throws(() => f.rangeSum(bad, 7), /\[lite-logn\]/, 'rangeSum lo ' + String(bad));
+    }
+    // prefix admits -1 (the empty-prefix base case) but rejects other sub-zero
+    assert.equal(f.prefix(-1), 0);
+    assert.throws(() => f.prefix(-2), /\[lite-logn\]/);
+    // rangeSum lo > hi fails closed; build fails closed on bad input
+    assert.throws(() => f.rangeSum(5, 2), /\[lite-logn\]/);
+    assert.throws(() => Fenwick.build(null), /\[lite-logn\]/);
+    assert.throws(() => Fenwick.build([1, NaN]), /\[lite-logn\]/);
+});

@@ -64,3 +64,36 @@ export class BinaryHeap {
         capacity: number,
     ): BinaryHeap;
 }
+
+/**
+ * A Fenwick tree (Binary Indexed Tree): BOTH point-update AND prefix-sum in
+ * O(log n) over a single flat Float64Array via the lowest-set-bit walk (i & -i).
+ * Public indices are 0-based in [0, length); internally 1-based (_t[0] the unused
+ * identity sentinel). Values are finite numbers (negatives allowed); NaN /
+ * Infinity / non-number fail closed. Every hot op allocates zero bytes.
+ */
+export class Fenwick {
+    /** @param length exact element count; integer in [1, 2^31-1]. */
+    constructor(length: number);
+
+    /** Element count this tree was sized for. */
+    readonly length: number;
+
+    /** Add delta at 0-based index i. O(log n). Non-finite delta / out-of-range i throws. */
+    update(i: number, delta: number): this;
+    /** Sum of [0, i] inclusive (prefix(-1) === 0). O(log n). Out-of-range i throws. */
+    prefix(i: number): number;
+    /** Sum of [lo, hi] inclusive = prefix(hi) - prefix(lo-1). O(log n). lo > hi throws. */
+    rangeSum(lo: number, hi: number): number;
+    /** The single element at i = prefix(i) - prefix(i-1). O(log n). Out-of-range i throws. */
+    at(i: number): number;
+    /** Set the element at i to value (absolute). O(log n). Non-finite value throws. */
+    set(i: number, value: number): this;
+    /** Zero every element in place, keeping capacity. */
+    clear(): this;
+    /** Visit every element as (value, index, fenwick) in ascending index order. */
+    forEach(fn: (value: number, index: number, fenwick: Fenwick) => void): void;
+
+    /** O(n) linear bulk build from a finite-number array-like. */
+    static build(values: ArrayLike<number>): Fenwick;
+}

@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.1.0
+Version: 0.2.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -18,7 +18,7 @@ It is the O(log n) sibling of @zakkster/lite-o1: lite-o1 holds the constant (a
 FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
-v0.1.0 ships its first member, BinaryHeap. The planned roster (one member per
+v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick. The roster (one member per
 session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -29,8 +29,9 @@ session, each landing append-only):
   addressable by a caller-supplied entity id. The cleanest witness in the family
   and the one that calibrates the shared R^2 floor + slope band gate (pop).
 - Fenwick / BIT (v0.2.0) -- BOTH point-update AND prefix-sum in O(log n) over a
-  single flat array via the lowest-set-bit walk (`i & -i`); rangeSum is two
-  prefix queries. Two straight log lines.
+  single flat `Float64Array` via the lowest-set-bit walk (`i & -i`); rangeSum is
+  two prefix walks. 0-based public indices; 1-based internally (`_t[0]` the unused
+  identity sentinel). Two straight log lines (update + prefix).
 - SegmentTree (v0.3.0) -- general associative range-query (min / max / sum / gcd)
   + point-update over a flat, array-embedded tree, O(log n) worst-case; the fold
   is chosen once at construction.
@@ -59,6 +60,28 @@ session, each landing append-only):
   - `BinaryHeap.build(kind, ids, keys, capacity)` -> BinaryHeap. Floyd O(n) bulk
     build from parallel arrays; fails closed on duplicate/out-of-range id,
     non-finite key, or count > capacity.
+
+- `Fenwick` -- class. A Fenwick tree (Binary Indexed Tree): BOTH point-update AND
+  prefix-sum in O(log n) over a single flat `Float64Array` via the lowest-set-bit
+  walk (`i & -i`). Public indices 0-based in [0, length); internally 1-based
+  (`_t[0]` the unused identity sentinel -- null is not zero). Values are finite
+  numbers (negatives allowed); NaN / +-Infinity / non-number fail closed.
+  - `new Fenwick(length)` -- length is an integer in [1, 2^31-1]. Allocates one
+    `Float64Array(length + 1)`, zero-initialized.
+  - `update(i, delta)` -> this. Add delta at 0-based index i (climb by `i & -i`);
+    delta must be a finite number (typeof-guarded first); out-of-range i throws.
+  - `prefix(i)` -> number. Sum of [0, i] INCLUSIVE (descend by `i & -i`).
+    `prefix(-1) === 0` is the clean base case; valid domain [-1, length).
+  - `rangeSum(lo, hi)` -> number. Sum of [lo, hi] INCLUSIVE both ends =
+    prefix(hi) - prefix(lo-1); throws on out-of-range or lo > hi.
+  - `at(i)` -> number. The single element = prefix(i) - prefix(i-1).
+  - `set(i, value)` -> this. Set element i to value (absolute), via
+    update(i, value - at(i)); value must be finite.
+  - `length` getter; `clear()` -> this (zero-fill, keep capacity);
+    `forEach(fn)` visits (value, index, fenwick) in ascending index order.
+  - `Fenwick.build(values)` -> Fenwick. O(n) LINEAR bulk build (each cell adds
+    itself to its parent in one pass -- NOT n incremental updates); fails closed
+    on a non-array-like or any non-finite value.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

@@ -4,15 +4,17 @@
  * problem AND proves its logarithm is real (the O(log n) Witness -- see
  * test/witness.mjs).
  *
- * v0.1.0 ships its FIRST member: BinaryHeap, an INDEXED binary heap -- an
+ * v0.1.0 shipped the FIRST member: BinaryHeap, an INDEXED binary heap -- an
  * addressable priority queue (a min|max binary heap over three parallel typed
  * arrays plus a reverse-index map that makes changeKey / remove O(log n) by
- * caller-supplied entity id). Members land append-only, leaving this header and
- * the `VERSION` const the only prior lines that ever change. Planned roster:
- * BinaryHeap (this release, array-embedded O(log n) push / pop min|max heap),
- * Fenwick / BIT (O(log n) point-update AND prefix-sum via the
- * `i & -i` walk), SegmentTree (O(log n) associative range-query + point-update),
- * and SkipList (pointer-free expected-O(log n) ordered map). Members are
+ * caller-supplied entity id). v0.2.0 adds the SECOND member: Fenwick (BIT), a
+ * flat-array structure whose point-update AND prefix-sum are BOTH O(log n) via
+ * the lowest-set-bit walk (`i & -i`). Members land append-only, leaving this
+ * header and the `VERSION` const the only prior lines that ever change. Roster:
+ * BinaryHeap (v0.1.0, array-embedded O(log n) push / pop min|max heap), Fenwick /
+ * BIT (v0.2.0, O(log n) point-update AND prefix-sum via the `i & -i` walk),
+ * SegmentTree (planned, O(log n) associative range-query + point-update), and
+ * SkipList (planned, pointer-free expected-O(log n) ordered map). Members are
  * independent (no shared mutable module state), so a bundler that imports one
  * drops the others (`sideEffects: false`).
  *
@@ -29,11 +31,11 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
-// Fenwick     (v0.2.0)         -- O(log n) point-update + prefix-sum
+// Fenwick     (v0.2.0 session) -- O(log n) point-update + prefix-sum  (BELOW)
 // SegmentTree (v0.3.0)         -- O(log n) associative range-query + point-update
 // SkipList    (v0.4.0)         -- pointer-free expected-O(log n) ordered map
 
@@ -390,5 +392,260 @@ export class BinaryHeap {
     _notMember(id) {
         throw new RangeError(
             '[lite-logn] BinaryHeap.changeKey: id ' + id + ' is not in the heap');
+    }
+}
+
+/**
+ * Max Fenwick length: internal 1-based indices `k` run in [1, length] and the
+ * whole trick is the two's-complement lowest-set-bit `k & -k`. JavaScript
+ * bitwise operators coerce to a SIGNED 32-bit integer, so `k & -k` is only the
+ * lowest set bit while `k` fits a positive int32 -- i.e. `k <= 2^31 - 1`. Since
+ * the largest `k` the walk ever reaches equals `length`, `length` itself must
+ * stay in that range. Same bound as BinaryHeap's capacity, for the same reason:
+ * the index arithmetic, not the byte count, is the hard ceiling.
+ */
+const FENWICK_MAX = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A Fenwick tree (Binary Indexed Tree): BOTH point-update AND prefix-sum in
+ * O(log n) over a SINGLE flat `Float64Array`, using nothing but the lowest-set-
+ * bit walk (`i & -i`). The member whose Big-O is most delightfully non-obvious
+ * -- "how can update AND query both be logarithmic on a plain array?" is exactly
+ * the claim the witness answers, with TWO straight log lines (one per op). No
+ * nodes, no pointers; nothing is allocated per op after construction.
+ *
+ * Index base: PUBLIC indices are 0-based in `[0, length)`. Internally the tree is
+ * 1-based -- each public `i` maps to `i + 1` in the backing `_t` Float64Array, so
+ * `_t[0]` is the unused identity sentinel and is NEVER read as data (null is not
+ * zero: slot 0 does not mean "the element at 0" -- it means "no cell"). Element
+ * `i` lives, spread across a logarithmic set of cells, in `_t[1 .. length]`.
+ *
+ * The two walks are the whole structure:
+ *   - `update(i, delta)` climbs: from `k = i + 1`, repeatedly `k += k & -k` (add
+ *     the lowest set bit) until `k > length`, touching ONE cell per level.
+ *   - `prefix(i)` descends: from `k = i + 1`, repeatedly `k -= k & -k` (strip the
+ *     lowest set bit) until `k == 0`, summing ONE cell per level.
+ * Both take at most `log2(length)` steps -- the logarithm the witness proves.
+ *
+ * Value type: `Float64Array`; deltas and values may be ANY finite number,
+ * including negatives. NaN / +-Infinity / non-number fail closed (typeof-guarded
+ * BEFORE coercion) rather than corrupt a running sum. Honesty note on precision:
+ * sums are IEEE-754 double addition, so a very large corpus of very different
+ * magnitudes accumulates the usual floating-point rounding error -- the bound is
+ * exact in step count, not in the last ULP of the sum. For exact integer sums,
+ * keep values within the 2^53 safe-integer range.
+ *
+ * Fixed capacity: `length` is frozen at construction; there is no grow. Every
+ * out-of-range index and every non-finite value is a hard `[lite-logn]` throw.
+ */
+export class Fenwick {
+    /**
+     * @param {number} length  exact element count; integer in [1, 2^31-1].
+     */
+    constructor(length) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof length !== 'number' || !Number.isInteger(length) ||
+            length < 1 || length > FENWICK_MAX) {
+            throw new RangeError(
+                '[lite-logn] Fenwick length must be an integer in [1, 2^31-1], got ' +
+                String(length));
+        }
+        this._n = length;                        // element count (fixed)
+        this._t = new Float64Array(length + 1);  // 1-based; _t[0] is the unused sentinel
+    }
+
+    /** Element count this tree was sized for. O(1). */
+    get length() { return this._n; }
+
+    /**
+     * Add `delta` to the element at 0-based index `i`. O(log n): climb from
+     * `k = i + 1` by the lowest set bit, one `_t` touch per level. Fails closed:
+     * a non-number / non-finite delta (typeof-guarded first) or an out-of-range
+     * index each throw `[lite-logn]` as a no-op.
+     * @param {number} i      integer in [0, length)
+     * @param {number} delta  a finite number (may be negative)
+     * @returns {this}
+     */
+    update(i, delta) {
+        if (typeof delta !== 'number' || !Number.isFinite(delta)) return this._badDelta(delta);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        const t = this._t, n = this._n;
+        for (let k = i + 1; k <= n; k += k & -k) t[k] += delta; // <= log2(n) steps
+        return this;
+    }
+
+    /**
+     * Sum of elements in `[0, i]` INCLUSIVE. O(log n): descend from `k = i + 1`
+     * by the lowest set bit, one `_t` read per level. `prefix(-1) === 0` is the
+     * clean base case (the empty prefix). An out-of-range index throws; the valid
+     * domain is `[-1, length)`.
+     * @param {number} i  integer in [-1, length)
+     * @returns {number}
+     */
+    prefix(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < -1 || i >= this._n) {
+            return this._badPrefixIndex(i);
+        }
+        const t = this._t;
+        let s = 0;
+        for (let k = i + 1; k > 0; k -= k & -k) s += t[k];      // <= log2(n) steps
+        return s;
+    }
+
+    /**
+     * Sum of elements in `[lo, hi]` INCLUSIVE on both ends = `prefix(hi) -
+     * prefix(lo - 1)`, inlined as two lowest-set-bit walks (no intermediate
+     * object, no double validation). O(log n). Fails closed: out-of-range `lo` or
+     * `hi`, or `lo > hi`, each throw `[lite-logn]`.
+     * @param {number} lo  integer in [0, length)
+     * @param {number} hi  integer in [lo, length)
+     * @returns {number}
+     */
+    rangeSum(lo, hi) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) || lo < 0 || lo >= this._n) {
+            return this._badRange(lo, hi);
+        }
+        if (typeof hi !== 'number' || !Number.isInteger(hi) || hi < 0 || hi >= this._n) {
+            return this._badRange(lo, hi);
+        }
+        if (lo > hi) return this._badRange(lo, hi);
+        const t = this._t;
+        let s = 0;
+        for (let k = hi + 1; k > 0; k -= k & -k) s += t[k];     // prefix(hi)
+        for (let k = lo; k > 0; k -= k & -k) s -= t[k];         // - prefix(lo-1)
+        return s;
+    }
+
+    /**
+     * The single element at 0-based index `i` = `prefix(i) - prefix(i - 1)`,
+     * inlined as two lowest-set-bit walks. O(log n), zero allocation. An
+     * out-of-range index throws `[lite-logn]`.
+     * @param {number} i  integer in [0, length)
+     * @returns {number}
+     */
+    at(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        const t = this._t;
+        let s = 0;
+        for (let k = i + 1; k > 0; k -= k & -k) s += t[k];      // prefix(i)
+        for (let k = i; k > 0; k -= k & -k) s -= t[k];          // - prefix(i-1)
+        return s;
+    }
+
+    /**
+     * Set the element at 0-based index `i` to `value` (absolute), via
+     * `update(i, value - at(i))`, inlined so the read and the climb share one
+     * validation and allocate nothing. O(log n). Fails closed: a non-finite
+     * value (typeof-guarded first) or out-of-range index throws `[lite-logn]`.
+     * @param {number} i      integer in [0, length)
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(i, value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        const t = this._t, n = this._n;
+        let cur = 0;                                            // = at(i)
+        for (let k = i + 1; k > 0; k -= k & -k) cur += t[k];
+        for (let k = i; k > 0; k -= k & -k) cur -= t[k];
+        const delta = value - cur;
+        for (let k = i + 1; k <= n; k += k & -k) t[k] += delta; // update(i, delta)
+        return this;
+    }
+
+    /** Zero every element in place, keeping the fixed capacity. O(n) cold path. */
+    clear() {
+        this._t.fill(0);
+        return this;
+    }
+
+    /**
+     * Visit every element as `(value, index, fenwick)` for index in `[0, length)`,
+     * in ascending index order. O(n log n) COLD scan (each element is an `at`
+     * walk); allocation-free in the loop body (pass a hoisted callback).
+     * @param {(value:number, index:number, fenwick:Fenwick)=>void} fn
+     */
+    forEach(fn) {
+        const t = this._t, n = this._n;
+        for (let i = 0; i < n; i++) {
+            let s = 0;
+            for (let k = i + 1; k > 0; k -= k & -k) s += t[k];
+            for (let k = i; k > 0; k -= k & -k) s -= t[k];
+            fn(s, i, this);
+        }
+    }
+
+    /**
+     * O(n) LINEAR bulk build from `values` -- the SECOND teachable trick. Load
+     * each value into its own cell, then in ONE forward pass let each cell add
+     * itself to its parent (`_t[j] += _t[i]` where `j = i + (i & -i)`). This is
+     * O(n), NOT n incremental O(log n) updates. COLD path; fails closed on a
+     * non-array-like `values` or any non-finite entry before the tree is usable.
+     * @param {ArrayLike<number>} values  finite numbers; length in [1, 2^31-1]
+     * @returns {Fenwick}
+     */
+    static build(values) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError('[lite-logn] Fenwick.build needs an array-like of finite numbers');
+        }
+        const length = values.length;
+        const f = new Fenwick(length);            // validates length in [1, 2^31-1]
+        const t = f._t;
+        for (let i = 0; i < length; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] Fenwick.build value must be a finite number, got ' + String(v));
+            }
+            t[i + 1] = v;                         // seed each cell with its own value
+        }
+        // Linear propagation: each 1-based cell i pushes its running sum to its
+        // parent j = i + (i & -i). One pass, O(n) -- the non-obvious build trick.
+        for (let i = 1; i <= length; i++) {
+            const j = i + (i & -i);
+            if (j <= length) t[j] += t[i];
+        }
+        return f;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ---
+
+    /** @private */
+    _badIndex(i) {
+        throw new RangeError(
+            '[lite-logn] Fenwick index must be an integer in [0, ' + this._n + '), got ' +
+            String(i));
+    }
+
+    /** @private */
+    _badPrefixIndex(i) {
+        throw new RangeError(
+            '[lite-logn] Fenwick prefix index must be an integer in [-1, ' + this._n + '), got ' +
+            String(i));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] Fenwick rangeSum needs integers 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badDelta(delta) {
+        throw new TypeError(
+            '[lite-logn] Fenwick delta must be a finite number, got ' + String(delta));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] Fenwick value must be a finite number, got ' + String(value));
     }
 }

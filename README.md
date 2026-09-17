@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.1.0 is the scaffold release; the planned roster is BinaryHeap (array-embedded O(log n) push / pop min-heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query + point-update), and SkipList (pointer-free expected-O(log n) ordered map) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.2.0 ships two members: BinaryHeap (array-embedded O(log n) push / pop min|max heap) and Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk); SegmentTree (O(log n) associative range-query + point-update) and SkipList (pointer-free expected-O(log n) ordered map) are planned -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,19 +19,31 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.1.0 is the scaffold release.** It ships only the `VERSION` const -- there is no member yet. This first cut stands up the repo, the gates (torture / witness / perf), and the design decisions that outlive member 1 (see [`decisions/`](./decisions)). The planned roster below lands one member per session, each append-only so prior members stay byte-identical.
+**v0.2.0 ships two members: BinaryHeap and Fenwick.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
 ```
 
 ```js
-import { VERSION } from '@zakkster/lite-logn';
+import { Fenwick } from '@zakkster/lite-logn';
 
-console.log(VERSION); // -> '0.1.0'  (scaffold release; members land per session)
+// A Fenwick tree (Binary Indexed Tree): point-update AND prefix-sum both O(log n).
+const f = new Fenwick(1000);   // 1000 slots, all zero
+f.update(10, 5);               // add 5 at index 10          -- O(log n)
+f.update(20, 3);               // add 3 at index 20          -- O(log n)
+f.prefix(15);        // -> 5   (sum of [0..15] inclusive)    -- O(log n)
+f.rangeSum(10, 20);  // -> 8   (sum of [10..20] inclusive)   -- O(log n)
+f.at(10);            // -> 5   (the single element at 10)    -- O(log n)
+f.set(10, 100);      // set index 10 to 100 (absolute)       -- O(log n)
+f.prefix(20);        // -> 103
+
+// O(n) LINEAR bulk build (each cell adds itself to its parent in one pass):
+const g = Fenwick.build([1, 2, 3, 4, 5]);
+g.prefix(4);         // -> 15
 ```
 
-Once BinaryHeap ships (v0.1.0 member session), the quick-start becomes a heap push / pop whose every op is O(log n) worst-case and allocates zero bytes after construction, and `npm run witness` proves it holds the straight log line while a sorted-array-insert foil (O(n) shift) leaves it.
+Every hot op allocates zero bytes after construction, and `npm run witness` proves BOTH `update` and `prefix` hold the straight log line while their O(n) foils (a prefix-array rebuild and a naive re-sum) leave it.
 
 ---
 
@@ -39,10 +51,12 @@ Once BinaryHeap ships (v0.1.0 member session), the quick-start becomes a heap pu
 
 - [Why this exists](#why-this-exists)
 - [What you get](#what-you-get)
-- [The planned roster](#the-planned-roster)
+- [The roster](#the-roster)
 - [The O(log n) Witness](#the-olog-n-witness)
 - [API reference](#api-reference)
   - [Constants](#constants)
+  - [BinaryHeap](#binaryheap)
+  - [Fenwick](#fenwick)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -65,16 +79,16 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 - **Tree-shakeable named exports.** Members share no mutable module state, so a bundler that imports one drops the others.
 - **Fail closed.** Fixed, preallocated capacity; a `typeof`-guard at the door of every mutating op; `null` is not zero; an unknown option key is an error with a hint, never a silent ignore.
 
-## The planned roster
+## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.1.0 none are shipped yet -- this is the scaffold.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.2.0, BinaryHeap and Fenwick are shipped; SegmentTree and SkipList are planned.
 
-| Member | Version | Shape | Hot ops |
-| --- | --- | --- | --- |
-| **BinaryHeap** | 0.1.0 | array-embedded complete binary min-heap over a flat `Float64Array` | `push` / `pop` O(log n), `peek` O(1) |
-| **Fenwick** (BIT) | 0.2.0 | flat array, lowest-set-bit walk (`i & -i`) | `update` / `prefix` / `rangeSum` O(log n) |
-| **SegmentTree** | 0.3.0 | flat, array-embedded tree; associative fold chosen at construction | `rangeQuery` / `pointUpdate` O(log n) |
-| **SkipList** | 0.4.0 | pointer-free over a shared node pool; expected O(log n) | `get` / `set` / `delete` / `successor` |
+| Member | Version | Status | Shape | Hot ops |
+| --- | --- | --- | --- | --- |
+| **BinaryHeap** | 0.1.0 | shipped | array-embedded complete binary min|max heap over a flat `Float64Array` | `push` / `pop` O(log n), `peek` O(1) |
+| **Fenwick** (BIT) | 0.2.0 | shipped | flat `Float64Array`, lowest-set-bit walk (`i & -i`) | `update` / `prefix` / `rangeSum` / `at` / `set` O(log n) |
+| **SegmentTree** | 0.3.0 | planned | flat, array-embedded tree; associative fold chosen at construction | `rangeQuery` / `pointUpdate` O(log n) |
+| **SkipList** | 0.4.0 | planned | pointer-free over a shared node pool; expected O(log n) | `get` / `set` / `delete` / `successor` |
 
 Later tiers (Treap / Scapegoat, OrderStatTree, IndexedHeap, SortedArray, MinMaxHeap, SplayTree, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
 
@@ -86,7 +100,7 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor + slope band are calibrated in BinaryHeap and become the shared FAMILY gate. At v0.1.0 the witness harness is a stub: with zero members it runs green and empty (there is no member to fit yet).
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.2.0 the witness gates three ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level) and Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level) all ON the line; each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap `push`) foil runs R^2 ~ 0.77-0.84 run-to-run, and the Fenwick foils (prefix-array rebuild, naive re-sum) hold steadier at R^2 ~ 0.75-0.76 -- both foil families sit comfortably under the 0.958 floor.
 
 ## API reference
 
@@ -94,7 +108,7 @@ For amortized / randomized members the witness also prints the MAX single-op tim
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.1.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.2.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -135,6 +149,41 @@ heap.pop();       // -> 2   (the id whose key 9.0 is the max)
 | `size` / `capacity` / `kind` | getters | O(1) | Live count / fixed capacity / `'min'` \| `'max'`. |
 | `BinaryHeap.build` | `build(kind, ids, keys, capacity) -> BinaryHeap` | O(n) | Floyd bulk build from parallel arrays; fails closed on duplicate/out-of-range id, non-finite key, or `count > capacity`. |
 
+### Fenwick
+
+A **Fenwick tree** (Binary Indexed Tree): BOTH point-update AND prefix-sum in O(log n) over a single flat `Float64Array`, using nothing but the lowest-set-bit walk (`i & -i`). It answers the most delightfully non-obvious complexity question in the family -- "how can update AND query both be logarithmic on a plain array?" -- and the witness proves it with TWO straight log lines. Public indices are **0-based** in `[0, length)`; internally the tree is 1-based, so `_t[0]` is the unused identity sentinel and is never read as data (null is not zero). `update` climbs by `i & -i` (one `_t` touch per level); `prefix` descends by `i & -i` (one read per level); `rangeSum` and `at` are pairs of inlined prefix walks. Values are finite numbers (negatives allowed); NaN / +-Infinity / non-number fail closed. Every hot op allocates zero bytes after construction.
+
+```js
+import { Fenwick } from '@zakkster/lite-logn';
+
+const f = new Fenwick(1000);
+f.update(10, 5);        // add 5 at index 10
+f.update(20, 3);        // add 3 at index 20
+f.prefix(15);           // -> 5   (sum of [0..15] inclusive)
+f.prefix(-1);           // -> 0   (the empty-prefix base case)
+f.rangeSum(10, 20);     // -> 8   (sum of [10..20] inclusive)
+f.at(10);               // -> 5   (single element = prefix(10) - prefix(9))
+f.set(10, 100);         // set index 10 to 100 (absolute)
+f.prefix(20);           // -> 103
+
+// O(n) LINEAR bulk build (not n incremental updates):
+const g = Fenwick.build([1, 2, 3, 4, 5]);
+g.rangeSum(1, 3);       // -> 9
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new Fenwick(length)` | O(length) | `length` integer in `[1, 2^31-1]`. Allocates one `Float64Array(length + 1)`, zero-initialized. |
+| `update` | `update(i, delta) -> this` | O(log n) | Add `delta` at 0-based index `i` (climb by `i & -i`). `delta` finite (typeof-guarded first); out-of-range `i` throws. |
+| `prefix` | `prefix(i) -> number` | O(log n) | Sum of `[0, i]` INCLUSIVE (descend by `i & -i`). `prefix(-1) === 0`; valid domain `[-1, length)`. |
+| `rangeSum` | `rangeSum(lo, hi) -> number` | O(log n) | Sum of `[lo, hi]` INCLUSIVE both ends = `prefix(hi) - prefix(lo-1)`. Throws on out-of-range or `lo > hi`. |
+| `at` | `at(i) -> number` | O(log n) | The single element = `prefix(i) - prefix(i-1)`. Out-of-range `i` throws. |
+| `set` | `set(i, value) -> this` | O(log n) | Set element `i` to `value` (absolute), via `update(i, value - at(i))`. `value` finite. |
+| `clear` | `clear() -> this` | O(length) | Zeros every element in place, keeping capacity. |
+| `forEach` | `forEach(fn) -> void` | O(n log n) | Visits `(value, index, fenwick)` in ascending index order (each element is an `at` walk). |
+| `length` | getter | O(1) | Element count this tree was sized for. |
+| `Fenwick.build` | `build(values) -> Fenwick` | O(n) | LINEAR bulk build (each cell adds itself to its parent in one forward pass); fails closed on a non-array-like or any non-finite value. |
+
 Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
@@ -147,8 +196,11 @@ Member signatures for later members are appended here as each ships.
 | --- | --- |
 | `BinaryHeap` push / pop / peek / topKey / keyOf / has / changeKey / remove | 0 B/op |
 | `BinaryHeap` constructor / `build` / `clear` | O(capacity) typed arrays, once (cold) |
+| `Fenwick` update / prefix / rangeSum / at / set | 0 B/op |
+| `Fenwick` constructor / `build` / `clear` | O(length) typed array, once (cold) |
+| `Fenwick` forEach | 0 B/op in the loop body (pass a hoisted callback) |
 
-The allocation table is filled in per member as each lands, with the gated `R^2` / slope numbers from its witness run.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`). The allocation table is extended per member as each lands.
 
 ## Testing
 

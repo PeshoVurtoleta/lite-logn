@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -43,3 +43,23 @@ new BinaryHeap(8, 'biggest');
 
 // @ts-expect-error -- push key must be a number.
 heap.push(1, 'x');
+
+// --- Fenwick ---------------------------------------------------------------
+const fen = new Fenwick(1024);
+const fenU: Fenwick = fen.update(0, 2.5);   // fluent -> this
+const fenS: Fenwick = fen.set(1, -3);       // fluent -> this
+const fenC: Fenwick = fen.clear();          // fluent -> this
+const p: number = fen.prefix(10);
+const pBase: number = fen.prefix(-1);       // the empty-prefix base case
+const rs: number = fen.rangeSum(2, 8);
+const el: number = fen.at(5);
+const flen: number = fen.length;
+fen.forEach((value, index, self) => { void value; void index; void self; });
+const fbuilt: Fenwick = Fenwick.build([1, 2, 3, 4]);
+void fenU; void fenS; void fenC; void p; void pBase; void rs; void el; void flen; void fbuilt;
+
+// @ts-expect-error -- update delta must be a number.
+fen.update(0, 'x');
+
+// @ts-expect-error -- Fenwick constructor takes a single length argument.
+new Fenwick(8, 'min');

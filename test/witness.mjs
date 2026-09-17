@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick } from '../LogN.js';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
 // x is log2(n); y is nsPerOp. Returns { slope, intercept, r2 }. Pure, alloc-
@@ -94,11 +94,32 @@ export const BINARYHEAP_R2_FLOOR = 0.958;
 export const BINARYHEAP_SLOPE_LO = 5.76;           // median 9.60 * 0.6
 export const BINARYHEAP_SLOPE_HI = 13.44;          // median 9.60 * 1.4
 
+// --- Fenwick (v0.2.0): shared R^2 floor, OWN per-op slope bands (D-08) --------
+// decisions/0004-witness-band.md: the R^2 floor (0.958) is FROZEN family-wide;
+// each member declares its OWN slope band per op = median-of-N(15) fit-runs *
+// [0.6, 1.4] (the identical procedure that produced BinaryHeap's band). A single
+// `i & -i` touch/level is strictly less work than a heap sift, so Fenwick's
+// per-level slope is LOWER than pop's -- expected and correct, which is exactly
+// why only the R^2 floor is shared. Both Fenwick ops reuse BINARYHEAP_R2_FLOOR.
+// Bands calibrated from N=15 fit runs on this machine (medians recorded inline).
+export const FENWICK_UPDATE_SLOPE_LO = 1.84;       // median 3.07 * 0.6
+export const FENWICK_UPDATE_SLOPE_HI = 4.30;       // median 3.07 * 1.4
+export const FENWICK_PREFIX_SLOPE_LO = 1.76;       // median 2.93 * 0.6
+export const FENWICK_PREFIX_SLOPE_HI = 4.10;       // median 2.93 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
 const POP_SWEEP = [1e4, 3e4, 1e5, 3e5, 1e6];
 const FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// Fenwick's gated sweep: n placed at HALF-INTEGER exponents (2^13.5 .. 2^19.5) so
+// each sample sits in a DISTINCT floor(log2 n) bucket. Fenwick's full-height walk
+// does an INTEGER number of levels (= floor(log2 n)); spacing the samples one
+// bucket apart maps that staircase cleanly onto the continuous log2(n) axis (a
+// point mid-bucket does not, and flakes the fit). Its O(n) foils (prefix-array
+// rebuild / naive re-sum) stay on the small O(n^2) sweep.
+const FEN_SWEEP = [13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5].map((k) => Math.round(2 ** k));
+const FEN_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -158,6 +179,112 @@ function measureFoil(n) {
     return elapsed / count;
 }
 
+// --- Fenwick measurement (both hot ops + their O(n) foils) ------------------
+// The tree is built OUTSIDE timing. Each op is measured as its FULL-HEIGHT walk
+// -- the honest worst case, exactly as BinaryHeap times the full-height sift of a
+// pop. Fenwick's per-level cost is sub-nanosecond, so an averaged full-array pass
+// is swamped by the memory wall (cache-level crossings) and will not fit a clean
+// line; hammering ONE full-height index instead keeps the touched cells hot and
+// leaves the number of LEVELS (= log2(n)) as the only variable. Both ops walk the
+// HIGH, spread cells near the top of the tree (~[n/2, n]) so each added level is a
+// genuine access -- the log line is the level count, not a cache artifact.
+const FEN_ITERS = 400000;  // hammered ops per timed batch
+const FEN_BATCH = 8;       // min-over-batches: the MIN filters interference (only
+                           // ambient noise ADDS time, so the min is the cleanest
+                           // per-op signal -- the same asymmetry measureAllocs uses)
+
+// update: climb from index 2^(m-1) (an ODD internal k0), touching the high spread
+// cells [~n/2 .. n] -- ~m-1 `_t` touches, one per level, all hot. Return the MIN
+// per-op time over FEN_BATCH batches.
+function measureUpdate(n) {
+    const f = new Fenwick(n);
+    const rnd = mulberry32(0x5151 ^ n);
+    for (let i = 0; i < n; i++) f.update(i, rnd());          // seed
+    const idx = 2 ** (Math.floor(Math.log2(n)) - 1);        // full-height climb start
+    for (let w = 0; w < FEN_ITERS; w++) f.update(idx, (w & 1) ? 1 : -1); // warm
+    let best = Infinity;
+    for (let b = 0; b < FEN_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < FEN_ITERS; i++) f.update(idx, (i & 1) ? 1 : -1);
+        const e = (nowNs() - t0) / FEN_ITERS;
+        if (e < best) best = e;
+    }
+    return best;
+}
+
+// prefix: descend from index 2^m - 2 (k0 = 2^m - 1, all ones), the full-height
+// walk -- m `_t` reads through the high spread cells, one per level, all hot.
+// Return the MIN per-op time over FEN_BATCH batches.
+function measurePrefix(n) {
+    const f = new Fenwick(n);
+    const rnd = mulberry32(0x7333 ^ n);
+    for (let i = 0; i < n; i++) f.update(i, rnd());          // seed
+    const idx = (2 ** Math.floor(Math.log2(n))) - 2;        // full-height descent start
+    let sink = 0;
+    for (let w = 0; w < FEN_ITERS; w++) sink += f.prefix(idx); // warm
+    let best = Infinity;
+    for (let b = 0; b < FEN_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < FEN_ITERS; i++) sink += f.prefix(idx);
+        const e = (nowNs() - t0) / FEN_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// update FOIL: an update that re-derives the WHOLE running-prefix array = O(n) per
+// update (the naive way to keep prefix queries O(1): rebuild on every write). On
+// the log2(n) axis its per-op cost is linear in n, so a straight-line fit MISSES
+// the R^2 floor. O(n^2) total, so the sweep stays small.
+function measureUpdateFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const vals = new Float64Array(n);
+    const pre = new Float64Array(n);
+    const rnd = mulberry32(0x1a2b ^ n);
+    for (let i = 0; i < n; i++) vals[i] = rnd();
+    { let acc = 0; for (let i = 0; i < n; i++) { acc += vals[i]; pre[i] = acc; } } // warm
+    let elapsed = 0, count = 0, idx = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let i = 0; i < n; i++) {
+            vals[idx] += 1.0;
+            let acc = 0;
+            for (let j = 0; j < n; j++) { acc += vals[j]; pre[j] = acc; } // O(n) rebuild
+            idx++; if (idx >= n) idx = 0;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (pre[0] === Infinity) throw new Error('unreachable'); // keep pre live
+    return elapsed / count;
+}
+
+// prefix FOIL: a naive re-sum of a plain Float64Array [0..i] = O(i) per query
+// (the default before you know the Fenwick trick). Average O(n/2), O(n^2) total;
+// exponential on the log2(n) axis, so it misses the R^2 floor.
+function measurePrefixFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const vals = new Float64Array(n);
+    const rnd = mulberry32(0x2c3d ^ n);
+    for (let i = 0; i < n; i++) vals[i] = rnd();
+    { let s = 0; for (let j = 0; j < n; j++) s += vals[j]; if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0, idx = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let i = 0; i < n; i++) {
+            let s = 0;
+            for (let j = 0; j <= idx; j++) s += vals[j]; // O(idx) re-sum
+            sink += s;
+            idx++; if (idx >= n) idx = 0;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -174,10 +301,34 @@ const MEMBERS = [
         foil: measureFoil,
         foilName: 'sorted-array insert (O(n) shift)',
     },
+    {
+        name: 'Fenwick',
+        op: 'update',
+        sweep: FEN_SWEEP,
+        foilSweep: FEN_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-08)
+        slopeLo: FENWICK_UPDATE_SLOPE_LO,      // own band
+        slopeHi: FENWICK_UPDATE_SLOPE_HI,
+        run: measureUpdate,
+        foil: measureUpdateFoil,
+        foilName: 'prefix-array rebuild (O(n) per update)',
+    },
+    {
+        name: 'Fenwick',
+        op: 'prefix',
+        sweep: FEN_SWEEP,
+        foilSweep: FEN_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-08)
+        slopeLo: FENWICK_PREFIX_SLOPE_LO,      // own band
+        slopeHi: FENWICK_PREFIX_SLOPE_HI,
+        run: measurePrefix,
+        foil: measurePrefixFoil,
+        foilName: 'naive re-sum (O(n) per query)',
+    },
 ];
 
 function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.1.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.2.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     let ok = true;
     for (const m of MEMBERS) {

@@ -8,17 +8,17 @@
  * BinaryHeap; update / prefix for Fenwick; ...), scavenge-scaled at N and k*N
  * with the old-gen and external / arrayBuffers lanes pinned to 0.
  *
- * v0.1.0 ships BinaryHeap: this file gates its hot ops (push / pop / changeKey /
- * peek / topKey / keyOf / has) with the backing typed arrays fixed at
- * construction, so the `grows` counter (their combined buffer byte length) shows
- * a 0 delta across the whole window. The teeth (`mustFail`) carry an allocating
- * loop that MUST trip the gate, proving the instrument can fail (suite law 8:
- * every gate must be provably able to FAIL). Never widen a budget to make this
- * pass.
+ * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick. This file gates each member's hot
+ * ops (BinaryHeap push / pop / changeKey / peek / topKey / keyOf / has; Fenwick
+ * update / prefix / at / rangeSum) with the backing typed arrays fixed at
+ * construction, so the `grows` counter (buffer byte length) shows a 0 delta
+ * across the whole window. The teeth (`mustFail`) carry an allocating loop that
+ * MUST trip the gate, proving the instrument can fail (suite law 8: every gate
+ * must be provably able to FAIL). Never widen a budget to make this pass.
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -97,6 +97,78 @@ const readMix = {
     statsOf(s) { return { grows: grows(s) }; },
 };
 
+/** Fenwick's zero-alloc counter: its single backing buffer's byte length, fixed
+ *  at construction, so the delta across the window must be 0. */
+function fenGrows(s) { return s.fen._t.buffer.byteLength; }
+
+/** A Fenwick prefilled to capacity with integer values. */
+function fenFill() {
+    const f = new Fenwick(CAP);
+    for (let i = 0; i < CAP; i++) f.update(i, (i * 2654435761) & 0xffff);
+    return f;
+}
+
+/**
+ * update churn: each op adds a balanced +-1 at a cycling index (the `i & -i`
+ * climb, one _t touch per level). Balanced signs keep the running sums bounded;
+ * zero allocation.
+ */
+const fenUpdateChurn = {
+    name: 'Fenwick update churn',
+    setup() { return { fen: fenFill(), tick: 0 }; },
+    hot(s, n) {
+        const f = s.fen;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            f.update(t & MASK, (t & 1) ? 1 : -1);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fenGrows(s) }; },
+};
+
+/**
+ * prefix churn: each op sums [0, i] for a cycling i (the `i & -i` descent),
+ * folded into an int32 accumulator. Zero allocation.
+ */
+const fenPrefixChurn = {
+    name: 'Fenwick prefix churn',
+    setup() { return { fen: fenFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const f = s.fen;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (f.prefix(t & MASK) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: fenGrows(s) }; },
+};
+
+/**
+ * at / rangeSum mix: at(i) (two walks) and a fixed-width rangeSum, folded into an
+ * int32 accumulator. Both are pairs of prefix walks; zero allocation.
+ */
+const fenAtRangeMix = {
+    name: 'Fenwick at/rangeSum mix',
+    setup() { return { fen: fenFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const f = s.fen;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = t & (MASK >> 1);
+            acc = (acc + (f.at(t & MASK) | 0) + (f.rangeSum(lo, lo + 100) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: fenGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -126,6 +198,7 @@ zgcSuite({
     maxArrayBuffersKB: 0,
     counters: { grows: 0 },
     maxRetainedKB: 64,
-    scenarios: [pushPopChurn, changeKeyChurn, readMix],
+    scenarios: [pushPopChurn, changeKeyChurn, readMix,
+        fenUpdateChurn, fenPrefixChurn, fenAtRangeMix],
     mustFail: [teethMustFailAlloc],
 });
