@@ -9,11 +9,15 @@
  * arrays plus a reverse-index map that makes changeKey / remove O(log n) by
  * caller-supplied entity id). v0.2.0 adds the SECOND member: Fenwick (BIT), a
  * flat-array structure whose point-update AND prefix-sum are BOTH O(log n) via
- * the lowest-set-bit walk (`i & -i`). Members land append-only, leaving this
- * header and the `VERSION` const the only prior lines that ever change. Roster:
- * BinaryHeap (v0.1.0, array-embedded O(log n) push / pop min|max heap), Fenwick /
- * BIT (v0.2.0, O(log n) point-update AND prefix-sum via the `i & -i` walk),
- * SegmentTree (planned, O(log n) associative range-query + point-update), and
+ * the lowest-set-bit walk (`i & -i`). v0.3.0 adds the THIRD member: SegmentTree,
+ * a flat `Float64Array(2n)` (leaves at n..2n-1) whose range-query AND point-update
+ * are BOTH O(log n) via iterative bottom-up walks, with the associative fold
+ * (min / max / sum / gcd) chosen ONCE at construction. Members land append-only,
+ * leaving this header and the `VERSION` const the only prior lines that ever
+ * change. Roster: BinaryHeap (v0.1.0, array-embedded O(log n) push / pop min|max
+ * heap), Fenwick / BIT (v0.2.0, O(log n) point-update AND prefix-sum via the
+ * `i & -i` walk), SegmentTree (v0.3.0, O(log n) associative range-query +
+ * point-update over a flat 2n array, fold chosen at construction), and
  * SkipList (planned, pointer-free expected-O(log n) ordered map). Members are
  * independent (no shared mutable module state), so a bundler that imports one
  * drops the others (`sideEffects: false`).
@@ -31,12 +35,12 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
 // Fenwick     (v0.2.0 session) -- O(log n) point-update + prefix-sum  (BELOW)
-// SegmentTree (v0.3.0)         -- O(log n) associative range-query + point-update
+// SegmentTree (v0.3.0 session) -- O(log n) associative range-query + point-update  (BELOW)
 // SkipList    (v0.4.0)         -- pointer-free expected-O(log n) ordered map
 
 /** Max heap capacity: slot indices 0..cap-1 must fit the Int32Array _pos map. */
@@ -647,5 +651,284 @@ export class Fenwick {
     _badValue(value) {
         throw new TypeError(
             '[lite-logn] Fenwick value must be a finite number, got ' + String(value));
+    }
+}
+
+/**
+ * Max SegmentTree length: the whole structure lives in ONE `Float64Array(2 *
+ * length)` with leaves at indices `n .. 2n-1` and internal node `p`'s children
+ * at `2p` / `2p+1`. Both the leaf index (`n + i`, up to `2n - 1`) and the child
+ * index (`p << 1`, up to `2n - 2`) are computed with the signed-int32 `<<` / `+`
+ * operators, so the largest index the walks ever reach -- `2n - 1` -- must stay a
+ * POSITIVE int32 (`<= 2^31 - 1`). That caps `length` at `2^30 - 1`: HALF of
+ * BinaryHeap's / Fenwick's ceiling, because SegmentTree's backing array is 2n
+ * wide (a node per leaf plus a node per internal cell) where theirs are n wide.
+ * The index arithmetic, not the byte count, is the hard ceiling.
+ */
+const SEGTREE_MAX = 0x3FFFFFFF; // 2^30 - 1  (so 2n stays a positive int32)
+
+/**
+ * Euclidean GCD over nonnegative integers-in-doubles. Off the value door the
+ * inputs are already validated nonnegative finite integers (the `gcd` kind
+ * constrains its domain -- see SegmentTree's value door), and the identity 0
+ * makes this associative + commutative: `gcd(0, x) === x`, `gcd(x, 0) === x`.
+ * A plain module function (monomorphic, allocation-free) -- it is the arithmetic
+ * of the fold, NOT the fold dispatch (which is the ctor-cached `_k` inline
+ * switch). `%` is exact for integers within the 2^53 safe range.
+ * @param {number} a nonnegative finite integer
+ * @param {number} b nonnegative finite integer
+ * @returns {number} gcd(a, b), with gcd(0, 0) === 0
+ */
+function segGcd(a, b) {
+    while (b !== 0) { const r = a % b; a = b; b = r; }
+    return a;
+}
+
+/**
+ * A SEGMENT TREE: an associative range-query AND a point-update, BOTH O(log n),
+ * over a SINGLE flat `Float64Array(2n)` -- no nodes, no pointers, no recursion on
+ * the hot path. The complement to Fenwick: Fenwick's `rangeSum` works only
+ * because subtraction inverts addition, so it is a SUM machine; SegmentTree folds
+ * ANY associative + commutative operation over a range -- min / max / sum / gcd --
+ * because it stores a fold of each subtree at its internal node rather than a
+ * prefix. The fold is chosen ONCE at construction and cached as a small-int `_k`
+ * combined by an INLINE switch in the hot body (no function ref, no closure, no
+ * megamorphic call site).
+ *
+ * Layout (the iterative "2n" trick):
+ *   - `_t` is a `Float64Array(2 * length)`; `_t[0]` is UNUSED (null is not zero:
+ *     index 0 is never read as data).
+ *   - Leaves are `_t[n + i]` for public index `i` in `[0, n)`.
+ *   - Internal node `p` (in `[1, n)`) holds the fold of its subtree; its children
+ *     are `_t[2p]` and `_t[2p + 1]`, so `_t[1]` is the fold of the whole array.
+ *
+ * The two hot walks:
+ *   - `update(i, value)` sets leaf `_t[n + i] = value`, then climbs to the root
+ *     recomputing each ancestor `_t[p] = fold(_t[2p], _t[2p+1])` -- one write per
+ *     level, `<= log2(n)` levels.
+ *   - `query(lo, hi)` walks the two boundary indices UP the tree
+ *     (`l = n + lo`, `r = n + hi + 1`), folding in each node that lies fully
+ *     inside `[lo, hi]` as the boundaries ascend -- `<= 2 * log2(n)` folds.
+ *
+ * RISK (recorded in decisions/0005-segtree.md, D-05): the iterative 2n layout is
+ * ORDER-AGNOSTIC -- `query` mixes left- and right-boundary contributions into one
+ * accumulator, so it is correct ONLY because min / max / sum / gcd are all
+ * COMMUTATIVE as well as associative. A future NON-commutative fold (matrix
+ * product, string concat) must NOT reuse this layout; it belongs on a pow2
+ * layout with separate left/right accumulators combined in order.
+ *
+ * Identity (the trap): the fold's identity fills query accumulators and cleared /
+ * fresh leaves -- sum -> 0, min -> +Infinity, max -> -Infinity, gcd -> 0. Identity
+ * is a legal RESULT (a cleared min tree queries to +Infinity) but NEVER a legal
+ * INPUT: the value door still rejects user NaN / +-Infinity (and, for the `gcd`
+ * kind, any negative or non-integer value), typeof-guarded BEFORE coercion. Fixed
+ * capacity: `length` is frozen at construction; every out-of-range index and
+ * every non-finite (or out-of-domain gcd) value is a hard `[lite-logn]` throw.
+ */
+export class SegmentTree {
+    /**
+     * @param {number} length            exact element count; integer in [1, 2^30-1].
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold.
+     */
+    constructor(length, kind) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof length !== 'number' || !Number.isInteger(length) ||
+            length < 1 || length > SEGTREE_MAX) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree length must be an integer in [1, 2^30-1], got ' +
+                String(length));
+        }
+        const k = kind === 'min' ? 0 : kind === 'max' ? 1 : kind === 'sum' ? 2 :
+            kind === 'gcd' ? 3 : -1;
+        if (k === -1) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree kind must be "min", "max", "sum" or "gcd", got ' +
+                String(kind));
+        }
+        this._n = length;                        // element count (fixed)
+        this._k = k;                             // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
+        this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
+        this._t = new Float64Array(2 * length);  // _t[0] unused; leaves at n..2n-1
+        if (this._idv !== 0) this._t.fill(this._idv); // sum/gcd identity is 0 already
+    }
+
+    /** Element count this tree was sized for. O(1). */
+    get length() { return this._n; }
+
+    /** The frozen associative fold, 'min' | 'max' | 'sum' | 'gcd'. O(1). */
+    get kind() {
+        const k = this._k;
+        return k === 0 ? 'min' : k === 1 ? 'max' : k === 2 ? 'sum' : 'gcd';
+    }
+
+    /**
+     * The folded value over `[lo, hi]` INCLUSIVE on both ends. O(log n): walk the
+     * two boundaries up the tree, folding each node that lies fully inside the
+     * range into a single accumulator (started at the fold identity). Fails closed:
+     * out-of-range `lo` or `hi`, or `lo > hi`, each throw `[lite-logn]` (matching
+     * Fenwick.rangeSum). A one-element range `lo == hi` returns that leaf's value.
+     * @param {number} lo  integer in [0, length)
+     * @param {number} hi  integer in [lo, length)
+     * @returns {number} the fold over `[lo, hi]` (always folds at least one leaf)
+     */
+    query(lo, hi) {
+        const n = this._n;
+        if (typeof lo !== 'number' || !Number.isInteger(lo) || lo < 0 || lo >= n) {
+            return this._badRange(lo, hi);
+        }
+        if (typeof hi !== 'number' || !Number.isInteger(hi) || hi < 0 || hi >= n) {
+            return this._badRange(lo, hi);
+        }
+        if (lo > hi) return this._badRange(lo, hi);
+        const t = this._t, k = this._k;
+        let res = this._idv;
+        // Order-agnostic fold (correct because the fold is commutative -- D-05).
+        for (let l = n + lo, r = n + hi + 1; l < r; l >>= 1, r >>= 1) {
+            if (l & 1) {
+                const v = t[l++];
+                res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) :
+                    k === 2 ? res + v : segGcd(res, v);
+            }
+            if (r & 1) {
+                const v = t[--r];
+                res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) :
+                    k === 2 ? res + v : segGcd(res, v);
+            }
+        }
+        return res;
+    }
+
+    /**
+     * Set the element at 0-based leaf `i` to `value` (ABSOLUTE), then fix every
+     * ancestor by recomputing its fold. O(log n): one leaf write plus one write
+     * per level up to the root. Fails closed: a non-finite value (typeof-guarded
+     * first), a gcd-kind value that is negative or non-integer, or an out-of-range
+     * index each throw `[lite-logn]` as a no-op.
+     * @param {number} i      integer in [0, length)
+     * @param {number} value  a finite number (nonnegative integer for the gcd kind)
+     * @returns {this}
+     */
+    update(i, value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        const t = this._t, k = this._k;
+        let p = this._n + i;
+        t[p] = value;
+        for (p >>= 1; p >= 1; p >>= 1) {
+            const c = p << 1;                    // left child; right is c + 1
+            const a = t[c], b = t[c + 1];
+            t[p] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
+                k === 2 ? a + b : segGcd(a, b);
+        }
+        return this;
+    }
+
+    /**
+     * The single element at 0-based leaf `i` (the stored leaf value). O(1). An
+     * out-of-range index throws `[lite-logn]`.
+     * @param {number} i  integer in [0, length)
+     * @returns {number}
+     */
+    at(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        return this._t[this._n + i];
+    }
+
+    /**
+     * Reset every element to the fold identity in place, keeping the fixed
+     * capacity. O(n) cold path. Because `fold(identity, identity) === identity`,
+     * filling the WHOLE backing array (leaves and internal nodes alike) with the
+     * identity leaves a fully-consistent tree -- a query returns the identity.
+     * @returns {this}
+     */
+    clear() {
+        this._t.fill(this._idv);
+        return this;
+    }
+
+    /**
+     * Visit every element as `(value, index, tree)` for index in `[0, length)`, in
+     * ASCENDING leaf order. O(n) COLD scan, allocation-free in the loop body (pass
+     * a hoisted callback).
+     * @param {(value:number, index:number, tree:SegmentTree)=>void} fn
+     */
+    forEach(fn) {
+        const t = this._t, n = this._n;
+        for (let i = 0; i < n; i++) fn(t[n + i], i, this);
+    }
+
+    /**
+     * O(n) bottom-up bulk build from `values` -- NOT n individual O(log n) updates.
+     * Seed each leaf `_t[n + i] = values[i]`, then fold every internal node once,
+     * deepest-first (`p` from `n - 1` down to `1`): `_t[p] = fold(_t[2p],
+     * _t[2p+1])`. COLD path; fails closed on a non-array-like `values`, any
+     * non-finite entry, or (gcd kind) any negative / non-integer entry before the
+     * tree is usable. `length` and `kind` are validated by the delegated ctor.
+     * @param {ArrayLike<number>} values      finite numbers; length in [1, 2^30-1]
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold
+     * @returns {SegmentTree}
+     */
+    static build(values, kind) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError('[lite-logn] SegmentTree.build needs an array-like of finite numbers');
+        }
+        const length = values.length;
+        const st = new SegmentTree(length, kind);  // validates length in [1, 2^30-1] + kind
+        const t = st._t, n = st._n, k = st._k;
+        const gcdKind = k === 3;
+        for (let i = 0; i < length; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] SegmentTree.build value must be a finite number, got ' + String(v));
+            }
+            if (gcdKind && (!Number.isInteger(v) || v < 0)) {
+                throw new RangeError(
+                    '[lite-logn] SegmentTree.build gcd value must be a nonnegative integer, got ' +
+                    String(v));
+            }
+            t[n + i] = v;                          // seed the leaf
+        }
+        // Fold every internal node once, deepest-first -- O(n), not n * O(log n).
+        for (let p = n - 1; p >= 1; p--) {
+            const c = p << 1;
+            const a = t[c], b = t[c + 1];
+            t[p] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
+                k === 2 ? a + b : segGcd(a, b);
+        }
+        return st;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ---
+
+    /** @private */
+    _badIndex(i) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree index must be an integer in [0, ' + this._n + '), got ' +
+            String(i));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree query needs integers 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] SegmentTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badGcdValue(value) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree gcd value must be a nonnegative integer, got ' + String(value));
     }
 }

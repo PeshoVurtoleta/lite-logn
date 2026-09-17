@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree } from '../LogN.js';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
 // x is log2(n); y is nsPerOp. Returns { slope, intercept, r2 }. Pure, alloc-
@@ -107,6 +107,24 @@ export const FENWICK_UPDATE_SLOPE_HI = 4.30;       // median 3.07 * 1.4
 export const FENWICK_PREFIX_SLOPE_LO = 1.76;       // median 2.93 * 0.6
 export const FENWICK_PREFIX_SLOPE_HI = 4.10;       // median 2.93 * 1.4
 
+// --- SegmentTree (v0.3.0): shared R^2 floor, OWN per-op slope bands (D-05) -----
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-
+// wide; each op declares its OWN slope band = median-of-N(15) fit-runs * [0.6, 1.4]
+// on this machine. A SegmentTree op touches a node PER LEVEL spread across a `2n`
+// array, so its cells reach out to index ~2n; above ~2^16 the tree leaves the
+// steady cache band and the fit flakes (lite-o1 ADR-0004 domain discipline), so
+// the gated sweep is pinned to powers of two in [2^10 .. 2^16] -- EXACT powers so
+// each range decomposes into a REGULAR node count (2*(log2 n - 1) for the gated
+// query window), which a non-pow2 n does not (its decomposition depends on the bit
+// pattern and flakes the line). The STRUCTURE still accepts any length; only the
+// witness sweep is pow2. query folds ~2 nodes/level (its slope is HIGHER than
+// update's single write/level) -- expected, which is why only the R^2 floor is
+// shared. Bands calibrated from N=15 fit runs (medians recorded inline).
+export const SEGTREE_UPDATE_SLOPE_LO = 2.29;       // median 3.83 * 0.6
+export const SEGTREE_UPDATE_SLOPE_HI = 5.35;       // median 3.83 * 1.4
+export const SEGTREE_QUERY_SLOPE_LO = 4.30;        // median 7.17 * 0.6
+export const SEGTREE_QUERY_SLOPE_HI = 10.04;       // median 7.17 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -120,6 +138,15 @@ const FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // rebuild / naive re-sum) stay on the small O(n^2) sweep.
 const FEN_SWEEP = [13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5].map((k) => Math.round(2 ** k));
 const FEN_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// SegmentTree's gated sweep: EXACT powers of two 2^10 .. 2^16. Exact powers make
+// the decomposition node count regular (update climbs floor(log2 n) levels; the
+// gated query window [1, n-2] folds 2*(log2 n - 1) nodes), so the staircase maps
+// cleanly onto the continuous log2(n) axis. The top is pinned at 2^16 because a
+// SegmentTree op's cells reach index ~2n, so above that the tree leaves the steady
+// cache band and the fit flakes. Its O(n) foils (scan-fold / whole-tree rebuild)
+// stay on the small O(n^2) sweep.
+const SEG_SWEEP = [10, 11, 12, 13, 14, 15, 16].map((k) => 2 ** k);
+const SEG_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -188,10 +215,16 @@ function measureFoil(n) {
 // leaves the number of LEVELS (= log2(n)) as the only variable. Both ops walk the
 // HIGH, spread cells near the top of the tree (~[n/2, n]) so each added level is a
 // genuine access -- the log line is the level count, not a cache artifact.
-const FEN_ITERS = 400000;  // hammered ops per timed batch
-const FEN_BATCH = 8;       // min-over-batches: the MIN filters interference (only
+const FEN_ITERS = 500000;  // hammered ops per timed batch
+const FEN_BATCH = 20;      // min-over-batches: the MIN filters interference (only
                            // ambient noise ADDS time, so the min is the cleanest
-                           // per-op signal -- the same asymmetry measureAllocs uses)
+                           // per-op signal -- the same asymmetry measureAllocs uses).
+                           // A sub-ns per-level op has a shallow, noise-sensitive
+                           // log line; a generous batch count keeps the min-over-
+                           // batches fit reliably above the frozen R^2 floor. This
+                           // raises measurement QUALITY only -- the floor and the
+                           // per-op slope bands stay frozen. Same count SegmentTree
+                           // uses, so the two fast members measure identically.
 
 // update: climb from index 2^(m-1) (an ODD internal k0), touching the high spread
 // cells [~n/2 .. n] -- ~m-1 `_t` touches, one per level, all hot. Return the MIN
@@ -285,6 +318,107 @@ function measurePrefixFoil(n) {
     return elapsed / count;
 }
 
+// --- SegmentTree measurement (both hot ops + their O(n) foils) ---------------
+// Same discipline as Fenwick: the tree is built OUTSIDE timing, and each op is
+// measured as its FULL-HEIGHT walk hammered on ONE fixed target so the touched
+// cells stay hot and the number of LEVELS (= log2(n)) is the only variable.
+// Same effort and methodology as Fenwick (FEN_ITERS / FEN_BATCH): a generous
+// batch count so min-over-batches rejects ambient interference on the shallow,
+// sub-4ns update line -- measurement QUALITY only, the frozen R^2 floor and the
+// per-op slope bands are untouched. The two fast members measure identically.
+const SEG_ITERS = 500000;
+const SEG_BATCH = 20;
+
+// update: hammer an ABSOLUTE set at leaf n-1 -- the leaf write plus a full climb
+// to the root, one write per level. Bounded values keep the sum fold finite.
+// Return the MIN per-op time over SEG_BATCH batches.
+function measureSegUpdate(n) {
+    const st = new SegmentTree(n, 'sum');
+    const rnd = mulberry32(0x5151 ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (rnd() * 65536) | 0);   // seed
+    const idx = n - 1;                                              // full-height leaf
+    for (let w = 0; w < SEG_ITERS; w++) st.update(idx, w & 0xffff); // warm
+    let best = Infinity;
+    for (let b = 0; b < SEG_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SEG_ITERS; i++) st.update(idx, i & 0xffff);
+        const e = (nowNs() - t0) / SEG_ITERS;
+        if (e < best) best = e;
+    }
+    return best;
+}
+
+// query: hammer the widest full-height window [1, n-2] -- the MAX decomposition,
+// 2*(log2 n - 1) folds through the boundary spine (one node per boundary per
+// level). Return the MIN per-op time over SEG_BATCH batches.
+function measureSegQuery(n) {
+    const st = new SegmentTree(n, 'sum');
+    const rnd = mulberry32(0x7333 ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (rnd() * 65536) | 0);   // seed
+    const lo = 1, hi = n - 2;
+    let sink = 0;
+    for (let w = 0; w < SEG_ITERS; w++) sink += st.query(lo, hi);   // warm
+    let best = Infinity;
+    for (let b = 0; b < SEG_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SEG_ITERS; i++) sink += st.query(lo, hi);
+        const e = (nowNs() - t0) / SEG_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// update FOIL: an update that REBUILDS the whole 2n tree bottom-up = O(n) per
+// update (the naive way to keep queries O(log n): rebuild on every write). Linear
+// on the log2(n) axis, so a straight-line fit MISSES the floor. O(n^2) total.
+function measureSegUpdateFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const leaf = new Float64Array(n);
+    const t = new Float64Array(2 * n);
+    const rnd = mulberry32(0x1a2b ^ n);
+    for (let i = 0; i < n; i++) leaf[i] = (rnd() * 65536) | 0;
+    { for (let i = 0; i < n; i++) t[n + i] = leaf[i]; for (let p = n - 1; p >= 1; p--) t[p] = t[p << 1] + t[(p << 1) + 1]; } // warm
+    let elapsed = 0, count = 0, idx = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            leaf[idx] = it & 0xffff;
+            for (let i = 0; i < n; i++) t[n + i] = leaf[i];
+            for (let p = n - 1; p >= 1; p--) t[p] = t[p << 1] + t[(p << 1) + 1]; // O(n) rebuild
+            idx++; if (idx >= n) idx = 0;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (t[1] < 0) throw new Error('unreachable'); // keep t live
+    return elapsed / count;
+}
+
+// query FOIL: a naive linear scan-fold over [1, n-2] of a plain Float64Array =
+// O(n) per query (the default before you know the segment-tree trick). Exponential
+// on the log2(n) axis, so it misses the floor. O(n^2) total.
+function measureSegQueryFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    const rnd = mulberry32(0x2c3d ^ n);
+    for (let i = 0; i < n; i++) a[i] = (rnd() * 65536) | 0;
+    { let s = 0; for (let k = 1; k <= n - 2; k++) s += a[k]; if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let s = 0;
+            for (let k = 1; k <= n - 2; k++) s += a[k]; // O(n) scan-fold
+            sink += s;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -325,11 +459,43 @@ const MEMBERS = [
         foil: measurePrefixFoil,
         foilName: 'naive re-sum (O(n) per query)',
     },
+    {
+        name: 'SegmentTree',
+        op: 'update',
+        sweep: SEG_SWEEP,
+        foilSweep: SEG_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-05 inherits D-08)
+        slopeLo: SEGTREE_UPDATE_SLOPE_LO,      // own band
+        slopeHi: SEGTREE_UPDATE_SLOPE_HI,
+        run: measureSegUpdate,
+        foil: measureSegUpdateFoil,
+        foilName: 'whole-tree rebuild (O(n) per update)',
+    },
+    {
+        name: 'SegmentTree',
+        op: 'query',
+        sweep: SEG_SWEEP,
+        foilSweep: SEG_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-05 inherits D-08)
+        slopeLo: SEGTREE_QUERY_SLOPE_LO,       // own band
+        slopeHi: SEGTREE_QUERY_SLOPE_HI,
+        run: measureSegQuery,
+        foil: measureSegQueryFoil,
+        foilName: 'scan-fold (O(n) per query)',
+    },
 ];
 
-function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.2.0\n');
+async function main() {
+    process.stdout.write('lite-logn O(log n) Witness -- v0.3.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
+    // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
+    // the `verify` chain it runs right after torture (2M+ ops across three members),
+    // which leaves scheduler / thermal residue that tilts the shallow, sub-4ns fast
+    // lines at their low-n points. A brief settle (and a GC if --expose-gc is on)
+    // restores a clean baseline for EVERY member uniformly -- it is not a per-member
+    // gate and it does not touch the frozen R^2 floor or any slope band.
+    if (typeof globalThis.gc === 'function') globalThis.gc();
+    await new Promise((r) => setTimeout(r, 3000));
     let ok = true;
     for (const m of MEMBERS) {
         const xs = [], ys = [];

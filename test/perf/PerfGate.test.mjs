@@ -18,7 +18,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -169,6 +169,78 @@ const fenAtRangeMix = {
     statsOf(s) { return { grows: fenGrows(s) }; },
 };
 
+/** SegmentTree's zero-alloc counter: its single backing buffer's byte length,
+ *  fixed at construction, so the delta across the window must be 0. */
+function segGrows(s) { return s.seg._t.buffer.byteLength; }
+
+/** A SegmentTree prefilled to capacity with integer values (sum fold). */
+function segFill() {
+    const st = new SegmentTree(CAP, 'sum');
+    for (let i = 0; i < CAP; i++) st.update(i, (i * 2654435761) & 0xffff);
+    return st;
+}
+
+/**
+ * update churn: each op sets an ABSOLUTE bounded leaf value then fixes ancestors
+ * (one write per level). Bounded values keep the folds finite; zero allocation.
+ */
+const segUpdateChurn = {
+    name: 'SegmentTree update churn',
+    setup() { return { seg: segFill(), tick: 0 }; },
+    hot(s, n) {
+        const st = s.seg;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            st.update(t & MASK, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: segGrows(s) }; },
+};
+
+/**
+ * query churn: each op folds a fixed-width window (two boundary walks up the
+ * tree), folded into an int32 accumulator. Zero allocation.
+ */
+const segQueryChurn = {
+    name: 'SegmentTree query churn',
+    setup() { return { seg: segFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const st = s.seg;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = t & (MASK >> 1);
+            acc = (acc + (st.query(lo, lo + 100) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: segGrows(s) }; },
+};
+
+/**
+ * segGrows / at mix: at(i) (a single leaf read) and a windowed query, folded into
+ * an int32 accumulator, proving the backing buffer never grows. Zero allocation.
+ */
+const segGrowsMix = {
+    name: 'SegmentTree at/query mix (buffer never grows)',
+    setup() { return { seg: segFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const st = s.seg;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = t & (MASK >> 1);
+            acc = (acc + (st.at(t & MASK) | 0) + (st.query(lo, lo + 100) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: segGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -199,6 +271,7 @@ zgcSuite({
     counters: { grows: 0 },
     maxRetainedKB: 64,
     scenarios: [pushPopChurn, changeKeyChurn, readMix,
-        fenUpdateChurn, fenPrefixChurn, fenAtRangeMix],
+        fenUpdateChurn, fenPrefixChurn, fenAtRangeMix,
+        segUpdateChurn, segQueryChurn, segGrowsMix],
     mustFail: [teethMustFailAlloc],
 });

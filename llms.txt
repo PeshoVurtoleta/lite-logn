@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.2.0
+Version: 0.3.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -18,8 +18,8 @@ It is the O(log n) sibling of @zakkster/lite-o1: lite-o1 holds the constant (a
 FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
-v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick. The roster (one member per
-session, each landing append-only):
+v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree. The
+roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -33,8 +33,11 @@ session, each landing append-only):
   two prefix walks. 0-based public indices; 1-based internally (`_t[0]` the unused
   identity sentinel). Two straight log lines (update + prefix).
 - SegmentTree (v0.3.0) -- general associative range-query (min / max / sum / gcd)
-  + point-update over a flat, array-embedded tree, O(log n) worst-case; the fold
-  is chosen once at construction.
+  + point-update over a SINGLE flat `Float64Array(2n)` (leaves at n..2n-1, `_t[0]`
+  unused), BOTH O(log n) via iterative bottom-up walks; the fold is chosen ONCE at
+  construction (ctor-cached small-int `_k` combined by an inline switch). The
+  complement to Fenwick: Fenwick's rangeSum needs an INVERSE (subtraction), so it
+  is sum-only; SegmentTree folds any associative + commutative op over a range.
 - SkipList (v0.4.0) -- the ordered map (get / set / delete / successor /
   rangeIter), pointer-free over a shared node pool (parallel Uint32Array `next`
   columns), expected O(log n), deterministic seed, tail reported.
@@ -82,6 +85,32 @@ session, each landing append-only):
   - `Fenwick.build(values)` -> Fenwick. O(n) LINEAR bulk build (each cell adds
     itself to its parent in one pass -- NOT n incremental updates); fails closed
     on a non-array-like or any non-finite value.
+
+- `SegmentTree` -- class. An associative range-query AND a point-update, BOTH
+  O(log n), over a SINGLE flat `Float64Array(2n)` (leaves at n..2n-1, `_t[0]`
+  unused). The fold (min / max / sum / gcd) is chosen ONCE at construction and
+  cached as a small-int combined by an inline switch on the hot path. The
+  iterative 2n layout is order-agnostic -- correct because all four folds are
+  commutative + associative (a non-commutative fold would need a pow2 layout).
+  Identity fills query accumulators + cleared / fresh leaves (sum -> 0, min ->
+  +Infinity, max -> -Infinity, gcd -> 0) but is never a legal INPUT: the value
+  door rejects user NaN / +-Infinity, and the gcd kind additionally rejects
+  negatives + non-integers (typeof-guarded before coercion).
+  - `new SegmentTree(length, kind)` -- length an integer in [1, 2^30-1] (HALF of
+    Fenwick's ceiling: the 2n array must keep `2n` a positive int32); kind is
+    'min' | 'max' | 'sum' | 'gcd'. Allocates one `Float64Array(2 * length)`.
+  - `query(lo, hi)` -> number. The fold over [lo, hi] INCLUSIVE both ends; throws
+    on out-of-range or lo > hi (matching Fenwick.rangeSum). lo == hi returns that
+    single leaf. A fresh / cleared tree queries to the identity.
+  - `update(i, value)` -> this. Set leaf i to value (ABSOLUTE), then fix ancestors;
+    value finite (nonnegative integer for the gcd kind), out-of-range i throws.
+  - `at(i)` -> number. The single leaf value. O(1). Out-of-range i throws.
+  - `length` / `kind` getters; `clear()` -> this (reset to identity, keep
+    capacity); `forEach(fn)` visits (value, index, tree) in ascending leaf order.
+  - `SegmentTree.build(values, kind)` -> SegmentTree. O(n) bottom-up bulk build
+    (seed leaves, then fold each internal node once deepest-first -- NOT n
+    incremental updates); fails closed on a non-array-like, any non-finite value,
+    or (gcd) any negative / non-integer.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

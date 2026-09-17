@@ -6,6 +6,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-17
+
+### Added
+
+- **SegmentTree** -- the third member: an associative range-query AND a
+  point-update, BOTH O(log n), over a SINGLE flat `Float64Array(2 * length)`
+  (leaves at `n .. 2n-1`, `_t[0]` unused) via iterative bottom-up walks -- no
+  nodes, no pointers, no recursion on the hot path. The fold is chosen ONCE at
+  construction (`'min'` / `'max'` / `'sum'` / `'gcd'`) and cached as a small-int
+  `_k` combined by an INLINE switch in the hot body (no function ref, no closure,
+  no megamorphic call site). Surface: `query(lo, hi)` (INCLUSIVE both ends,
+  matching `Fenwick.rangeSum`) / `update(i, value)` (ABSOLUTE leaf set + ancestor
+  fix) / `at(i)` (O(1) leaf read), `length` / `kind` getters, `clear`, `forEach`,
+  and a static `SegmentTree.build(values, kind)` O(n) bottom-up bulk build (seed
+  leaves, then fold each internal node once deepest-first -- not n incremental
+  updates). The fold identity fills query accumulators and cleared / fresh leaves
+  (`sum -> 0`, `min -> +Infinity`, `max -> -Infinity`, `gcd -> 0`); it is a legal
+  RESULT but never a legal INPUT -- the value door rejects user `NaN` /
+  `+-Infinity` (and, for the `gcd` kind, negatives + non-integers), typeof-guarded
+  before coercion, with a `[lite-logn]` throw. `SEGTREE_MAX = 2^30 - 1` (HALF of
+  Fenwick's ceiling: the `2n` layout must keep `2n` a positive int32). `query` /
+  `update` / `at` allocate zero bytes after construction. Verified: torture 0 B/op
+  on every hot lane (+ a 32 B/op control lane proving the instrument has teeth),
+  leak `size 0/0`, `gc major = 0`.
+- **Witness: two more straight log lines.** `test/witness.mjs` gains SegmentTree's
+  `update` and `query` entries. Measured on this machine (shared R^2 floor 0.958):
+  update R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`, median 3.83 x
+  [0.6, 1.4]); query R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`,
+  median 7.17 x [0.6, 1.4]). The gated sweep is pinned to EXACT powers of two in
+  `[2^10, 2^16]` (a segment-tree op touches a node per level spread across the
+  `2n` array, so above ~2^16 the tree leaves the steady cache band; exact powers
+  keep the range decomposition a regular node count). Both O(n) foils leave the
+  line: the whole-tree rebuild (O(n) per update, R^2 ~ 0.85) and the scan-fold
+  (O(n) per query, R^2 ~ 0.75), each below the floor.
+- **ADR.** [`decisions/0005-segtree.md`](./decisions/0005-segtree.md) (D-05):
+  scope is point-update + range-query ONLY (no lazy propagation, no caller-supplied
+  fold) for v0.3.0; the fold is injected via a ctor-cached `_k` inline switch, not
+  a function ref; and the iterative `2n` layout is order-agnostic, so it is correct
+  ONLY for commutative + associative folds -- a future non-commutative fold is
+  routed to a pow2 layout instead.
+
+### Unchanged
+
+- **BinaryHeap and Fenwick are byte-identical.** The v0.1.0 and v0.2.0 member class
+  bodies are untouched; only the file header roster, the `VERSION` const, and the
+  appended SegmentTree block changed in `LogN.js`.
+
 ## [0.2.0] - 2026-09-17
 
 ### Added
@@ -78,6 +125,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [`decisions/0003-pack.md`](./decisions/0003-pack.md) (D-07: `files[]` ships the
   six files only; `test/`, `benchmark/`, `decisions/`, `demo/` are repo-only).
 
-[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/PeshoVurtoleta/lite-logn/releases/tag/v0.1.0

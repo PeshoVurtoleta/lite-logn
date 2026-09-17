@@ -97,3 +97,36 @@ export class Fenwick {
     /** O(n) linear bulk build from a finite-number array-like. */
     static build(values: ArrayLike<number>): Fenwick;
 }
+
+/**
+ * A segment tree: an associative range-query AND a point-update, BOTH O(log n),
+ * over a single flat Float64Array(2n) (leaves at n..2n-1, _t[0] unused). The fold
+ * (min / max / sum / gcd) is chosen once at construction and cached. query(lo, hi)
+ * is INCLUSIVE both ends; update(i, value) sets an ABSOLUTE leaf value. Values are
+ * finite numbers (nonnegative integers for the gcd kind); NaN / +-Infinity / out-
+ * of-domain values fail closed. Every hot op allocates zero bytes.
+ */
+export class SegmentTree {
+    /** @param length exact element count; integer in [1, 2^30-1].
+     *  @param kind the frozen associative fold. */
+    constructor(length: number, kind: 'min' | 'max' | 'sum' | 'gcd');
+
+    /** Element count this tree was sized for. */
+    readonly length: number;
+    /** The frozen associative fold. */
+    readonly kind: 'min' | 'max' | 'sum' | 'gcd';
+
+    /** Folded value over [lo, hi] inclusive both ends. O(log n). Throws on OOB or lo > hi. */
+    query(lo: number, hi: number): number;
+    /** Set leaf i to value (absolute), fixing ancestors. O(log n). Non-finite / OOB throws. */
+    update(i: number, value: number): this;
+    /** The single element at leaf i. O(1). Out-of-range i throws. */
+    at(i: number): number;
+    /** Reset every element to the fold identity, keeping capacity. */
+    clear(): this;
+    /** Visit every element as (value, index, tree) in ascending leaf order. */
+    forEach(fn: (value: number, index: number, tree: SegmentTree) => void): void;
+
+    /** O(n) bottom-up bulk build from a finite-number array-like and a fold kind. */
+    static build(values: ArrayLike<number>, kind: 'min' | 'max' | 'sum' | 'gcd'): SegmentTree;
+}

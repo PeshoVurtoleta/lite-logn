@@ -23,5 +23,5 @@ test('Bench gate scaffold: the benchmark suite lands in a later session', () => 
     // This placeholder keeps `test/Bench.test.mjs` in the `npm test` glob green
     // and non-empty so the Benchmark session has a wired gate to fill.
     assert.equal(typeof VERSION, 'string');
-    assert.equal(VERSION, '0.2.0');
+    assert.equal(VERSION, '0.3.0');
 });

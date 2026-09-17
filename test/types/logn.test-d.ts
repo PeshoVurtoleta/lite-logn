@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -63,3 +63,21 @@ fen.update(0, 'x');
 
 // @ts-expect-error -- Fenwick constructor takes a single length argument.
 new Fenwick(8, 'min');
+
+// --- SegmentTree -----------------------------------------------------------
+const seg = new SegmentTree(1024, 'sum');
+const segU: SegmentTree = seg.update(0, 2.5);   // fluent -> this
+const segC: SegmentTree = seg.clear();          // fluent -> this
+const q: number = seg.query(2, 8);
+const sat: number = seg.at(5);
+const slen: number = seg.length;
+const sk: 'min' | 'max' | 'sum' | 'gcd' = seg.kind;
+seg.forEach((value, index, self) => { void value; void index; void self; });
+const sbuilt: SegmentTree = SegmentTree.build([1, 2, 3, 4], 'min');
+void segU; void segC; void q; void sat; void slen; void sk; void sbuilt;
+
+// @ts-expect-error -- kind must be 'min' | 'max' | 'sum' | 'gcd'.
+new SegmentTree(8, 'product');
+
+// @ts-expect-error -- update value must be a number.
+seg.update(0, 'x');

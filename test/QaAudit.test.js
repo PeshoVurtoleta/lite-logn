@@ -33,19 +33,20 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.2.0 at the Fenwick release', () => {
-    assert.equal(VERSION, '0.2.0');
+test('VERSION is exactly 0.3.0 at the SegmentTree release', () => {
+    assert.equal(VERSION, '0.3.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (2 members) --------
+// --- frozen export surface: VERSION + the shipped members (3 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap and Fenwick at v0.2.0 (2 members)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick and SegmentTree at v0.3.0 (3 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'SegmentTree', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
+    assert.equal(typeof LogNModule.SegmentTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -127,4 +128,41 @@ test('Fenwick fails closed with a [lite-logn]-tagged throw on every coercion doo
     assert.throws(() => f.rangeSum(5, 2), /\[lite-logn\]/);
     assert.throws(() => Fenwick.build(null), /\[lite-logn\]/);
     assert.throws(() => Fenwick.build([1, NaN]), /\[lite-logn\]/);
+});
+
+// --- SegmentTree (v0.3.0): coercion + [lite-logn] fail-closed tag -------------
+
+test('SegmentTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { SegmentTree } = LogNModule;
+    // constructor: bad length (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 2 ** 30]) {
+        assert.throws(() => new SegmentTree(bad, 'sum'), /\[lite-logn\]/, 'ctor length ' + String(bad));
+    }
+    // constructor: bad kind
+    for (const bad of ['product', 'MIN', '', null, undefined, 0, Symbol('k'), {}]) {
+        assert.throws(() => new SegmentTree(8, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    const st = new SegmentTree(8, 'sum');
+    // non-finite / non-number value, typeof-first (no Symbol coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => st.update(0, bad), /\[lite-logn\]/, 'update value ' + String(bad));
+    }
+    // out-of-range indices on every index-taking op
+    for (const bad of [-1, 8, 100, 1.5, NaN, '0', null, Symbol('i')]) {
+        assert.throws(() => st.update(bad, 1), /\[lite-logn\]/, 'update i ' + String(bad));
+        assert.throws(() => st.at(bad), /\[lite-logn\]/, 'at ' + String(bad));
+        assert.throws(() => st.query(bad, 7), /\[lite-logn\]/, 'query lo ' + String(bad));
+        assert.throws(() => st.query(0, bad), /\[lite-logn\]/, 'query hi ' + String(bad));
+    }
+    // query lo > hi fails closed; the gcd kind constrains its value domain
+    assert.throws(() => st.query(5, 2), /\[lite-logn\]/);
+    const g = new SegmentTree(8, 'gcd');
+    for (const bad of [-1, 1.5, NaN, '4', Symbol('g')]) {
+        assert.throws(() => g.update(0, bad), /\[lite-logn\]/, 'gcd value ' + String(bad));
+    }
+    // build fails closed on bad input
+    assert.throws(() => SegmentTree.build(null, 'sum'), /\[lite-logn\]/);
+    assert.throws(() => SegmentTree.build([1, NaN], 'sum'), /\[lite-logn\]/);
+    assert.throws(() => SegmentTree.build([1, 2], 'bad'), /\[lite-logn\]/);
+    assert.throws(() => SegmentTree.build([4, -2], 'gcd'), /\[lite-logn\]/);
 });

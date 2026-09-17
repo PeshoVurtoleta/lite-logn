@@ -1,11 +1,11 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.2.0 two members have
-shipped -- BinaryHeap and Fenwick -- so this guide carries their per-member
-sections; SegmentTree and SkipList are still skeleton rows that fill in per
-release. It is NOT an API encyclopedia (that is the README + `LogN.d.ts`); it
-answers "which member, and is my logarithm real?"
+avoid, and how to measure the logarithm yourself. At v0.3.0 three members have
+shipped -- BinaryHeap, Fenwick and SegmentTree -- so this guide carries their
+per-member sections; SkipList is still a skeleton row that fills in per release.
+It is NOT an API encyclopedia (that is the README + `LogN.d.ts`); it answers
+"which member, and is my logarithm real?"
 
 Scope discipline (mirrors lite-o1's GUIDE): a decision flowchart + a picker
 table up top, then reach-for / avoid + measure-it per member. No re-documenting
@@ -31,9 +31,9 @@ gate shape.
 
 ## Which member? (decision flowchart)
 
-ASCII, routes on the discriminating questions. Every leaf is a planned member;
-`(wc)` = worst-case O(log n), `(am)` = amortized, `(exp)` = expected. None have
-shipped at v0.1.0 -- this fills in per release.
+ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
+`(am)` = amortized, `(exp)` = expected. At v0.3.0 BinaryHeap, Fenwick and
+SegmentTree have shipped; SkipList fills in per release.
 
 ```
 START -- what do you need?
@@ -61,7 +61,8 @@ START -- what do you need?
 | Ordered map / successor / range iterate | SkipList | expected O(log n) | 0.4.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
-each member release (BinaryHeap's section is pending; Fenwick's is below).
+each member release (BinaryHeap's section is pending; Fenwick's and SegmentTree's
+are below).
 
 ---
 
@@ -99,6 +100,49 @@ the same walk for free.
 foils -- a prefix-array rebuild per update, a naive re-sum per query -- must MISS
 the floor (they fit at R^2 ~ 0.76). If your workload's fit leaves the line, your
 `n` is outside the honest steady band or your access pattern is memory-bound.
+
+---
+
+## SegmentTree -- any associative fold over a range, under point updates
+
+**Reach for it when** you need a range query that is NOT a plain sum -- a range
+MIN, range MAX, or range GCD -- over an array whose elements keep changing, and
+you cannot afford an O(n) scan per query. SegmentTree folds any associative +
+commutative operation (min / max / sum / gcd) over `[lo, hi]` INCLUSIVE in
+O(log n), with point `update` also O(log n) and `at` O(1). Canonical uses:
+sliding-window minima under edits, "cheapest / hottest in this range right now",
+range-GCD queries, or a range-SUM when you also want the SAME structure to serve
+a min/max query. The fold is fixed at construction, so pick the kind up front.
+
+**Avoid it when:**
+
+- You only ever need a range SUM (no min / max / gcd). **Fenwick** (v0.2.0) is
+  leaner: one `n`-wide array vs SegmentTree's `2n`, and its `i & -i` walk is a
+  hair cheaper per level. Reach for SegmentTree when the fold is non-invertible
+  (min / max / gcd) or when one structure must serve several range folds.
+- Your array is STATIC (no updates after load). For a static range-min / max, a
+  sparse table gives O(1) queries -- see `@zakkster/lite-o1`'s `SparseTable`.
+  SegmentTree's O(log n) query buys you nothing if nothing changes.
+- You need a NON-commutative fold (matrix product, string concat, non-abelian
+  monoid). The iterative `2n` layout mixes left- and right-boundary contributions
+  into one accumulator, so it is correct ONLY for commutative folds; a
+  non-commutative fold needs a pow2 layout with separate ordered accumulators
+  (see [`decisions/0005-segtree.md`](./decisions/0005-segtree.md)).
+- You need RANGE updates (add x to every element in `[lo, hi]`). v0.3.0 is
+  point-update only; lazy propagation is deferred (D-05).
+
+**Measure it yourself:** `npm run witness` fits `update` and `query` against
+`nsPerOp = intercept + slope*log2(n)`. Both must clear the shared R^2 floor
+(0.958) and sit inside their own slope bands (`update [2.29, 5.35]`,
+`query [4.30, 10.04]` ns/level -- query is steeper because it folds ~2 nodes per
+level where update writes one; see
+[`decisions/0005-segtree.md`](./decisions/0005-segtree.md)). The gated sweep is
+EXACT powers of two in `[2^10, 2^16]`: a segment-tree op touches a node per level
+spread across the `2n` array, so above ~2^16 the tree leaves the steady cache
+band, and exact powers keep the range decomposition a regular node count. Both
+O(n) foils -- a whole-tree rebuild per update, a scan-fold per query -- must MISS
+the floor. If your workload's fit leaves the line, your `n` is above the steady
+cache band or your access pattern is memory-bound.
 
 ---
 

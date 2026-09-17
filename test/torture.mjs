@@ -10,16 +10,17 @@
  *                                   and does the hot path allocate? 0 B/op,
  *                                   maxMajor 0, maxPauseMs <= 2 is the gate.
  *
- * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick. Phase 1 (retention) tracks a
- * fresh heap AND a fresh Fenwick per churn cycle -- the cleanup closes over
- * NOTHING (the held-value contract), so both finalize and tracker.size() returns
- * to 0. Phase 2 steps a single out-of-loop heap (push / pop / changeKey / remove)
- * and a single out-of-loop Fenwick (update / prefix / at / rangeSum / set /
- * forEach) and gates 0 B/op via measureAllocs -- a deliberately-allocating
- * CONTROL lane must report > 0 bytes, proving the instrument has teeth. It then
- * profiles a steady churn window mixing both members for gc major = 0, and
- * asserts the backing arrayBuffers do not grow across fill/clear cycles for
- * either member.
+ * v0.1.0 ships BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree. Phase 1
+ * (retention) tracks a fresh heap, a fresh Fenwick AND a fresh SegmentTree per
+ * churn cycle -- the cleanup closes over NOTHING (the held-value contract), so all
+ * three finalize and tracker.size() returns to 0. Phase 2 steps a single
+ * out-of-loop heap (push / pop / changeKey / remove), a single out-of-loop Fenwick
+ * (update / prefix / at / rangeSum / set / forEach) and a single out-of-loop
+ * SegmentTree (update / query / at / forEach) and gates 0 B/op via measureAllocs
+ * -- a deliberately-allocating CONTROL lane must report > 0 bytes, proving the
+ * instrument has teeth. It then profiles a steady churn window mixing all three
+ * members for gc major = 0, and asserts the backing arrayBuffers do not grow
+ * across fill/clear cycles for any member.
  * Never widen a budget to make this pass -- a budget that moves is not a gate.
  *
  * ENTRY CONTRACT: --expose-gc is mandatory (the GC gate is meaningless without
@@ -51,7 +52,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -91,6 +92,15 @@ async function main() {
             fen.prefix(63);
             fen.rangeSum(1, 40);
             tracker.track(fen, noopRelease, CYCLES + i, { audit: true });
+            // A fresh SegmentTree per cycle, exercised then dropped. Same held-
+            // value contract: a SegmentTree owns only its one Float64Array, no
+            // external resource, so the no-op cleanup never defeats finalization.
+            const seg = new SegmentTree(64, (i & 1) ? 'min' : 'sum');
+            for (let k = 0; k < 64; k++) seg.update(k, (k * 2654435761) & 0xffff);
+            seg.query(0, 63);
+            seg.query(10, 40);
+            seg.at(7);
+            tracker.track(seg, noopRelease, 2 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -184,6 +194,36 @@ async function main() {
     function forEachCb(value, index) { feAcc = (feAcc + value + index) | 0; }
     const stepForEach = () => { fen.forEach(forEachCb); };
 
+    // SegmentTree: one out-of-loop tree prefilled to capacity (sum fold). Each
+    // lane is a real hot op that MUST allocate zero bytes.
+    const seg = new SegmentTree(CAP, 'sum');
+    for (let i = 0; i < CAP; i++) seg.update(i, (i * 2654435761) & 0xffff);
+
+    let sk = 0;
+    // update: set an ABSOLUTE bounded leaf value, then fix ancestors -- one write
+    // per level. Bounded value so the tree never drifts to +-Infinity.
+    const stepSegUpdate = () => {
+        seg.update(sk & MASK, sk & 0xffff);
+        sk = (sk + 1) | 0;
+    };
+    // query: fold a fixed-width window (two boundary walks), folded into an accumulator.
+    let sacc = 0;
+    const stepSegQuery = () => {
+        const lo = sk & (MASK >> 1);
+        sacc = (sacc + (seg.query(lo, lo + 100) | 0)) | 0;
+        sk = (sk + 1) | 0;
+    };
+    // at: read a single leaf, folded into the accumulator.
+    const stepSegAt = () => {
+        sacc = (sacc + (seg.at(sk & MASK) | 0)) | 0;
+        sk = (sk + 1) | 0;
+    };
+    // forEach: the O(n) ascending cold scan through a HOISTED callback that closes
+    // over nothing but the shared accumulator -- no per-call closure allocation.
+    let sfeAcc = 0;
+    function segForEachCb(value, index) { sfeAcc = (sfeAcc + value + index) | 0; }
+    const stepSegForEach = () => { seg.forEach(segForEachCb); };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -198,17 +238,18 @@ async function main() {
 
     let allocBytes = 0;
     for (const step of [stepPushPop, stepChangeKey, stepRemove, stepRead,
-        stepUpdate, stepPrefix, stepAt, stepRangeSum, stepSet]) {
+        stepUpdate, stepPrefix, stepAt, stepRangeSum, stepSet,
+        stepSegUpdate, stepSegQuery, stepSegAt]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
         if (b > allocBytes) allocBytes = b;
     }
-    // forEach is O(n log n) per call (n = CAP = 4096) -- a far heavier body than
-    // the O(log n) lanes above, so it gets its own (smaller) iteration budget.
-    // The gate is identical: 0 B/op or the whole verdict fails.
-    {
-        const r = measureAllocs(stepForEach, { iterations: 3000, batches: 8 });
+    // forEach is O(n) per call (n = CAP = 4096) -- a far heavier body than the
+    // O(log n) lanes above, so the two forEach lanes get their own (smaller)
+    // iteration budget. The gate is identical: 0 B/op or the whole verdict fails.
+    for (const step of [stepForEach, stepSegForEach]) {
+        const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
         if (b > allocBytes) allocBytes = b;
@@ -216,6 +257,8 @@ async function main() {
     if (racc === 0x7fffffff) throw new Error('unreachable'); // keep racc live
     if (facc === 0x7fffffff) throw new Error('unreachable'); // keep facc live
     if (feAcc === 0x7fffffff) throw new Error('unreachable'); // keep feAcc live
+    if (sacc === 0x7fffffff) throw new Error('unreachable'); // keep sacc live
+    if (sfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep sfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -241,6 +284,11 @@ async function main() {
         sink = (sink + id + (fen.prefix(i & MASK) | 0)) | 0;
         if ((i & 7) === 0) sink = (sink + (fen.at(i & MASK) | 0)) | 0;
         if ((i & 63) === 0) { const lo = i & (MASK >> 1); sink = (sink + (fen.rangeSum(lo, lo + 100) | 0)) | 0; }
+        // SegmentTree churn every op: an absolute bounded update and a windowed
+        // query, plus an at every 8th. Steady tree, zero alloc.
+        seg.update(i & MASK, i & 0xffff);
+        { const lo = i & (MASK >> 1); sink = (sink + (seg.query(lo, lo + 100) | 0)) | 0; }
+        if ((i & 7) === 0) sink = (sink + (seg.at(i & MASK) | 0)) | 0;
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -256,6 +304,7 @@ async function main() {
     // arrayBuffers must not grow.
     const abHeap = new BinaryHeap(1024, 'min');
     const abFen = new Fenwick(1024);
+    const abSeg = new SegmentTree(1024, 'sum');
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -265,6 +314,8 @@ async function main() {
         abHeap.clear();
         for (let i = 0; i < 1024; i++) abFen.update(i, (i * 2654435761) & 0xffff);
         abFen.clear();
+        for (let i = 0; i < 1024; i++) abSeg.update(i, (i * 2654435761) & 0xffff);
+        abSeg.clear();
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -282,7 +333,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ')');
 
     if (!ok) {

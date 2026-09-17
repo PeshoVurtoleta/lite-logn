@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.2.0 ships two members: BinaryHeap (array-embedded O(log n) push / pop min|max heap) and Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk); SegmentTree (O(log n) associative range-query + point-update) and SkipList (pointer-free expected-O(log n) ordered map) are planned -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.3.0 ships three members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), and SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array); SkipList (pointer-free expected-O(log n) ordered map) is planned -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,7 +19,7 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.2.0 ships two members: BinaryHeap and Fenwick.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
+**v0.3.0 ships three members: BinaryHeap, Fenwick and SegmentTree.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
@@ -57,6 +57,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
   - [Constants](#constants)
   - [BinaryHeap](#binaryheap)
   - [Fenwick](#fenwick)
+  - [SegmentTree](#segmenttree)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -81,13 +82,13 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 
 ## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.2.0, BinaryHeap and Fenwick are shipped; SegmentTree and SkipList are planned.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.3.0, BinaryHeap, Fenwick and SegmentTree are shipped; SkipList is planned.
 
 | Member | Version | Status | Shape | Hot ops |
 | --- | --- | --- | --- | --- |
 | **BinaryHeap** | 0.1.0 | shipped | array-embedded complete binary min|max heap over a flat `Float64Array` | `push` / `pop` O(log n), `peek` O(1) |
 | **Fenwick** (BIT) | 0.2.0 | shipped | flat `Float64Array`, lowest-set-bit walk (`i & -i`) | `update` / `prefix` / `rangeSum` / `at` / `set` O(log n) |
-| **SegmentTree** | 0.3.0 | planned | flat, array-embedded tree; associative fold chosen at construction | `rangeQuery` / `pointUpdate` O(log n) |
+| **SegmentTree** | 0.3.0 | shipped | single flat `Float64Array(2n)` (leaves n..2n-1); associative fold (min/max/sum/gcd) chosen at construction | `query` / `update` O(log n), `at` O(1) |
 | **SkipList** | 0.4.0 | planned | pointer-free over a shared node pool; expected O(log n) | `get` / `set` / `delete` / `successor` |
 
 Later tiers (Treap / Scapegoat, OrderStatTree, IndexedHeap, SortedArray, MinMaxHeap, SplayTree, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
@@ -100,7 +101,7 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.2.0 the witness gates three ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level) and Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level) all ON the line; each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap `push`) foil runs R^2 ~ 0.77-0.84 run-to-run, and the Fenwick foils (prefix-array rebuild, naive re-sum) hold steadier at R^2 ~ 0.75-0.76 -- both foil families sit comfortably under the 0.958 floor.
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.3.0 the witness gates five ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), and SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`) all ON the line. SegmentTree's gated sweep is pinned to EXACT powers of two in `[2^10, 2^16]` (a segment-tree op touches a node per level spread across the `2n` array, so above ~2^16 the tree leaves the steady cache band, and exact powers keep the range decomposition a regular node count). Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap) foil runs R^2 ~ 0.77-0.84, the Fenwick foils (prefix-array rebuild, naive re-sum) hold steadier at R^2 ~ 0.75-0.76, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.75-0.85 -- all foil families sit comfortably under the 0.958 floor.
 
 ## API reference
 
@@ -108,7 +109,7 @@ For amortized / randomized members the witness also prints the MAX single-op tim
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.2.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.3.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -184,6 +185,42 @@ g.rangeSum(1, 3);       // -> 9
 | `length` | getter | O(1) | Element count this tree was sized for. |
 | `Fenwick.build` | `build(values) -> Fenwick` | O(n) | LINEAR bulk build (each cell adds itself to its parent in one forward pass); fails closed on a non-array-like or any non-finite value. |
 
+### SegmentTree
+
+A **segment tree**: an associative range-query AND a point-update, BOTH O(log n), over a SINGLE flat `Float64Array(2n)` -- no nodes, no pointers, no recursion on the hot path. It is the complement to Fenwick: Fenwick's `rangeSum` works only because subtraction inverts addition, so it is a SUM machine; SegmentTree folds ANY associative + commutative operation over a range -- **min / max / sum / gcd** -- because it stores a fold of each subtree at its internal node rather than a prefix. The fold is chosen ONCE at construction and cached as a small-int combined by an INLINE switch on the hot path (no function ref, no closure, no megamorphic call site). Leaves live at `_t[n + i]`; internal node `p` holds the fold of its children `_t[2p]` / `_t[2p+1]`, so `_t[1]` is the fold of the whole array and `_t[0]` is unused (null is not zero). `update` sets a leaf and climbs to the root recomputing each ancestor (one write per level); `query` walks the two boundaries up the tree, folding each node that lies fully inside `[lo, hi]` into one accumulator. Every hot op allocates zero bytes after construction.
+
+The fold's **identity** fills query accumulators and cleared / fresh leaves -- `sum -> 0`, `min -> +Infinity`, `max -> -Infinity`, `gcd -> 0` -- so a fresh or cleared tree queries to the identity. Identity is a legal RESULT but NEVER a legal INPUT: the value door rejects user `NaN` / `+-Infinity` (and, for the `gcd` kind, any negative or non-integer value), typeof-guarded before coercion.
+
+```js
+import { SegmentTree } from '@zakkster/lite-logn';
+
+const st = new SegmentTree(1000, 'min');   // 1000 slots, all +Infinity (min identity)
+st.update(10, 5);        // set index 10 to 5 (absolute)
+st.update(20, 3);        // set index 20 to 3
+st.query(0, 999);        // -> 3   (min over [0..999] inclusive)
+st.query(10, 10);        // -> 5   (a one-element range = the leaf)
+st.at(20);               // -> 3   (the single leaf value, O(1))
+
+// A different fold, chosen at construction:
+const sum = SegmentTree.build([1, 2, 3, 4, 5], 'sum'); // O(n) bottom-up bulk build
+sum.query(1, 3);         // -> 9   (2 + 3 + 4)
+const g = SegmentTree.build([12, 18, 24], 'gcd');
+g.query(0, 2);           // -> 6
+```
+
+The iterative `2n` layout is **order-agnostic** -- `query` mixes left- and right-boundary contributions into one accumulator, so it is correct ONLY because min / max / sum / gcd are all COMMUTATIVE as well as associative. A future non-commutative fold (matrix product, string concat) would need a pow2 layout with separate ordered accumulators (see [`decisions/0005-segtree.md`](./decisions/0005-segtree.md)).
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new SegmentTree(length, kind)` | O(length) | `length` integer in `[1, 2^30-1]` (HALF of Fenwick's ceiling: the `2n` array must keep `2n` a positive int32); `kind` is `'min'` \| `'max'` \| `'sum'` \| `'gcd'`. Allocates one `Float64Array(2 * length)`. |
+| `query` | `query(lo, hi) -> number` | O(log n) | The fold over `[lo, hi]` INCLUSIVE both ends. Throws on out-of-range or `lo > hi`. `lo == hi` returns that single leaf. |
+| `update` | `update(i, value) -> this` | O(log n) | Set leaf `i` to `value` (ABSOLUTE), then fix ancestors. `value` finite (nonnegative integer for the `gcd` kind); out-of-range `i` throws. |
+| `at` | `at(i) -> number` | O(1) | The single leaf value. Out-of-range `i` throws. |
+| `clear` | `clear() -> this` | O(n) | Resets every element to the fold identity, keeping capacity. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(value, index, tree)` in ascending leaf order. |
+| `length` / `kind` | getters | O(1) | Element count / the frozen fold `'min'` \| `'max'` \| `'sum'` \| `'gcd'`. |
+| `SegmentTree.build` | `build(values, kind) -> SegmentTree` | O(n) | Bottom-up bulk build (seed leaves, then fold each internal node once deepest-first -- NOT n incremental updates); fails closed on a non-array-like, any non-finite value, or (gcd) any negative / non-integer. |
+
 Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
@@ -199,8 +236,11 @@ Member signatures for later members are appended here as each ships.
 | `Fenwick` update / prefix / rangeSum / at / set | 0 B/op |
 | `Fenwick` constructor / `build` / `clear` | O(length) typed array, once (cold) |
 | `Fenwick` forEach | 0 B/op in the loop body (pass a hoisted callback) |
+| `SegmentTree` query / update / at | 0 B/op |
+| `SegmentTree` constructor / `build` / `clear` | O(length) typed array (`2n` cells), once (cold) |
+| `SegmentTree` forEach | 0 B/op in the loop body (pass a hoisted callback) |
 
-Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`). The allocation table is extended per member as each lands.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`). The allocation table is extended per member as each lands.
 
 ## Testing
 
