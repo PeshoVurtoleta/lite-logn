@@ -53,6 +53,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
 - [What you get](#what-you-get)
 - [The roster](#the-roster)
 - [The O(log n) Witness](#the-olog-n-witness)
+- [Benchmarks](#benchmarks)
 - [API reference](#api-reference)
   - [Constants](#constants)
   - [BinaryHeap](#binaryheap)
@@ -103,6 +104,79 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
 For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.4.0 the witness gates seven ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), and SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`) all ON the line. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
+
+## Benchmarks
+
+A repo-only, eight-dimension benchmark suite (`benchmark/`, ADOPTED field-for-field from `@zakkster/lite-o1`'s "Bench v2") surrounds the witness anchor. It is dev infra: NOT in the published tarball, imports NOTHING from the package but `LogN.js`, and spawns one child process per `(member x dimension)` cell for a clean GC/JIT state. **D1 is the O(log n) Witness itself** -- it DELEGATES to the shipped `test/witness.mjs` (the same frozen kernels, per-op sweeps, `R^2` floor and slope bands), so the headline dimension never re-implements the fit. Run it yourself:
+
+```sh
+npm run bench            # 32 cells -> benchmark/results.json + summary tables
+npm run bench:report     # the above, then benchmark/report.html (hand-rolled inline-SVG graphs)
+```
+
+Numbers below are one run on an Apple M4 Pro (arm64), Node v26 -- machine-specific, reproducible from a fixed seed (`0x9e3779b1`). Every applicable cell is a positive number; every inapplicable cell is the string `n/a` (never a numeric 0).
+
+### D1 -- the O(log n) Witness fit (per gated op-row)
+
+Each op fits `nsPerOp = intercept + slope*log2(n)`. ON-LINE = `R^2 >= 0.958` (the frozen family floor) AND `slope` inside the member's per-op band; the O(n) foil MUST leave the line (`foil R^2 < 0.958`). All seven op-rows sit ON the line; all seven foils leave it.
+
+<svg width="640" height="200" viewBox="0 0 640 200" role="img" aria-label="D1 slope per op-row (ns/level)" xmlns="http://www.w3.org/2000/svg">
+  <text x="8" y="16" font-size="12" fill="#475569">D1 slope (ns/level) -- lower is a cheaper per-level cost</text>
+  <g font-size="10" fill="#334155" text-anchor="middle">
+    <rect x="24"  y="84"  width="60" height="96"  fill="#2563eb"/><text x="54"  y="194">BH.pop 8.4</text>
+    <rect x="112" y="148" width="60" height="32"  fill="#059669"/><text x="142" y="194">Fen.upd 2.8</text>
+    <rect x="200" y="150" width="60" height="30"  fill="#059669"/><text x="230" y="194">Fen.pre 2.6</text>
+    <rect x="288" y="145" width="60" height="35"  fill="#d97706"/><text x="318" y="194">Seg.upd 3.1</text>
+    <rect x="376" y="99"  width="60" height="81"  fill="#d97706"/><text x="406" y="194">Seg.qry 7.0</text>
+    <rect x="464" y="88"  width="60" height="92"  fill="#7c3aed"/><text x="494" y="194">SL.get 8.0</text>
+    <rect x="552" y="40"  width="60" height="140" fill="#7c3aed"/><text x="582" y="194">SL.set 12.1</text>
+  </g>
+</svg>
+
+| op-row | `R^2` | slope (ns/level) | slope band | on line? | foil | foil `R^2` | foil off? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `BinaryHeap.pop` | 0.996 | 8.4 | `[5.76, 13.44]` | ON | sorted-array insert | 0.83 | off |
+| `Fenwick.update` | 0.980 | 2.8 | `[1.84, 4.30]` | ON | prefix-array rebuild | 0.76 | off |
+| `Fenwick.prefix` | 0.968 | 2.6 | `[1.76, 4.10]` | ON | naive re-sum | 0.75 | off |
+| `SegmentTree.update` | 0.989 | 3.1 | `[2.29, 5.35]` | ON | whole-tree rebuild | 0.82 | off |
+| `SegmentTree.query` | 0.998 | 7.0 | `[4.30, 10.04]` | ON | scan-fold | 0.73 | off |
+| `SkipList.get` | 0.988 | 8.0 | `[5.27, 12.30]` | ON | linear scan | 0.79 | off |
+| `SkipList.set` | 0.985 | 12.1 | `[8.36, 19.50]` | ON | sorted-array insert | 0.77 | off |
+
+**SkipList counter-foil (the order tax).** A native `Map` is O(1) at get/set (`~27 ns/op`, FLATTER than any log line) but ORDER-BLIND: it cannot answer `successor` / `predecessor` / `rangeIter`. The log factor SkipList pays buys exactly the ordered queries Map cannot. SkipList is EXPECTED O(log n), so D1 also DISCLOSES its MAX single insert (an unlucky tall tower over a randomized build: `~18-130 us`, not gated).
+
+### D3 -- memory (bytes / live vs a theoretical floor)
+
+| member | peak bytes @ 64Ki | B/live | theo min | overhead x | note |
+| --- | --- | --- | --- | --- | --- |
+| BinaryHeap | 1,048,576 | 16.0 | 12 | 1.33 | key (8) + id (4) dense; `_pos` reverse map is the universe overhead |
+| Fenwick | 524,296 | 8.0 | 8 | 1.00 | one `Float64` tree cell per element -- exact |
+| SegmentTree | 1,048,576 | 16.0 | 16 | 1.00 | the `2n` array -- exact |
+| SkipList | 5,767,320 | 88.0 | 16 | 5.50 | key + value dense; the `ceil(log2 cap)+1` link columns are the tower overhead |
+
+The overhead-x load-factor curve RISES as load falls for BinaryHeap + SkipList (fixed backing over fewer live) and is FLAT for the INDEX-ADDRESSED Fenwick + SegmentTree (every cell is always live) -- another honest `n/a` where insertion order does not apply.
+
+### D5 -- bundle size + tree-shaking (esbuild min + gzip)
+
+A single-member import must be `< 40%` of the all-member import. Three of four clear it; SkipList (the heaviest lone member) is the ONE honest exception at `~41%` -- stated, not rounded down, and never by moving the budget. The median lone-import ratio is `~0.32 (< 0.40)`; every member's lone import still drops the majority of the others (`< 0.50`).
+
+| member | single gz (B) | all gz (B) | ratio | `< 40%`? |
+| --- | --- | --- | --- | --- |
+| BinaryHeap | 1,365 | 3,758 | 0.363 | yes |
+| Fenwick | 826 | 3,758 | 0.220 | yes |
+| SegmentTree | 1,071 | 3,758 | 0.285 | yes |
+| SkipList | 1,546 | 3,758 | 0.411 | NO (the stated exception) |
+
+### D6 -- GC pressure (the 0 B/op gate as a curve, per op-row)
+
+All seven gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, with `max major GC = 0`. The precise proof stays `node --expose-gc test/torture.mjs` (via `@zakkster/lite-gc-profiler`); D6 is the portable curve (min heap-delta over independent passes -- heap-accounting jitter only ADDS, so a truly-zero kernel hits 0 on its best pass while a per-op allocator stays positive on every pass).
+
+### The other dimensions
+
+- **D2 amortized cost** -- cumulative ns/op stays bounded over a `~1M`-op mixed trace (drift `< 1.0` here: the trace speeds up as the JIT warms, never degrades).
+- **D4 cache (PROXY, labelled)** -- dense `forEach` iteration vs random single-element lookup; the random/dense gap is `~1.9x` (SegmentTree) to `~2.9x` (SkipList). No native perf counters.
+- **D7 scalability** -- numeric substrates: string + object keys read `n/a`. Load factors `0.3/0.5/0.7/0.9`; insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList, `n/a` for the index-addressed Fenwick + SegmentTree.
+- **D8 workloads** -- churn (all members) + an ordered scan (`successor` + `rangeIter`, SkipList only; `n/a` elsewhere).
 
 ## API reference
 

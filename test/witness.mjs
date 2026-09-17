@@ -39,6 +39,7 @@
  */
 
 import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
 // x is log2(n); y is nsPerOp. Returns { slope, intercept, r2 }. Pure, alloc-
@@ -598,7 +599,13 @@ function measureSkipSetFoil(n) {
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
-const MEMBERS = [
+//
+// EXPORTED (additive, no behavior change): the repo-only benchmark suite
+// (benchmark/Dimensions.mjs, its D1 dimension) DELEGATES to this frozen registry
+// -- the same kernels, sweeps and per-op slope bands the witness gate uses -- so
+// the benchmark never re-implements the fit or the measurement. This export is
+// the ONLY coupling; main() below is unchanged and still runs the identical gate.
+export const MEMBERS = [
     {
         name: 'BinaryHeap',
         op: 'pop',
@@ -744,4 +751,11 @@ async function main() {
     if (!ok) process.exitCode = 1;
 }
 
-main();
+// Run the witness gate ONLY when this file is the process entry point (`node
+// test/witness.mjs` / `npm run witness`). Guarded so that importing the frozen
+// MEMBERS registry (benchmark/Dimensions.mjs D1 delegates to it) does NOT run the
+// entire ~30s witness sweep as an import side effect -- the re-entrancy footgun the
+// lite-o1 QA pass caught on its own orchestrator. The CLI path is unchanged.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    main();
+}

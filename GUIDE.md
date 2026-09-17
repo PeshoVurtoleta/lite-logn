@@ -65,6 +65,42 @@ and SkipList's are below).
 
 ---
 
+## Measured cost (the benchmark suite)
+
+Numbers, not adjectives. The repo-only suite (`npm run bench` -> tables +
+`benchmark/results.json`; `npm run bench:report` -> inline-SVG `report.html`)
+measures every member across eight dimensions; D1 is the O(log n) Witness itself
+(delegated to `test/witness.mjs`). One run, Apple M4 Pro (arm64), Node v26 --
+machine-specific, reproducible from seed `0x9e3779b1`.
+
+**Per-level cost (D1 slope, ns/level -- the price of one added level per doubling):**
+
+| Op | slope ns/level | `R^2` | memory (B/live) | pick it when |
+| --- | --- | --- | --- | --- |
+| `Fenwick.update` / `.prefix` | 2.6 - 2.8 | 0.97 - 0.98 | 8 (exact) | the cheapest per-level cost + the tightest memory; sum-only prefix/range |
+| `SegmentTree.update` | 3.1 | 0.99 | 16 (exact) | any associative fold (min/max/sum/gcd), point update |
+| `SegmentTree.query` | 7.0 | 0.998 | 16 (exact) | as above -- a range fold is ~2 nodes/level, so its slope is higher than update's |
+| `BinaryHeap.pop` | 8.4 | 0.996 | 16 | repeated extremum + addressable reprioritize |
+| `SkipList.get` | 8.0 | 0.988 | 88 | an ordered map: successor / predecessor / range |
+| `SkipList.set` | 12.1 | 0.985 | 88 | as above -- insert is a double descent + a random-height splice |
+
+Read it as a ladder: the index-addressed array members (Fenwick, SegmentTree)
+are the cheapest per level AND the tightest in memory; the comparison-ordered
+members (BinaryHeap, SkipList) cost more per level and, for SkipList, carry the
+`ceil(log2 cap)+1` link-column tower (88 B/live) that BUYS the ordered queries.
+
+**The order tax (SkipList vs a native Map).** If you only need `get` / `set` by
+exact key and NEVER `successor` / `predecessor` / `rangeIter`, a native `Map` is
+O(1) (`~27 ns/op`, flatter than any log line) -- reach for it. The moment you need
+even one ordered query, Map cannot answer it at all; SkipList's log factor is the
+honest price of order. Every gated op-row is **0 B/op** (D6, and the precise
+`node --expose-gc test/torture.mjs` proof). SkipList is EXPECTED O(log n): the
+witness discloses a MAX single insert (`~18-130 us`, an unlucky tall tower) a mean
+would hide -- if a bounded worst-case per op matters more than the average, prefer
+the array-embedded members whose bound is worst-case, not expected.
+
+---
+
 ## Fenwick (BIT) -- prefix sums that stay correct under point updates
 
 **Reach for it when** you need a running total / prefix sum over an array whose

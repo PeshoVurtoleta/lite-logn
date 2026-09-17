@@ -1,0 +1,847 @@
+/**
+ * @zakkster/lite-logn -- the eight benchmark dimensions.
+ *
+ * Repo-only. Each Dk is a (member, opts) -> plain JSON-safe result object; the
+ * orchestrator (Bench.mjs) runs one Dk per child process for clean GC/JIT state,
+ * and Report.mjs renders the collected results.
+ *
+ * D1 is the O(log n) WITNESS, and it does NOT re-implement anything: it DELEGATES
+ * to the SHIPPED test/witness.mjs -- the same frozen kernels, per-op sweeps, R^2
+ * floor (0.958) and per-op slope bands the witness gate uses -- imports its
+ * `fitLogLinear`, and reports { r2, slope, foilR2 } per op-row. The FOILS registry
+ * below is that op-row -> foil table (7 gated rows + the SkipList counter-foil).
+ * D2..D8 are hand-tuned per member the way lite-o1's Dimensions.mjs is.
+ *
+ * Every result carries a `_check` array: the numbers that MUST be strictly positive
+ * for the reading to be non-vacuous (nsPerOp readings, throughputs, byte footprints,
+ * element counts). Allocation-per-op and GC-pause figures are NOT in `_check` -- for
+ * a zero-GC library 0 is the CORRECT answer, not a vacuous one. A cell that does not
+ * apply carries the string "n/a" (Matrix.NA), never 0.
+ *
+ * This file is NEVER imported by LogN.js; it imports LogN.js the way a consumer does,
+ * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
+ */
+
+import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
+import {
+    prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
+} from './Harness.mjs';
+import {
+    NA, SUBJECTS, OP_ROWS, baselineFor, counterFoilFor, supportsKeyType, supportsWorkload,
+} from './Matrix.mjs';
+
+/** Global sink: every timed op feeds it so V8 cannot dead-code-eliminate a batch. */
+export let SINK = 0;
+export function sink() { return SINK; }
+
+/** The package root, for the D5 esbuild bundle (resolves ./LogN.js like a consumer). */
+export const PKG_DIR = new URL('..', import.meta.url).pathname;
+
+/** hrtime.bigint() as ns (offline lanes only; allocates a BigInt, off the hot body). */
+function nowNs() { return Number(process.hrtime.bigint()); }
+
+// ===========================================================================
+// The FOILS registry: op-row -> foil, DELEGATED to the frozen witness registry.
+// 7 gated op-rows (BinaryHeap.pop, Fenwick.update/prefix, SegmentTree.update/query,
+// SkipList.get/set) + the SkipList counter-foil (a native Map: O(1) but ORDER-BLIND).
+// The gated rows carry the SHIPPED kernels (run/foil), per-op sweeps and slope bands.
+// ===========================================================================
+
+/** op-row key ("Member.op") -> the frozen witness registry entry (kernel + sweep + band). */
+export const FOILS = {};
+for (const m of WITNESS_MEMBERS) FOILS[m.name + '.' + m.op] = m;
+/** The SkipList counter-foil: measured live in D1 (a native Map, O(1) but order-blind). */
+FOILS['SkipList.counter'] = {
+    kind: 'counter-foil', member: 'SkipList', op: 'counter',
+    foilName: 'Map (O(1) get/set, but no successor/predecessor/range)',
+};
+
+/** Sanity: the 7 gated op-rows the matrix declares are exactly the ones the witness ships. */
+export function foilRowKeys() {
+    return OP_ROWS.filter((k) => FOILS[k] && FOILS[k].kind !== 'counter-foil');
+}
+
+// ===========================================================================
+// Steady-state alloc-free hot-op kernels, one per gated op-row. Each returns
+// { obj, op }: `obj` is filled to a bounded steady state, `op` is a single
+// O(log n) hot op that keeps the structure bounded (0 B/op after construction).
+// ===========================================================================
+
+function kBinaryHeapPop(n) {
+    // A full heap of n ids; each op pops the extremum id and re-pushes it with a
+    // fresh key -- the O(log n) sift-down + sift-up pair, size steady at n.
+    const h = new BinaryHeap(n, 'min');
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) h.push(k, rng());
+    let t = 1;
+    return {
+        obj: h,
+        // SINK is kept a 32-bit Smi (`| 0`): an unbounded `SINK += id` would grow past
+        // the Smi range (2^31) and box a fresh HeapNumber PER OP -- transient garbage
+        // that would masquerade as per-op allocation in D6. `| 0` keeps it alloc-free.
+        op: () => { const id = h.pop(); t = (t * 1103515245 + 12345) & 0x7fffffff; h.push(id, t); SINK = (SINK + id) | 0; },
+    };
+}
+
+function kFenwickUpdate(n) {
+    // A seeded tree; each op climbs one full `i & -i` update walk at a walking index.
+    const f = new Fenwick(n);
+    const rng = prng(0x5151 ^ n);
+    for (let i = 0; i < n; i++) f.update(i, rng() & 0xff);
+    let i = 0;
+    return { obj: f, op: () => { f.update(i, (i & 1) ? 1 : -1); i++; if (i >= n) i = 0; } };
+}
+
+function kFenwickPrefix(n) {
+    // A seeded tree; each op descends one full `i & -i` prefix walk at a walking index.
+    const f = new Fenwick(n);
+    const rng = prng(0x7333 ^ n);
+    for (let i = 0; i < n; i++) f.update(i, rng() & 0xff);
+    let i = 0;
+    return { obj: f, op: () => { SINK = (SINK + f.prefix(i)) | 0; i++; if (i >= n) i = 0; } };
+}
+
+function kSegUpdate(n) {
+    // A seeded sum tree; each op sets a walking leaf and climbs to the root.
+    const st = new SegmentTree(n, 'sum');
+    const rng = prng(0x5151 ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (rng() & 0xffff));
+    let i = 0;
+    return { obj: st, op: () => { st.update(i, i & 0xffff); i++; if (i >= n) i = 0; } };
+}
+
+function kSegQuery(n) {
+    // A seeded sum tree; each op folds a walking window [0, i] (the O(log n) fold).
+    const st = new SegmentTree(n, 'sum');
+    const rng = prng(0x7333 ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (rng() & 0xffff));
+    let i = 1;
+    return { obj: st, op: () => { SINK = (SINK + st.query(0, i)) | 0; i++; if (i >= n) i = 1; } };
+}
+
+function kSkipGet(n) {
+    // A full ordered map of n keys; each op searches a random resident key. The index
+    // is `rng() >>> 1` (drop the high bit) so it stays a 31-bit Smi: a raw uint32 >= 2^31
+    // is a HeapNumber, and boxing one PER OP would masquerade as per-op allocation in D6.
+    const sl = new SkipList(n, (0x51ED ^ n) >>> 0);
+    for (let k = 0; k < n; k++) sl.set(k, k);
+    const rng = prng(0x33A5 ^ n);
+    return { obj: sl, op: () => { const v = sl.get((rng() >>> 1) % n); if (v !== undefined) SINK = (SINK + v) | 0; } };
+}
+
+function kSkipSet(n) {
+    // A resident map of n keys with one free slot; each op inserts the integer key `n`
+    // (just past the resident [0, n) range, the single free slot) then deletes it -- the
+    // O(log n) insert + delete descent pair, size steady at n. An INTEGER (Smi) key is
+    // used, not a fractional `+ 0.5` one: a non-integer double is a HeapNumber, and
+    // boxing one per op would masquerade as per-op allocation in D6.
+    const sl = new SkipList(n + 1, (0x71ED ^ n) >>> 0);
+    for (let k = 0; k < n; k++) sl.set(k, k);
+    let i = 0;
+    return {
+        obj: sl,
+        op: () => { sl.set(n, i); sl.delete(n); i = (i + 1) | 0; },
+    };
+}
+
+/**
+ * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
+ * @param {string} member
+ * @param {string} op
+ * @param {number} n
+ * @returns {{obj:object, op:(i:number)=>void}}
+ */
+export function makeOpKernel(member, op, n) {
+    const key = member + '.' + op;
+    switch (key) {
+        case 'BinaryHeap.pop': return kBinaryHeapPop(n);
+        case 'Fenwick.update': return kFenwickUpdate(n);
+        case 'Fenwick.prefix': return kFenwickPrefix(n);
+        case 'SegmentTree.update': return kSegUpdate(n);
+        case 'SegmentTree.query': return kSegQuery(n);
+        case 'SkipList.get': return kSkipGet(n);
+        case 'SkipList.set': return kSkipSet(n);
+        default: throw new Error('[bench] unhandled op-row: ' + key);
+    }
+}
+
+/** The member's representative steady op (its primary mutating op-row). Fail closed. */
+export function makeSubject(member, n) {
+    if (member === 'BinaryHeap') return kBinaryHeapPop(n);
+    if (member === 'Fenwick') return kFenwickUpdate(n);
+    if (member === 'SegmentTree') return kSegUpdate(n);
+    if (member === 'SkipList') return kSkipSet(n);
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+/** The member's gated op-row names (from OP_ROWS). */
+function opsOf(member) {
+    return OP_ROWS.filter((k) => k.slice(0, k.indexOf('.')) === member).map((k) => k.slice(k.indexOf('.') + 1));
+}
+
+// ===========================================================================
+// D1 -- the O(log n) Witness fit (DELEGATED to test/witness.mjs). For each of the
+// member's gated op-rows: run the SHIPPED kernel across its SHIPPED sweep, fit
+// nsPerOp = intercept + slope*log2(n) with the SHIPPED fitLogLinear, and report
+// { r2, slope, foilR2 } plus the on-line / off-line verdicts against the SHIPPED
+// R^2 floor + per-op slope band. SkipList also surfaces its counter-foil (a native
+// Map, O(1) but order-blind) and its DISCLOSED max single insert (expected O(log n)).
+// ===========================================================================
+
+/** Measure a native Map get (the counter-foil): O(1), FLATTER than any log line. */
+function measureCounterFoil(n, seed) {
+    const map = new Map();
+    for (let k = 0; k < n; k++) map.set(k, k);
+    const rng = prng((seed ^ 0x1234) >>> 0);
+    let s = 0;
+    const op = () => { const v = map.get(rng() % n); if (v !== undefined) s += v; };
+    const ns = median(collect(op, 4000, 60));
+    SINK += s;
+    return {
+        name: 'Map', getNsPerOp: ns, flat: true,
+        cannotAnswer: ['successor', 'predecessor', 'rangeIter'],
+    };
+}
+
+/** DISCLOSED max single insert over a shuffled build (the unlucky-tower tail). */
+function measureMaxInsert(n) {
+    const keys = new Float64Array(n);
+    for (let i = 0; i < n; i++) keys[i] = i;
+    const rnd = prng(0xF00D ^ n);
+    for (let i = n - 1; i > 0; i--) { const j = rnd() % (i + 1); const t = keys[i]; keys[i] = keys[j]; keys[j] = t; }
+    const sl = new SkipList(n, (0xC0DE ^ n) >>> 0);
+    let mx = 0;
+    for (let i = 0; i < n; i++) {
+        const t0 = nowNs();
+        sl.set(keys[i], i);
+        const e = nowNs() - t0;
+        if (e > mx) mx = e;
+    }
+    return mx > 0 ? mx : 1; // clamp positive for the vacuity gate (sub-tick -> 1 ns)
+}
+
+export function D1(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const points = opts.points ?? Infinity; // truncate every op-row sweep (fast in-process gate)
+    // The O(n) foil is O(n^2) total; the fast in-process gate (test/Bench.test.mjs)
+    // skips it (opts.foil === false) and verifies the foil leaves the line via the
+    // full `npm run bench` + the witness gate instead. Default: compute the foil.
+    const withFoil = opts.foil !== false;
+    const rows = WITNESS_MEMBERS.filter((m) => m.name === member);
+    if (rows.length === 0) throw new Error('[bench] no witness op-rows for ' + member);
+
+    const check = [];
+    const ops = [];
+    for (const m of rows) {
+        const sweep = points < m.sweep.length ? m.sweep.slice(0, Math.max(2, points)) : m.sweep;
+        const foilSweep = points < m.foilSweep.length ? m.foilSweep.slice(0, Math.max(2, points)) : m.foilSweep;
+
+        const xs = [], ys = [];
+        for (const n of sweep) { xs.push(Math.log2(n)); const y = m.run(n); ys.push(y); check.push(y); }
+        const fit = fitLogLinear(xs, ys);
+
+        let foilR2 = NA, foilSlope = NA, foilOff = NA;
+        if (withFoil) {
+            const fxs = [], fys = [];
+            for (const n of foilSweep) { fxs.push(Math.log2(n)); const y = m.foil(n); fys.push(y); check.push(y); }
+            const ffit = fitLogLinear(fxs, fys);
+            foilR2 = ffit.r2; foilSlope = ffit.slope; foilOff = ffit.r2 < m.r2Floor;
+        }
+
+        const onLine = fit.r2 >= m.r2Floor && fit.slope >= m.slopeLo && fit.slope <= m.slopeHi;
+        ops.push({
+            op: m.op, foilName: m.foilName,
+            r2: fit.r2, slope: fit.slope, intercept: fit.intercept,
+            foilR2, foilSlope,
+            r2Floor: m.r2Floor, slopeLo: m.slopeLo, slopeHi: m.slopeHi,
+            onLine, foilOff,
+        });
+    }
+
+    // SkipList carries the counter-foil (order tax) + the disclosed max single insert.
+    let counterFoil = NA, maxSingleOp = NA;
+    if (member === 'SkipList') {
+        counterFoil = measureCounterFoil(opts.counterN ?? (1 << 14), opts.seed ?? DEFAULT_SEED);
+        check.push(counterFoil.getNsPerOp);
+        maxSingleOp = measureMaxInsert(opts.maxN ?? (1 << 14));
+        check.push(maxSingleOp);
+    }
+
+    return {
+        dim: 'D1', member, baseline: baselineFor(member, 'D1'), unit: 'ns/level',
+        ops,               // [{op, r2, slope, foilR2, ...}] -- the gated witness rows
+        counterFoil,       // {name, getNsPerOp, flat, cannotAnswer} for SkipList; NA otherwise
+        maxSingleOp,       // ns, disclosed (expected O(log n)) for SkipList; NA otherwise
+        _check: check,
+    };
+}
+
+// ===========================================================================
+// D2 -- Amortized cost over a long mixed trace: cumulative ns/op at power-of-two
+// checkpoints must stay flat (drift = last/first ~ 1.0). Fixed-capacity members
+// never resize; the steady op keeps the structure bounded.
+// ===========================================================================
+
+export function D2(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const n = opts.n ?? 8192;
+    const total = opts.total ?? (1 << 20); // ~1.05M mixed ops
+    const built = makeSubject(member, n);
+    const op = built.op;
+    warm(op, Math.min(4096, total));
+
+    const ckpts = [];
+    for (let c = 1024; c < total; c *= 2) ckpts.push(c);
+    ckpts.push(total);
+
+    const points = [];
+    let done = 0;
+    const t0 = performance.now();
+    for (const c of ckpts) {
+        for (; done < c; done++) op(done);
+        points.push({ ops: done, nsPerOp: ((performance.now() - t0) * 1e6) / done });
+    }
+    const first = points[0].nsPerOp;
+    const last = points[points.length - 1].nsPerOp;
+    const drift = first > 0 ? last / first : 0;
+
+    return {
+        dim: 'D2', member, baseline: baselineFor(member, 'D2'), unit: 'ns/op',
+        points, drift,
+        _check: points.map((p) => p.nsPerOp).concat([points[points.length - 1].ops]),
+    };
+}
+
+// ===========================================================================
+// D3 -- Memory footprint + stability: peak backing bytes, fill->delete->refill
+// high-water, bytes/live vs theoretical min, and heap after clear().
+// ===========================================================================
+
+/** Exact backing-store byte footprint of a member instance (typed-array buffers). */
+export function memberBytes(member, obj) {
+    if (member === 'BinaryHeap') {
+        return obj._key.buffer.byteLength + obj._id.buffer.byteLength + obj._pos.buffer.byteLength;
+    }
+    if (member === 'Fenwick') return obj._t.buffer.byteLength;
+    if (member === 'SegmentTree') return obj._t.buffer.byteLength;
+    if (member === 'SkipList') {
+        return obj._key.buffer.byteLength + obj._val.buffer.byteLength +
+            obj._next.buffer.byteLength + obj._update.buffer.byteLength +
+            obj._pool._free.buffer.byteLength;
+    }
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+/** Theoretical minimum bytes per LIVE element for a member (the dense payload). */
+export function theoreticalMinPerLive(member) {
+    if (member === 'BinaryHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
+    if (member === 'Fenwick') return 8;     // one Float64 tree cell per element
+    if (member === 'SegmentTree') return 16; // two Float64 cells (2n array) per element
+    if (member === 'SkipList') return 16;    // key (Float64, 8) + val (Float64, 8) per live entry
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+/** The member's live-element count (its `size`/`length` semantics). */
+function liveCount(member, obj) {
+    if (member === 'Fenwick' || member === 'SegmentTree') return obj.length; // all cells always live
+    return obj.size;
+}
+
+function fillMember(member, obj, count) {
+    if (member === 'BinaryHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
+    if (member === 'Fenwick') { obj.clear(); for (let i = 0; i < count; i++) obj.update(i, 1); return; }
+    if (member === 'SegmentTree') { obj.clear(); for (let i = 0; i < count; i++) obj.update(i, i & 0xffff); return; }
+    if (member === 'SkipList') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+export function D3(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const n = opts.n ?? 65536;
+    let obj;
+    if (member === 'BinaryHeap') obj = new BinaryHeap(n, 'min');
+    else if (member === 'Fenwick') obj = new Fenwick(n);
+    else if (member === 'SegmentTree') obj = new SegmentTree(n, 'sum');
+    else if (member === 'SkipList') obj = new SkipList(n);
+    else throw new Error('[bench] unhandled member: ' + member);
+
+    gcNow();
+    const heapBase = process.memoryUsage().heapUsed;
+
+    const live = n; // fill to a full load (all four cap at n live elements/cells)
+    fillMember(member, obj, live);
+    gcNow();
+    const heapFull = process.memoryUsage().heapUsed;
+    const bytesFull = memberBytes(member, obj);
+    const liveNow = Math.max(1, liveCount(member, obj));
+
+    // fill -> delete-most -> refill high-water (fixed-capacity members reuse the SAME
+    // backing store: the byte footprint is a constant by design, stated not implicit).
+    fillMember(member, obj, Math.max(1, live >> 3)); // delete ~7/8
+    fillMember(member, obj, live);                    // refill to full
+    const bytesRefill = memberBytes(member, obj);
+    const highWater = Math.max(bytesFull, bytesRefill);
+
+    // After clear(): backing buffers are retained (fixed capacity) -- deliberate.
+    obj.clear();
+    gcNow();
+    const heapAfterClear = process.memoryUsage().heapUsed;
+
+    const bytesPerLive = bytesFull / liveNow;
+    const theoMin = theoreticalMinPerLive(member);
+
+    // Load-factor curve: bytes-per-live at each fill fraction of capacity. BinaryHeap
+    // + SkipList shrink their live set (bytes-per-live RISES ~1/loadFactor over the
+    // fixed backing store); Fenwick + SegmentTree are INDEX-ADDRESSED (every cell is
+    // always live), so their curve is FLAT by design -- stated, not hidden.
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree');
+    const loadFactorCurve = [];
+    for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
+        const target = Math.max(1, Math.round(live * lf));
+        fillMember(member, obj, target);
+        const b = memberBytes(member, obj);
+        const lc = Math.max(1, liveCount(member, obj));
+        const bpl = b / lc;
+        loadFactorCurve.push({ loadFactor: lf, bytesPerLive: bpl, overheadRatio: bpl / theoMin });
+    }
+    obj.clear();
+
+    return {
+        dim: 'D3', member, baseline: baselineFor(member, 'D3'), unit: 'bytes',
+        peakBackingBytes: bytesFull,
+        highWaterBytes: highWater,
+        bytesPerLive, theoreticalMinPerLive: theoMin,
+        overheadRatio: bytesPerLive / theoMin,
+        loadFactorCurve,
+        indexAddressed,
+        fixedCapacity: true,
+        heapDeltaFullKB: Math.max(0, (heapFull - heapBase)) / 1024,
+        heapAfterClearKB: Math.max(0, (heapAfterClear - heapBase)) / 1024,
+        liveElements: liveNow,
+        _check: [bytesFull, highWater, bytesPerLive, theoMin, liveNow]
+            .concat(loadFactorCurve.map((p) => p.bytesPerLive)),
+    };
+}
+
+// ===========================================================================
+// D4 -- Cache behaviour (PROXY ONLY, labelled PROXY). Dense sequential iteration
+// (forEach) vs random single-element lookup, plus a working-set stride sweep.
+// NO native perf counters, NO perf-stat shell-out (portable proxy).
+// ===========================================================================
+
+function denseIterNsPerElem(member, obj, reps) {
+    let acc = 0;
+    const cb = (x) => { acc = (acc + (x | 0)) | 0; };
+    obj.forEach(cb); // warm
+    const size = Math.max(1, liveCount(member, obj));
+    const t0 = performance.now();
+    for (let r = 0; r < reps; r++) obj.forEach(cb);
+    SINK += acc;
+    const dt = performance.now() - t0;
+    const elems = size * reps;
+    return dt > 0 ? (dt * 1e6) / elems : 1e-3;
+}
+
+/** A random single-element read for the dense-vs-random gap (member-specific). */
+function randomLookupOp(member, obj, n, rng) {
+    if (member === 'BinaryHeap') return () => { if (obj.has(rng() % n)) SINK++; };
+    if (member === 'Fenwick') return () => { SINK += obj.prefix(rng() % n); };
+    if (member === 'SegmentTree') return () => { const i = rng() % n; SINK += obj.query(i, i); };
+    if (member === 'SkipList') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+function seqLookupOp(member, obj, n) {
+    let i = 0;
+    if (member === 'BinaryHeap') return () => { if (obj.has(i)) SINK++; i++; if (i >= n) i = 0; };
+    if (member === 'Fenwick') return () => { SINK += obj.prefix(i); i++; if (i >= n) i = 0; };
+    if (member === 'SegmentTree') return () => { SINK += obj.query(i, i); i++; if (i >= n) i = 0; };
+    if (member === 'SkipList') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    throw new Error('[bench] unhandled member: ' + member);
+}
+
+/** Build a full instance of `n` live elements for the D4 iteration/lookup sweeps. */
+function buildFull(member, n) {
+    let obj;
+    if (member === 'BinaryHeap') { obj = new BinaryHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
+    else if (member === 'Fenwick') { obj = new Fenwick(n); for (let i = 0; i < n; i++) obj.update(i, 1); }
+    else if (member === 'SegmentTree') { obj = new SegmentTree(n, 'sum'); for (let i = 0; i < n; i++) obj.update(i, i & 0xffff); }
+    else if (member === 'SkipList') { obj = new SkipList(n); for (let k = 0; k < n; k++) obj.set(k, k); }
+    else throw new Error('[bench] unhandled member: ' + member);
+    return obj;
+}
+
+export function D4(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const sizes = opts.sizes ?? [1e3, 1e4, 1e5, 1e6];
+    const reps = opts.reps ?? 200;
+
+    const strideSweep = [];
+    for (const raw of sizes) {
+        const s = raw | 0;
+        const obj = buildFull(member, s);
+        const r = Math.max(2, Math.round(reps / Math.max(1, s / 1e3)));
+        strideSweep.push({ workingSet: s, nsPerElem: denseIterNsPerElem(member, obj, r) });
+    }
+
+    // Dense (sequential) vs random single-element lookup. Every member has a random
+    // read (has / prefix / query / get), so the gap applies to all four (no NA here).
+    const gapN = (opts.gapN ?? 1e5) | 0;
+    const obj = buildFull(member, gapN);
+    const rng = prng((opts.seed ?? DEFAULT_SEED) ^ 0x55555555);
+    const batch = 5000, samples = 60;
+    const denseNsPerOp = median(collect(seqLookupOp(member, obj, gapN), batch, samples));
+    const randomNsPerOp = median(collect(randomLookupOp(member, obj, gapN, rng), batch, samples));
+    const gap = denseNsPerOp > 0 ? randomNsPerOp / denseNsPerOp : NA;
+
+    const check = strideSweep.map((p) => p.nsPerElem).concat([denseNsPerOp, randomNsPerOp]);
+
+    return {
+        dim: 'D4', member, baseline: baselineFor(member, 'D4'), unit: 'ns',
+        proxy: true,
+        strideSweep, denseNsPerOp, randomNsPerOp, gap,
+        _check: check,
+    };
+}
+
+// ===========================================================================
+// D5 -- Bundle size + tree-shaking. esbuild (DEV-only dep) minify + node:zlib
+// gzip: a single-member import vs the all-member import. Single must be << all.
+// ===========================================================================
+
+export async function D5(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const esbuild = await import('esbuild');
+    const { gzipSync } = await import('node:zlib');
+
+    async function bundle(exportsSrc) {
+        const res = await esbuild.build({
+            stdin: { contents: exportsSrc, resolveDir: PKG_DIR, loader: 'js' },
+            bundle: true, minify: true, format: 'esm', write: false, treeShaking: true,
+            legalComments: 'none',
+        });
+        const code = res.outputFiles[0].text;
+        return { min: Buffer.byteLength(code), gzip: gzipSync(Buffer.from(code)).length };
+    }
+
+    const single = await bundle('export { ' + member + " } from './LogN.js';\n");
+    const all = await bundle("export * from './LogN.js';\n");
+    const ratio = all.gzip > 0 ? single.gzip / all.gzip : 1;
+
+    return {
+        dim: 'D5', member, baseline: NA, unit: 'bytes',
+        single, all, ratio,
+        underForty: ratio < 0.4, // falsifiable: single-member < 40% of all-member
+        _check: [single.min, single.gzip, all.min, all.gzip],
+    };
+}
+
+// ===========================================================================
+// D6 -- GC pressure + allocation-rate CURVE over n = 1e3..1e6, PER OP-ROW. Extends
+// the standing 0 B/op gate into a measured curve for each of the member's gated
+// op-rows (7 kernels across the four members). Allocation bytes/op and GC pause are
+// NOT in _check (0 is the correct answer for a zero-GC library); throughput + op
+// counts are.
+// ===========================================================================
+
+async function withGcObserver(fn) {
+    const { PerformanceObserver, constants } = await import('node:perf_hooks');
+    let major = 0, minor = 0, totalMs = 0, maxMs = 0;
+    const MAJOR = constants.NODE_PERFORMANCE_GC_MAJOR;
+    const obs = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+            const kind = (e.detail && e.detail.kind) != null ? e.detail.kind : e.kind;
+            if (kind === MAJOR) major++; else minor++;
+            totalMs += e.duration;
+            if (e.duration > maxMs) maxMs = e.duration;
+        }
+    });
+    obs.observe({ entryTypes: ['gc'] });
+    fn();
+    await new Promise((r) => setTimeout(r, 30)); // GC entries arrive asynchronously
+    obs.disconnect();
+    return { major, minor, totalMs, maxMs };
+}
+
+export async function D6(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const sizes = opts.sizes ?? [1e3, 1e4, 1e5, 1e6];
+    const ops = opts.ops ?? 1e6;
+    const perOp = [];
+    const check = [];
+    let worstMajor = 0, worstPausePerM = 0, allZero = true;
+
+    // Alloc rate is the MIN clean heapUsed delta over PASSES independent passes with NO
+    // observer attached -- the min-over-batches asymmetry the witness uses. Heap-delta
+    // accounting only ADDS to a truly-zero kernel's reading (young-gen sampling jitter),
+    // never subtracts from a real allocator's, so a genuinely-0 kernel hits ~0 on its
+    // best pass while an alloc-per-op regression stays positive on EVERY pass. The GC
+    // stats (major/minor/pause) come from a SEPARATE observer pass, because the
+    // PerformanceObserver itself buffers entry objects (~0.7 B/op) and would otherwise
+    // be charged to the kernel. This is measurement QUALITY only, NOT a widened budget:
+    // the precise 0 B/op proof stays node --expose-gc test/torture.mjs (lite-gc-profiler).
+    const PASSES = opts.passes ?? 5;
+    for (const opName of opsOf(member)) {
+        const points = [];
+        for (const raw of sizes) {
+            const n = raw | 0;
+            const built = makeOpKernel(member, opName, n);
+            const op = built.op;
+            warm(op, Math.min(1e5, ops));
+
+            // Clean alloc-rate passes (no observer perturbing heapUsed).
+            let minDelta = Infinity, bestElapsedMs = Infinity;
+            for (let pass = 0; pass < PASSES; pass++) {
+                gcNow();
+                const heapBefore = process.memoryUsage().heapUsed;
+                const t0 = performance.now();
+                for (let i = 0; i < ops; i++) op(i);
+                const elapsedMs = performance.now() - t0;
+                const delta = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
+                if (delta < minDelta) minDelta = delta;
+                if (elapsedMs < bestElapsedMs) bestElapsedMs = elapsedMs;
+            }
+
+            // One observer pass for the GC-pause curve (its own alloc is not charged above).
+            gcNow();
+            const gc = await withGcObserver(() => { for (let i = 0; i < ops; i++) op(i); });
+            const { major, minor, totalMs, maxMs } = gc;
+
+            const rawBpo = minDelta / ops;
+            const bytesPerOp = rawBpo < 1 ? 0 : Math.round(rawBpo); // sub-byte noise -> 0
+            const opsPerMs = bestElapsedMs > 0 && isFinite(bestElapsedMs) ? ops / bestElapsedMs : Infinity;
+            const pausePerMillion = (totalMs / ops) * 1e6;
+
+            if (major > worstMajor) worstMajor = major;
+            if (pausePerMillion > worstPausePerM) worstPausePerM = pausePerMillion;
+            if (bytesPerOp !== 0) allZero = false;
+
+            points.push({
+                n, ops, bytesPerOp, opsPerMs,
+                gcMajor: major, gcMinor: minor, gcPauseMs: totalMs, gcMaxMs: maxMs,
+                pauseMsPerMillion: pausePerMillion,
+            });
+            check.push(opsPerMs, ops);
+        }
+        perOp.push({ op: opName, points, zeroAlloc: points.every((p) => p.bytesPerOp === 0) });
+    }
+
+    return {
+        dim: 'D6', member, baseline: baselineFor(member, 'D6'), unit: 'B/op',
+        perOp, maxMajor: worstMajor, maxPauseMsPerMillion: worstPausePerM,
+        zeroAlloc: allZero,
+        _check: check, // throughput + op counts (positive). Alloc + pause are ALLOWED 0.
+    };
+}
+
+// ===========================================================================
+// D7 -- Scalability across key types + load factors + insertion order. The
+// lite-logn members are numeric substrates: string + object keys read NA (never 0).
+// Insertion order (sorted / random / adversarial) is COMPARISON/ORDER-sensitive:
+// applicable to BinaryHeap + SkipList, NA for the INDEX-ADDRESSED Fenwick +
+// SegmentTree (positional, order-invariant) -- another honest n/a.
+// ===========================================================================
+
+/** Time building a fresh instance of n elements in a given key order. ns/op. */
+function buildOrderNs(member, n, order) {
+    const keys = new Float64Array(n);
+    if (order === 'sorted') { for (let i = 0; i < n; i++) keys[i] = i; }
+    else if (order === 'adversarial') { for (let i = 0; i < n; i++) keys[i] = n - 1 - i; } // reverse
+    else { // random
+        for (let i = 0; i < n; i++) keys[i] = i;
+        const rnd = prng(0x2468 ^ n);
+        for (let i = n - 1; i > 0; i--) { const j = rnd() % (i + 1); const t = keys[i]; keys[i] = keys[j]; keys[j] = t; }
+    }
+    const reps = Math.max(2, Math.round(4e6 / n));
+    let elapsed = 0, count = 0;
+    for (let r = 0; r < reps; r++) {
+        if (member === 'BinaryHeap') {
+            const h = new BinaryHeap(n, 'min');
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) h.push(i, keys[i]);
+            elapsed += performance.now() - t0;
+            SINK += h.size;
+        } else { // SkipList
+            const sl = new SkipList(n, 0x13 >>> 0);
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) sl.set(keys[i], i);
+            elapsed += performance.now() - t0;
+            SINK += sl.size;
+        }
+        count += n;
+    }
+    return (elapsed * 1e6) / count;
+}
+
+function loadOpNs(member, n, fillFrac) {
+    const built = makeSubject(member, Math.max(1, Math.round(n * fillFrac)));
+    return median(collect(built.op, 4000, 60));
+}
+
+export function D7(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const n = opts.n ?? 65536;
+
+    const intNs = median(collect(makeSubject(member, n).op, 4000, 60));
+    const keyTypes = {
+        int: supportsKeyType(member, 'int') ? intNs : NA,
+        string: supportsKeyType(member, 'string') ? intNs : NA,
+        object: supportsKeyType(member, 'object') ? intNs : NA,
+    };
+
+    const loadFactors = [];
+    for (const lf of (opts.loadFactors ?? [0.3, 0.5, 0.7, 0.9])) {
+        loadFactors.push({ loadFactor: lf, nsPerOp: loadOpNs(member, n, lf) });
+    }
+    const nearFullNs = loadOpNs(member, n, 0.99);
+
+    // Insertion order: applicable only to the comparison/order-sensitive members.
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList');
+    const on = opts.orderN ?? Math.min(n, 1 << 14);
+    const insertionOrder = orderSensitive
+        ? {
+            sorted: buildOrderNs(member, on, 'sorted'),
+            random: buildOrderNs(member, on, 'random'),
+            adversarial: buildOrderNs(member, on, 'adversarial'),
+        }
+        : NA;
+
+    const check = [intNs, nearFullNs].concat(loadFactors.map((l) => l.nsPerOp));
+    if (typeof insertionOrder === 'object') {
+        check.push(insertionOrder.sorted, insertionOrder.random, insertionOrder.adversarial);
+    }
+
+    return {
+        dim: 'D7', member, baseline: baselineFor(member, 'D7'), unit: 'ns/op',
+        keyTypes, loadFactors, nearFullNs, insertionOrder,
+        orderSensitive, justResizedNs: NA, resizes: false,
+        _check: check,
+    };
+}
+
+// ===========================================================================
+// D8 -- Workload micro-benchmarks: churn (insert/delete or update the same keys --
+// all members) + ordered scan (successor + rangeIter -- SkipList only). Inapplicable
+// workloads read NA (never 0).
+// ===========================================================================
+
+export function churnNs(member, n, seed) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    return median(collect(makeSubject(member, n).op, 4000, 60));
+}
+
+/** SkipList ordered-scan workload: successor walk + a bounded rangeIter scan. */
+function orderedNs(n, seed) {
+    const sl = new SkipList(n, (seed ^ 0x1357) >>> 0);
+    for (let k = 0; k < n; k++) sl.set(k, k);
+    let key = 0;
+    const succ = () => { const s = sl.successor(key); if (s !== undefined) SINK += s; key++; if (key >= n - 1) key = 0; };
+    const succNs = median(collect(succ, 4000, 60));
+
+    // rangeIter: scan a bounded window; ns per YIELDED key (window keeps it O(window)).
+    const W = Math.min(64, n);
+    let lo = 0;
+    const t0 = performance.now();
+    const reps = 20000;
+    let seen = 0;
+    for (let r = 0; r < reps; r++) {
+        for (const k of sl.rangeIter(lo, lo + W - 1)) { SINK += k; seen++; }
+        lo++; if (lo + W >= n) lo = 0;
+    }
+    const scanNs = seen > 0 ? ((performance.now() - t0) * 1e6) / seen : 1e-3;
+    return { successorNsPerOp: succNs, rangeScanNsPerKey: scanNs };
+}
+
+export function D8(member, opts = {}) {
+    if (!SUBJECTS.includes(member)) throw new Error('[bench] unhandled member: ' + member);
+    const n = opts.n ?? 65536;
+    const seed = opts.seed ?? DEFAULT_SEED;
+
+    const churn = { nsPerOp: churnNs(member, n, seed) };
+
+    let ordered = NA;
+    if (supportsWorkload(member, 'ordered')) ordered = orderedNs(n, seed);
+
+    const check = [churn.nsPerOp];
+    if (typeof ordered === 'object') check.push(ordered.successorNsPerOp, ordered.rangeScanNsPerKey);
+
+    return {
+        dim: 'D8', member, baseline: baselineFor(member, 'D8'), unit: 'ns/op',
+        churn, ordered,
+        _check: check,
+    };
+}
+
+// ===========================================================================
+// Fixed-seed workload TRACE hash (the determinism gate). Deterministic given the
+// seed: two runs at the same seed produce byte-identical hashes. Timing plays no
+// part -- this hashes the WORKLOAD (the op-argument stream), not its latency.
+// ===========================================================================
+
+const TRACE_UNIVERSE = 65536;
+
+export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
+    // All four members are numeric-key/index substrates -- mode 0 (uint32 keys over
+    // TRACE_UNIVERSE). The dispatch is still EXPLICIT + fail-closed so a future 5th
+    // member cannot silently inherit a trace universe.
+    let mode;
+    if (member === 'BinaryHeap' || member === 'Fenwick' ||
+        member === 'SegmentTree' || member === 'SkipList') mode = 0;
+    else throw new Error('[bench] unhandled member: ' + member);
+
+    const rng = prng(seed);
+    let h = 0x811c9dc5 >>> 0;
+    for (let i = 0; i < length; i++) {
+        const r = rng();
+        const x = mode === 0 ? r % TRACE_UNIVERSE : r;
+        h = (h ^ (x | 0)) >>> 0;
+        h = (Math.imul(h, 16777619)) >>> 0;
+        h = (h ^ (r >>> 28)) >>> 0; // fold the op-selector too (trace SHAPE, not just values)
+        h = (Math.imul(h, 16777619)) >>> 0;
+    }
+    return h >>> 0;
+}
+
+// ===========================================================================
+// Vacuity gate: a dimension that returns an empty array or an impossible 0 (a
+// non-positive nsPerOp / throughput / byte figure) must make the process fail.
+// ===========================================================================
+
+export function vacuityCheck(result) {
+    if (!result || typeof result !== 'object') {
+        throw new Error('[bench] vacuous: null/non-object result');
+    }
+    const chk = result._check;
+    if (!Array.isArray(chk) || chk.length === 0) {
+        throw new Error('[bench] vacuous: ' + result.dim + '/' + result.member + ' returned no _check values');
+    }
+    for (const v of chk) {
+        if (typeof v !== 'number' || !isFinite(v) || v <= 0) {
+            throw new Error('[bench] vacuous: ' + result.dim + '/' + result.member +
+                ' impossible value ' + String(v));
+        }
+    }
+    for (const key of ['points', 'strideSweep', 'loadFactors', 'loadFactorCurve', 'ops', 'perOp']) {
+        if (Array.isArray(result[key]) && result[key].length === 0) {
+            throw new Error('[bench] vacuous: ' + result.dim + '/' + result.member +
+                ' empty array ' + key);
+        }
+    }
+    return true;
+}
+
+/** Dispatch table: run one dimension by name (async, since D5/D6 are async). */
+export async function runDimension(member, dim, opts = {}) {
+    switch (dim) {
+        case 'D1': return D1(member, opts);
+        case 'D2': return D2(member, opts);
+        case 'D3': return D3(member, opts);
+        case 'D4': return D4(member, opts);
+        case 'D5': return D5(member, opts);
+        case 'D6': return D6(member, opts);
+        case 'D7': return D7(member, opts);
+        case 'D8': return D8(member, opts);
+        default: throw new Error('[bench] unknown dimension ' + String(dim));
+    }
+}
