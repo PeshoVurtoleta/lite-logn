@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lite-logn -- the O(log n) witness line vs the departing foil</title>
+<style>
+  :root {
+    --bg: #0c1512;
+    --bg2: #0a120e;
+    --panel: #0f1d16;
+    --edge: #1f3a2c;
+    --ink: #cfe8d8;
+    --dim: #7fa591;
+    --label: #9fe3bf;
+    --accent: #37e08a;
+    --path: #ffcf5a;
+    --foil: #ff6a6a;
+    --root: #4466ff;
+    --ink-oklch: oklch(0.9 0.05 155);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    background: var(--bg2);
+    color: var(--ink);
+    color: var(--ink-oklch);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 14px;
+  }
+  header {
+    padding: 1rem 1.25rem 0.5rem;
+    border-bottom: 1px solid var(--edge);
+  }
+  h1 { font-size: 1.1rem; margin: 0 0 0.25rem; color: var(--accent); }
+  .tag { color: var(--dim); font-size: 0.8rem; }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1rem;
+    align-items: center;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--edge);
+  }
+  .controls label { color: var(--label); display: inline-flex; gap: 0.4rem; align-items: center; }
+  select, input[type="number"] {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 0.25rem; padding: 0.2rem 0.4rem; font: inherit;
+  }
+  button {
+    background: var(--panel); color: var(--accent); border: 1px solid var(--edge);
+    border-radius: 0.25rem; padding: 0.3rem 0.7rem; font: inherit; cursor: pointer;
+  }
+  @media (hover: hover) { button:hover { border-color: var(--accent); } }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    padding: 0.9rem 1.25rem;
+  }
+  .grid.focus-all { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.focus-one { grid-template-columns: minmax(0, 1fr); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 0.4rem;
+    padding: 0.5rem; overflow: hidden;
+  }
+  .panel h2 { font-size: 0.85rem; margin: 0.1rem 0 0.4rem; color: var(--label); }
+  canvas { display: block; width: 100%; background: #0c1512; border-radius: 0.3rem; }
+  .panel.hidden { display: none; }
+  .witness {
+    padding: 0.5rem 1.25rem 1.5rem;
+    border-top: 1px solid var(--edge);
+  }
+  .witness h2 { font-size: 0.9rem; color: var(--label); }
+  #witnessStatus { color: var(--dim); font-size: 0.8rem; margin: 0.3rem 0; white-space: pre-wrap; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.8rem; }
+  th, td { text-align: right; padding: 0.2rem 0.5rem; border-bottom: 1px solid var(--edge); }
+  th:first-child, td:first-child { text-align: left; }
+  .on { color: var(--accent); }
+  .off { color: var(--foil); }
+  .foilcell { color: var(--dim); }
+  footer { color: var(--dim); font-size: 0.75rem; padding: 0 1.25rem 1.5rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>lite-logn -- the O(log n) witness line vs the departing foil</h1>
+  <div class="tag">Every panel is drawn STRICTLY from the member's live internal snapshot (no shadow state).
+    One seeded op-stream feeds all four members. Repo-only dev artifact -- never shipped.</div>
+</header>
+
+<div class="controls">
+  <label>structure
+    <select id="structure">
+      <option value="all">all four</option>
+      <option value="BinaryHeap">BinaryHeap</option>
+      <option value="Fenwick">Fenwick</option>
+      <option value="SegmentTree">SegmentTree</option>
+      <option value="SkipList">SkipList</option>
+    </select>
+  </label>
+  <label>workload
+    <select id="workload">
+      <option value="mixed">mixed</option>
+      <option value="random">random</option>
+      <option value="churn">churn</option>
+    </select>
+  </label>
+  <label>seed <input id="seed" type="number" min="1" max="4294967295" value="2654435769"></label>
+  <label>n <input id="n" type="number" min="1" max="255" value="31"></label>
+  <button id="play">pause</button>
+  <button id="stepBtn">step</button>
+  <label>speed <input id="speed" type="number" min="0" max="200" value="4"> steps/frame</label>
+  <span id="stat" class="tag"></span>
+</div>
+
+<div class="grid focus-all" id="grid">
+  <div class="panel" data-member="BinaryHeap"><h2>BinaryHeap -- tree levels + sift path</h2><canvas></canvas></div>
+  <div class="panel" data-member="Fenwick"><h2>Fenwick / BIT -- cells + i&amp;-i climb</h2><canvas></canvas></div>
+  <div class="panel" data-member="SegmentTree"><h2>SegmentTree -- 2n array + fold spine</h2><canvas></canvas></div>
+  <div class="panel" data-member="SkipList"><h2>SkipList -- express lanes + descent (expected O(log n))</h2><canvas></canvas></div>
+</div>
+
+<div class="witness">
+  <h2>O(log n) witness -- computed SERVER-SIDE off the shipped test/witness.mjs kernels</h2>
+  <button id="loadWitness">load witness readings</button>
+  <div id="witnessStatus">Not loaded. (Timings are computed on the Node server, not in the browser -- browser timing is untrustworthy for a foil comparison.)</div>
+  <table id="witnessTable" hidden>
+    <thead><tr><th>member.op</th><th>R^2</th><th>slope ns/lvl</th><th>band</th><th>verdict</th><th>foil R^2</th><th>foil</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="maxInsert" class="tag"></div>
+</div>
+
+<footer>
+  Serve me: <code>npm run demo:serve</code> then open <code>http://localhost:8018/</code>.
+  A static file / IDE preview will NOT work (the witness + stream routes are dynamic).
+</footer>
+
+<script type="module">
+import { createEngine, resetEngine, step, snapshot, MEMBER_NAMES } from './Visualize.mjs';
+import { RENDERERS } from './renderers.mjs';
+
+// --- cache every DOM handle at init (lite-law: $-prefixed consts) ------------
+const $structure = document.getElementById('structure');
+const $workload = document.getElementById('workload');
+const $seed = document.getElementById('seed');
+const $n = document.getElementById('n');
+const $play = document.getElementById('play');
+const $stepBtn = document.getElementById('stepBtn');
+const $speed = document.getElementById('speed');
+const $stat = document.getElementById('stat');
+const $grid = document.getElementById('grid');
+const $loadWitness = document.getElementById('loadWitness');
+const $witnessStatus = document.getElementById('witnessStatus');
+const $witnessTable = document.getElementById('witnessTable');
+const $witnessBody = $witnessTable.querySelector('tbody');
+const $maxInsert = document.getElementById('maxInsert');
+
+// Panel canvases + their 2d contexts, cached once (no per-frame getElementById).
+const PANELS = [];
+const panelEls = $grid.querySelectorAll('.panel');
+for (let i = 0; i < panelEls.length; i++) {
+  const el = panelEls[i];
+  const canvas = el.querySelector('canvas');
+  // geom is hoisted per panel and refilled IN PLACE in draw() -- never a per-frame
+  // object literal (the young-gen garbage the demo bar forbids).
+  PANELS.push({
+    member: el.dataset.member, el, canvas, ctx: canvas.getContext('2d'),
+    cssW: 0, cssH: 0, geom: { x: 8, y: 8, w: 0, h: 0 },
+  });
+}
+
+// --- engine ------------------------------------------------------------------
+let engine = build();
+let playing = true;
+let frame = 0;
+
+function build() {
+  const cap = 256;
+  const n = clampInt($n.value, 1, 255, 31);
+  const seed = clampInt($seed.value, 1, 4294967295, 2654435769);
+  const workload = $workload.value;
+  return createEngine({ cap, n, seed, workload });
+}
+function clampInt(v, lo, hi, dflt) {
+  const x = Math.trunc(Number(v));
+  if (!Number.isFinite(x)) return dflt;
+  return x < lo ? lo : x > hi ? hi : x;
+}
+
+function rebuild() { engine = build(); frame = 0; sizeCanvases(); }
+
+// --- canvas sizing (read layout ONCE per rebuild/resize, never per frame) ----
+function sizeCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  // Pass 1: READ every panel's layout width (no interleaved style write, so the
+  // browser does at most one reflow, never one-per-panel).
+  for (let i = 0; i < PANELS.length; i++) {
+    const p = PANELS[i];
+    if (p.el.classList.contains('hidden')) { p.cssW = 0; continue; }
+    p.cssW = p.canvas.clientWidth || 480;
+    p.cssH = 300;
+  }
+  // Pass 2: WRITE every panel's canvas dimensions.
+  for (let i = 0; i < PANELS.length; i++) {
+    const p = PANELS[i];
+    if (p.el.classList.contains('hidden')) continue;
+    p.canvas.width = Math.round(p.cssW * dpr);
+    p.canvas.height = Math.round(p.cssH * dpr);
+    p.canvas.style.height = p.cssH + 'px';
+    p.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+}
+
+function applyFocus() {
+  const which = $structure.value;
+  $grid.classList.toggle('focus-one', which !== 'all');
+  $grid.classList.toggle('focus-all', which === 'all');
+  for (let i = 0; i < PANELS.length; i++) {
+    const p = PANELS[i];
+    const show = which === 'all' || which === p.member;
+    p.el.classList.toggle('hidden', !show);
+  }
+  sizeCanvases();
+}
+
+// --- render loop (no forced reflow, no layout reads here) --------------------
+function draw() {
+  for (let i = 0; i < PANELS.length; i++) {
+    const p = PANELS[i];
+    if (p.el.classList.contains('hidden')) continue;
+    const g = p.ctx;
+    g.clearRect(0, 0, p.cssW, p.cssH);
+    const snap = snapshot(engine, p.member);
+    // refill the hoisted geom in place -- no per-frame object literal.
+    p.geom.w = p.cssW - 16;
+    p.geom.h = p.cssH - 16;
+    RENDERERS[p.member].draw(g, snap, p.geom);
+  }
+}
+
+function loop() {
+  if (playing) {
+    const speed = clampInt($speed.value, 0, 200, 4);
+    for (let i = 0; i < speed; i++) step(engine);
+  }
+  draw();
+  // Throttle the telemetry textContent to ~10Hz via a frame-counter mask.
+  if ((frame & 7) === 0) {
+    $stat.textContent = 'step ' + engine.index + '  n=' + engine.n + '  workload=' + engine.workload;
+  }
+  frame = (frame + 1) | 0;
+  requestAnimationFrame(loop);
+}
+
+// --- controls (pointer/click for buttons, change for selects) ---------------
+$play.addEventListener('click', () => {
+  playing = !playing;
+  $play.textContent = playing ? 'pause' : 'play';
+});
+$stepBtn.addEventListener('click', () => { step(engine); draw(); });
+$structure.addEventListener('change', applyFocus);
+$workload.addEventListener('change', rebuild);
+$seed.addEventListener('change', rebuild);
+$n.addEventListener('change', rebuild);
+window.addEventListener('resize', sizeCanvases);
+
+// --- witness headline (server-side; fail-closed) ----------------------------
+const HINT = 'This demo needs its Node server. Run  npm run demo:serve  and open  ' +
+  'http://localhost:8018/  (a static file or IDE preview will not work: /witness.json is a dynamic route).';
+
+$loadWitness.addEventListener('click', loadWitness);
+
+async function loadWitness() {
+  $loadWitness.disabled = true;
+  $witnessStatus.textContent = 'Computing all witness + foil fits on the server (this runs the real O(n^2) foils -- a few seconds)...';
+  const res = await fetchWitness('/witness.json');
+  if (!res.ok) {
+    $witnessStatus.textContent = res.message;
+    $loadWitness.disabled = false;
+    return;
+  }
+  renderWitness(res.data.rows);
+  $witnessStatus.textContent = 'Loaded. The member sits ON the straight log line; the O(n) foil MISSES the R^2 floor and leaves it.';
+  $loadWitness.disabled = false;
+}
+
+async function fetchWitness(url) {
+  try {
+    const resp = await fetch(url);
+    if (!resp || !resp.ok) throw new Error('server ' + (resp ? resp.status : 'unreachable'));
+    const data = await resp.json();
+    if (data && data.error) throw new Error(data.error);
+    if (data === null || typeof data !== 'object' || !Array.isArray(data.rows)) {
+      return { ok: false, message: HINT + '  [malformed witness payload]' };
+    }
+    return { ok: true, data };
+  } catch (err) {
+    const detail = err && err.message ? String(err.message) : String(err);
+    return { ok: false, message: HINT + '  [' + detail + ']' };
+  }
+}
+
+function renderWitness(rows) {
+  $witnessBody.replaceChildren();
+  let maxInsert = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(r.name + '.' + r.op));
+    tr.appendChild(cell(r.r2.toFixed(4)));
+    tr.appendChild(cell(r.slope.toFixed(2)));
+    tr.appendChild(cell('[' + r.slopeLo.toFixed(1) + ',' + r.slopeHi.toFixed(1) + ']'));
+    tr.appendChild(cell(r.onLine ? 'ON-LINE' : 'off-line', r.onLine ? 'on' : 'off'));
+    tr.appendChild(cell(r.foilR2.toFixed(4), 'foilcell'));
+    tr.appendChild(cell(r.foilOff ? r.foilName + ' (leaves)' : r.foilName + ' (!)', 'foilcell'));
+    $witnessBody.appendChild(tr);
+    if (typeof r.maxInsertNs === 'number' && r.maxInsertNs > maxInsert) maxInsert = r.maxInsertNs;
+  }
+  $witnessTable.hidden = false;
+  $maxInsert.textContent = maxInsert > 0
+    ? 'SkipList MAX single insert (disclosed, not gated): ' + maxInsert.toFixed(0) + ' ns -- the unlucky-tower tail an EXPECTED-O(log n) member must not hide.'
+    : '';
+}
+
+function cell(text, cls) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (cls) td.className = cls;
+  return td;
+}
+
+// --- init: hook UI from engine state, then run ------------------------------
+$play.textContent = 'pause';
+applyFocus();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
