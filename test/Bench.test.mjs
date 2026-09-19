@@ -40,6 +40,22 @@ import {
 import { createBenchKit, validateManifest } from '../benchmark/Template.mjs';
 import { driftFraction, driftExceeds, DRIFT_LIMIT, sentinelMetric } from '../benchmark/Bench.mjs';
 
+// Bench v3 re-adopt (reconcile from lite-o1's upgraded shared kit).
+import { clearWitness } from '../benchmark/Dimensions.mjs';
+import {
+    OP_CLASS, OLOGN_WORST, OLOGN_EXPECTED, CLEAR_WITNESS, CLEAR_WITNESS_EXCLUDED,
+    CLAIM_CLASS, classifyClaim,
+} from '../benchmark/Matrix.mjs';
+import {
+    SPIKE_TAGS, assertTag, tagByte, attributeMax, bandOf, CACHE_BANDS, paretoFrontier, sparseTax,
+} from '../benchmark/Template.mjs';
+import { renderHtml } from '../benchmark/Report.mjs';
+import {
+    MEMBERS as WITNESS_MEMBERS, BINARYHEAP_R2_FLOOR, BINARYHEAP_SLOPE_LO, BINARYHEAP_SLOPE_HI,
+} from './witness.mjs';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { readFileSync } from 'node:fs';
+
 const SEED = 0x9e3779b1 >>> 0;
 
 // Small per-dimension opts so the gate runs fast in-process; the orchestrator runs
@@ -362,4 +378,282 @@ test('Template: validateManifest fails closed; createBenchKit runs one dimension
 
     assert.throws(() => kit.runLatency('Nope', {}), /unhandled member/);
     assert.throws(() => kit.rationale('Nope'), /unhandled member/);
+});
+
+// ===========================================================================
+// Bench v3 re-adopt -- reconcile of lite-o1's upgraded shared kit to the O(log n)
+// honesty contract. Each assertion must BITE (qa mutation-verifies).
+// ===========================================================================
+
+const REPORT_SRC = readFileSync(new URL('../benchmark/Report.mjs', import.meta.url), 'utf8');
+const BENCH_SRC = readFileSync(new URL('../benchmark/Bench.mjs', import.meta.url), 'utf8');
+const METHODOLOGY_SRC = readFileSync(new URL('../benchmark/METHODOLOGY.md', import.meta.url), 'utf8');
+const PROVE_RE = /prove|proof|proven/i;
+
+test('#1 witness gate UNCHANGED: R^2 floor 0.958, BinaryHeap band [5.76,13.44], MEMBERS.length 7', () => {
+    // The frozen O(log n) witness gate (test/witness.mjs, D-02) is the family anchor; the
+    // re-adopt must never loosen or re-center it. A mutation to any of these constants BITES.
+    assert.equal(BINARYHEAP_R2_FLOOR, 0.958, 'the frozen R^2 floor');
+    assert.equal(BINARYHEAP_SLOPE_LO, 5.76, 'the frozen BinaryHeap slope band low');
+    assert.equal(BINARYHEAP_SLOPE_HI, 13.44, 'the frozen BinaryHeap slope band high');
+    assert.equal(WITNESS_MEMBERS.length, 7, 'the 7 gated witness op-rows are unchanged');
+});
+
+test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughput-invariant', () => {
+    // lite-logn's OWN witness label surfaces (its report + orchestrator) must describe the
+    // O(log n) straight-line witness -- NEVER the SIBLING lite-o1 family's O(1)-flatness /
+    // throughput-invariance witness. Importing that wording into lite-logn is a dishonesty
+    // (a different family's witness), so a mutation that relabels the witness here BITES on
+    // the positive anchor OR the forbidden-phrase check. Scoped to the label surfaces (NOT
+    // the package-agnostic Template flavor enum, which legitimately lists 'O(1)' for siblings,
+    // and NOT METHODOLOGY which honestly CONTRASTS with lite-o1's O(1) witness).
+    for (const [name, src] of [['Report.mjs', REPORT_SRC], ['Bench.mjs', BENCH_SRC]]) {
+        assert.ok(/O\(log n\) Witness/i.test(src), name + ' must label the witness O(log n) (positive anchor)');
+        assert.ok(!/O\(1\) Witness/i.test(src), name + ' must not relabel lite-logn\'s witness as an O(1) Witness');
+        assert.ok(!/throughput[- ]invarian/i.test(src), name + ' must not import throughput-invariance wording');
+    }
+    // The Template smoke manifest declares the O(log n) flavor (not O(1)); a flip BITES.
+    assert.ok(/flavor:\s*'O\(log n\)'/.test(readFileSync(new URL('./Bench.test.mjs', import.meta.url), 'utf8')),
+        'the Template smoke manifest must declare the O(log n) witness flavor');
+});
+
+test('#2 OP_CLASS: covers the 7 witness rows; SkipList get/set/delete are EXPECTED; no op painted O(1)/worst-case-wrong', () => {
+    // Every gated witness op-row carries an honest O(log n) class.
+    for (const key of OP_ROWS) {
+        assert.ok(key in OP_CLASS, key + ' (a gated witness row) must have an OP_CLASS entry');
+        assert.ok(/O\(log n\)/.test(OP_CLASS[key]), key + ' must be labelled O(log n), got ' + OP_CLASS[key]);
+    }
+    // No op anywhere may be painted O(1) -- O(1) is the SIBLING lite-o1's contract, not lite-logn's.
+    for (const [key, cls] of Object.entries(OP_CLASS)) {
+        assert.ok(!/O\(1\)/.test(cls), key + ' must NOT be painted O(1) (that is a different family): ' + cls);
+        assert.ok(cls === OLOGN_WORST || cls === OLOGN_EXPECTED, key + ' unknown class ' + cls);
+    }
+    // SkipList's randomized towers -> EXPECTED, never worst-case. Mislabelling any as worst-case BITES.
+    for (const op of ['SkipList.get', 'SkipList.set', 'SkipList.delete']) {
+        assert.equal(OP_CLASS[op], OLOGN_EXPECTED, op + ' must be the EXPECTED class string');
+        assert.ok(!/worst-case/.test(OP_CLASS[op]), op + ' must not be labelled worst-case (randomized)');
+    }
+    // The deterministic structures ARE worst-case O(log n) (full-height walk). Covers every
+    // Table-A worst-case op INCLUDING BinaryHeap.push (not a gated D1 row, but still an
+    // OP_CLASS entry) so a mutation flipping push to 'expected' BITES here.
+    for (const op of ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query']) {
+        assert.equal(OP_CLASS[op], OLOGN_WORST, op + ' must be the WORST-case O(log n) class string');
+    }
+    // Full-teeth partition: every OP_CLASS key is accounted for by EXACTLY one of the two
+    // lists above (worst union expected == all keys, disjoint) -- a new/renamed op that is not
+    // wired into either list here would otherwise pass unnoticed.
+    const worstOps = ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query'];
+    const expectedOps = ['SkipList.get', 'SkipList.set', 'SkipList.delete'];
+    assert.deepEqual([...worstOps, ...expectedOps].sort(), Object.keys(OP_CLASS).sort(),
+        'every OP_CLASS key must be asserted as either WORST or EXPECTED above (no silent gap)');
+});
+
+test('#3 CLEAR_WITNESS is EXACTLY the four SUBJECTS; NodePool is EXCLUDED with a reason; each has a real clear()', () => {
+    assert.deepEqual(CLEAR_WITNESS, SUBJECTS, 'the clear() witness set must be exactly SUBJECTS (4)');
+    assert.equal(CLEAR_WITNESS.length, 4, 'exactly four members');
+    // Adding NodePool (the private free-list) to the set would break the SUBJECTS equality above.
+    assert.ok(!CLEAR_WITNESS.includes('NodePool'), 'the private NodePool is NOT a clear() witness');
+    assert.ok(typeof CLEAR_WITNESS_EXCLUDED.NodePool === 'string' && CLEAR_WITNESS_EXCLUDED.NodePool.length > 0,
+        'NodePool must be named in the EXCLUDED table with a reason (never silently dropped)');
+    for (const m of CLEAR_WITNESS) {
+        const { obj } = makeSubject(m, 256);
+        assert.equal(typeof obj.clear, 'function', m + ' must expose a real clear()');
+    }
+});
+
+test('#3 clearWitness probe: the four members reach size/content 0 + zero-alloc + reusable', () => {
+    const cw = clearWitness({ n: 512, cycles: 200 });
+    assert.deepEqual(cw.members, CLEAR_WITNESS);
+    for (const m of CLEAR_WITNESS) {
+        const r = cw.results[m];
+        assert.equal(r.sizeAfterClear, 0, m + ' content must be 0 after clear');
+        assert.ok(r.pristine, m + ' must be pristine after clear');
+        assert.ok(r.reusable, m + ' must be reusable after clear (refill brings content back up)');
+        assert.ok(r.refilledTo > 0, m + ' refill must be non-vacuous (content > 0)');
+        assert.equal(r.bytesDelta, 0, m + ' backing store must not grow across cycles (zero-alloc)');
+        assert.ok(r.zeroAlloc, m + ' clear-witness must report zero-alloc');
+    }
+});
+
+test('#3 clearWitness is NON-VACUOUS: it calls each member\'s REAL prototype clear() exactly cycles+2 times', () => {
+    const CLASSES = { BinaryHeap, Fenwick, SegmentTree, SkipList };
+    assert.deepEqual(Object.keys(CLASSES).sort(), [...CLEAR_WITNESS].sort(),
+        'the spy table must cover exactly the CLEAR_WITNESS members');
+    const counts = {}; const originals = {};
+    for (const m of CLEAR_WITNESS) {
+        counts[m] = 0;
+        originals[m] = CLASSES[m].prototype.clear;
+        assert.equal(typeof originals[m], 'function', m + ' must have a real clear() to spy on');
+        CLASSES[m].prototype.clear = function (...args) { counts[m]++; return originals[m].apply(this, args); };
+    }
+    try {
+        const cycles = 37; // odd, non-default: a coincidental match is astronomically unlikely
+        const cw = clearWitness({ n: 64, cycles });
+        assert.equal(cw.members.length, 4);
+        for (const m of CLEAR_WITNESS) {
+            assert.equal(counts[m], cycles + 2,
+                m + ' clearWitness must invoke the REAL prototype clear() exactly cycles+2 times ' +
+                '(1 initial + ' + cycles + ' loop + 1 final); a stubbed probe reads 0 here');
+        }
+    } finally {
+        for (const m of CLEAR_WITNESS) CLASSES[m].prototype.clear = originals[m];
+    }
+    for (const m of CLEAR_WITNESS) assert.equal(CLASSES[m].prototype.clear, originals[m], m + ' clear() must be restored');
+});
+
+test('#3 retention: 1000 clear->refill cycles leave content 0 + free-list restored + no memberBytes growth', () => {
+    for (const m of CLEAR_WITNESS) {
+        const { obj } = makeSubject(m, 1024);
+        const base = memberBytes(m, obj);
+        assert.ok(base > 0, m + ' backing bytes must be positive');
+        for (let c = 0; c < 1000; c++) {
+            obj.clear();
+            if (m === 'BinaryHeap') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.push(k, k); }
+            else if (m === 'SkipList') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
+            else if (m === 'Fenwick') { assert.equal(obj.prefix(obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
+            else { assert.equal(obj.query(0, obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
+        }
+        obj.clear();
+        assert.equal(memberBytes(m, obj), base, m + ' memberBytes delta must be exactly 0 across 1000 cycles');
+    }
+    // SkipList free-list restored: after clear(), a full refill to capacity succeeds (a leaked
+    // free-list would overflow / drop). makeSubject builds SkipList(n+1); refill n keys -> size n.
+    const { obj: sl } = makeSubject('SkipList', 1024);
+    sl.clear();
+    for (let k = 0; k < 1024; k++) sl.set(k, k);
+    assert.equal(sl.size, 1024, 'SkipList free-list must be fully restored after clear (refill to n)');
+});
+
+test('#4 CLAIM_CLASS classifier: alloc keeps "proven" (torture/0 B-op), timing softens, cited=Pugh keeps', () => {
+    assert.deepEqual(Object.keys(CLAIM_CLASS).sort(), ['alloc', 'cited', 'timing']);
+    assert.equal(classifyClaim('the torture gate proves every timed op-row at 0 B/op'), CLAIM_CLASS.alloc);
+    assert.equal(classifyClaim('byte-identical clear() leaves the backing store untouched'), CLAIM_CLASS.alloc);
+    assert.equal(classifyClaim('Pugh 1990 proved the skip list is EXPECTED O(log n)'), CLAIM_CLASS.cited);
+    // A timing/complexity claim is class timing -> MUST NOT read "proven".
+    assert.equal(classifyClaim('the witness proves the straight O(log n) line'), CLAIM_CLASS.timing);
+    assert.equal(classifyClaim('the slope band is the proof of one level per doubling'), CLAIM_CLASS.timing);
+});
+
+test('#4 doc gate: 0 timing-class "prove*" in METHODOLOGY/Report; the alloc claim keeps "proven"', () => {
+    for (const [name, text] of [['benchmark/METHODOLOGY.md', METHODOLOGY_SRC], ['benchmark/Report.mjs', REPORT_SRC]]) {
+        for (const line of text.split('\n')) {
+            if (!PROVE_RE.test(line)) continue;
+            assert.notEqual(classifyClaim(line), CLAIM_CLASS.timing,
+                name + ' has a timing-class "prove*" claim (must read witness/empirical): ' + line.trim().slice(0, 90));
+        }
+    }
+    // POSITIVE anchor: the deterministic 0-B/op alloc claim STILL keeps "proven" in METHODOLOGY.
+    // Softening it (prove -> witness) drops this count to 0 -> FAIL.
+    const allocProven = METHODOLOGY_SRC.split('\n').filter((l) => PROVE_RE.test(l) && /0 ?B\/op/i.test(l) && classifyClaim(l) === CLAIM_CLASS.alloc);
+    assert.ok(allocProven.length >= 1, 'the torture/perf "proves ... 0 B/op" alloc claim must survive in METHODOLOGY');
+});
+
+test('#5 report: D6 + D8 render ADJACENT to the O(log n) witness plot; clear + per-op witnesses sit with them', () => {
+    const opsFor = (m) => OP_ROWS.filter((k) => k.slice(0, k.indexOf('.')) === m).map((k) => k.slice(k.indexOf('.') + 1));
+    const fakeCell = (m, dim) => {
+        if (dim === 'D1') {
+            const ops = opsFor(m).map((op) => ({ op, r2: 0.99, slope: 5, slopeLo: 1, slopeHi: 10, onLine: true, foilR2: 0.4, foilOff: true, foilName: 'O(n) foil' }));
+            const cell = { ops };
+            if (m === 'SkipList') { cell.counterFoil = { name: 'Map', getNsPerOp: 1, cannotAnswer: ['successor', 'predecessor', 'rangeIter'] }; cell.maxSingleOp = 9; }
+            else cell.counterFoil = 'n/a';
+            return cell;
+        }
+        if (dim === 'D2') return { points: [{ ops: 1000, nsPerOp: 1 }, { ops: 2000, nsPerOp: 1 }], drift: 1 };
+        if (dim === 'D3') return { bytesPerLive: 8, theoreticalMinPerLive: 8, peakBackingBytes: 1024, overheadRatio: 1, loadFactorCurve: [{ overheadRatio: 1, loadFactor: 0.25, bytesPerLive: 8 }], heapAfterClearKB: 0 };
+        if (dim === 'D4') return { strideSweep: [{ workingSet: 1000, nsPerElem: 1 }], denseNsPerOp: 1, randomNsPerOp: 1, gap: 1 };
+        if (dim === 'D5') return { single: { min: 100, gzip: 50 }, all: { min: 1000, gzip: 500 }, ratio: 0.1, underForty: true };
+        if (dim === 'D6') return { perOp: opsFor(m).map((op) => ({ op, zeroAlloc: true, points: [{ opsPerMs: 1 }] })) };
+        if (dim === 'D7') return { keyTypes: { int: 1, string: 'n/a', object: 'n/a' }, loadFactors: [{ nsPerOp: 1 }], nearFullNs: 1, insertionOrder: 'n/a' };
+        return { churn: { nsPerOp: 1 }, ordered: 'n/a' }; // D8
+    };
+    const results = {};
+    for (const m of SUBJECTS) for (const d of DIMENSIONS) results[m + '/' + d] = fakeCell(m, d);
+    const payload = {
+        meta: { seed: 1, node: 'v', arch: 'a', platform: 'p', date: 'd' },
+        subjects: SUBJECTS, dimensions: DIMENSIONS, results,
+        clearWitness: clearWitness({ n: 256, cycles: 20 }),
+        clearWitnessExcluded: CLEAR_WITNESS_EXCLUDED,
+        opClass: OP_CLASS,
+    };
+    const html = renderHtml(payload);
+    const iD1 = html.indexOf('D1 -- O(log n) Witness fit');
+    const iD2 = html.indexOf('D2 -- Amortized cost');
+    const iClear = html.indexOf('clear() invariance witness');
+    const iOp = html.indexOf('Per-op honesty class');
+    const iD6 = html.indexOf('D6 -- GC pressure');
+    const iD8 = html.indexOf('D8 -- Workload micro-benchmarks');
+    const iD3 = html.indexOf('D3 -- Memory footprint');
+    for (const [n, i] of [['D1', iD1], ['D2', iD2], ['clear', iClear], ['opClass', iOp], ['D6', iD6], ['D8', iD8], ['D3', iD3]]) {
+        assert.ok(i > 0, n + ' section must render (removing it FAILS)');
+    }
+    // Adjacency: the witness plot (D1/D2), then the clear + per-op witnesses, then D6 + D8,
+    // ALL before D3 -- so the corroboration sits next to the witness, not buried after memory.
+    assert.ok(iD1 < iD2 && iD2 < iClear && iClear < iOp && iOp < iD6 && iD6 < iD8,
+        'order must be D1 -> D2 -> clear -> per-op -> D6 -> D8');
+    assert.ok(iD8 < iD3, 'D6 + D8 must render BEFORE D3 (adjacent to the witness plot)');
+    // Honesty: the SkipList counter-foil O(log n)/O(1) contrast + n/a cells render as strings.
+    assert.ok(html.includes('n/a'), 'inapplicable cells must render the n/a string');
+    // The per-op honesty table labels every gated row O(log n) (never O(1)).
+    assert.ok(html.includes('O(log n) worst-case') && html.includes('O(log n) expected'),
+        'the per-op honesty table must render the O(log n) classes');
+});
+
+test('#5 report: clear() witness cycle count in the prose is n/a (never 0) when the witness is degenerate', () => {
+    // Reviewer NIT 2: a display-only `: 0` fallback in a file that otherwise holds the
+    // n/a-never-0 convention is a fail-open pattern for an unverified state (empty members
+    // means the cycle count is UNKNOWN, not zero). Exercise the degenerate branch directly.
+    const html = renderHtml({
+        meta: { seed: 1, node: 'v', arch: 'a', platform: 'p', date: 'd' },
+        subjects: [], dimensions: [], results: {},
+        clearWitness: { members: [], results: {} },
+        clearWitnessExcluded: {},
+        opClass: {},
+    });
+    const i = html.indexOf('clear() invariance witness');
+    assert.ok(i > 0, 'the clear() witness section must still render on an empty members array');
+    const snippet = html.slice(i, i + 400);
+    assert.ok(/n\/a fill\/clear cycles/.test(snippet),
+        'a degenerate (empty-members) clear witness must report the cycle count as n/a, not 0: ' + snippet);
+    assert.ok(!/[^0-9]0 fill\/clear cycles/.test(snippet),
+        'the cycle count must never silently read 0 for an unverified/degenerate witness');
+});
+
+test('#6 shipping discipline: package.json.version is 0.4.0; benchmark/ stays repo-only', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.equal(pkg.version, '0.4.0', 'repo-only re-adopt: version stays 0.4.0');
+    assert.ok(!pkg.files.includes('benchmark'), 'benchmark/ must not appear in package.json files[]');
+});
+
+// ===========================================================================
+// Bench v3 SHARED Template mechanisms (copied verbatim) -- smoke + fail-closed.
+// ===========================================================================
+
+test('v3 SPIKE_TAGS + attributeMax + bandOf + paretoFrontier + sparseTax: pure, fail-closed', () => {
+    assert.deepEqual(SPIKE_TAGS, ['steady', 'grow', 'wrap', 'cascade', 'compress', 'reseed']);
+    assert.ok(Object.isFrozen(SPIKE_TAGS));
+    assert.equal(SPIKE_TAGS[0], 'steady', 'lane byte 0 is steady');
+    for (const t of SPIKE_TAGS) assert.equal(assertTag(t), t);
+    assert.throws(() => assertTag('bogus'), /\[template\] unknown spike tag/);
+    assert.equal(tagByte('cascade'), 3);
+    const lane = new Uint8Array([0, 0, tagByte('cascade'), 0]);
+    assert.deepEqual(attributeMax(lane, 2, 100, 10), { maxIndex: 2, tag: 'cascade', spikeRatio: 10 });
+    assert.equal(attributeMax(lane, 0, 5, 5).tag, 'steady');
+    assert.throws(() => attributeMax(lane, 9, 1, 1), /maxIndex out of range/);
+    assert.throws(() => attributeMax(new Uint8Array([99]), 0, 1, 1), /outside the frozen enum/);
+    // Cache bands: exact nominal thresholds, fail closed on garbage.
+    assert.equal(bandOf(32 * 1024), 'L1');
+    assert.equal(bandOf(32 * 1024 + 1), 'L2');
+    assert.equal(bandOf(33 * 1024 * 1024), 'DRAM');
+    assert.equal(CACHE_BANDS.L1, 32 * 1024);
+    assert.throws(() => bandOf(-1), /non-negative finite/);
+    // Pareto dominance filter over a known fixture.
+    const front = paretoFrontier([
+        { member: 'A', opsPerMs: 100, bytesPerLive: 10 },
+        { member: 'B', opsPerMs: 50, bytesPerLive: 20 },
+        { member: 'C', opsPerMs: 40, bytesPerLive: 5 },
+        { member: 'D', opsPerMs: 120, bytesPerLive: 30 },
+    ]).map((p) => p.member).sort();
+    assert.deepEqual(front, ['A', 'C', 'D']);
+    assert.equal(sparseTax([{ loadFactor: 0.25, bytesPerLive: 40 }, { loadFactor: 1.0, bytesPerLive: 10 }]), 4);
+    assert.equal(sparseTax([{ loadFactor: 0.5, bytesPerLive: 5 }]), 'n/a');
 });

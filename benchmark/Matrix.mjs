@@ -181,3 +181,125 @@ export function cells() {
     }
     return out;
 }
+
+// ===========================================================================
+// Per-op honesty class (Bench v3, RE-WIRED to the O(log n) contract). The shared
+// lite-o1 kit keys its OP_CLASS by member and paints ops worst-case/amortized-O(1);
+// that is a DIFFERENT family's honesty. Here every gated hot op is O(log n), so the
+// table is keyed by `member.op` and each entry states its REAL O(log n) class:
+//   - worst-case : the op ALWAYS climbs/descends the full height of a deterministic
+//                  structure (heap sift, Fenwick / SegmentTree i&-i walk).
+//   - expected   : SkipList's randomized towers make its height a random variable, so
+//                  its cost is O(log n) EXPECTED, never worst-case (an unlucky tall
+//                  tower is a real MAX-single-insert tail, DISCLOSED, never gated).
+// Painting any hot op O(1) is the overclaim this table exists to prevent (O(1) is
+// this suite's SIBLING lite-o1's contract, not lite-logn's) -- so no value here may
+// carry an "O(1)" token. peek()/topKey()/size/length are O(1) GETTERS, deliberately
+// NOT in this table: they are not witness ops (they read a cached scalar, they do not
+// climb the structure), so listing them would smuggle an "O(1)" into the honesty set.
+// ===========================================================================
+
+/** The O(log n) honesty class label for a worst-case (full-height) op. */
+export const OLOGN_WORST = 'O(log n) worst-case';
+
+/** The O(log n) honesty class label for an EXPECTED (randomized-tower) op. */
+export const OLOGN_EXPECTED = 'O(log n) expected';
+
+/**
+ * The per-op honesty table, keyed `member.op`. Covers the 7 gated witness op-rows
+ * (Matrix.OP_ROWS) PLUS the two non-gated-but-honest ops the family surface exposes
+ * (BinaryHeap.push climbs the same sift as pop; SkipList.delete descends the same
+ * randomized tower as get/set). SkipList's three ops read EXPECTED, never worst-case.
+ */
+export const OP_CLASS = Object.freeze({
+    'BinaryHeap.push': OLOGN_WORST,   // sift-up the full height of the heap array
+    'BinaryHeap.pop': OLOGN_WORST,    // sift-down the full height (the gated witness op)
+    'Fenwick.update': OLOGN_WORST,    // climb the i & -i update walk to the root
+    'Fenwick.prefix': OLOGN_WORST,    // descend the i & -i prefix walk to 0
+    'SegmentTree.update': OLOGN_WORST, // climb leaf -> root
+    'SegmentTree.query': OLOGN_WORST,  // fold the two boundary spines up the tree
+    'SkipList.get': OLOGN_EXPECTED,   // randomized tower height -> EXPECTED, not worst-case
+    'SkipList.set': OLOGN_EXPECTED,   // ditto (+ a DISCLOSED max-single-insert tail)
+    'SkipList.delete': OLOGN_EXPECTED, // ditto
+});
+
+// ===========================================================================
+// clear() invariance witness (Bench v3, RE-WIRED per Table B). ELEVATED to a
+// first-class witness for EXACTLY the four SUBJECTS: each returns the structure to
+// its pristine EMPTY invariant (heap/list size 0; index-addressed accumulators
+// zeroed), retains its fixed backing store (zero-alloc), and stays reusable. The
+// CLEAR_WITNESS set is EXACTLY SUBJECTS -- verified against LogN.js (BinaryHeap:239,
+// Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
+//
+// EXCLUDED (named with a reason, never silently dropped -- the same discipline as the
+// NA-never-0 rule): NodePool is the PRIVATE, unexported free-list SkipList owns; it
+// HAS a clear() (LogN.js:1053) but is not a SUBJECT and its reset is transitively
+// covered by SkipList (its sole owner). The read/traverse surface (peek/topKey/size/
+// length/prefix/query/get/has + forEach/rangeIter) is not a reuse invariant at all.
+// ===========================================================================
+
+/** The four members whose clear()+reuse cycle is an elevated first-class witness. */
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList'];
+
+/**
+ * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are
+ * NOT SUBJECTS (unlike the in-set): NodePool is a private internal, and the getters/
+ * traversals are ops, not members -- so the excluded set names WHY the witness is the
+ * four SUBJECTS and nothing else, not a per-member membership list.
+ */
+export const CLEAR_WITNESS_EXCLUDED = Object.freeze({
+    NodePool: 'private/unexported free-list (SkipList\'s slot allocator, LogN.js:1053); ' +
+        'NOT in SUBJECTS -- its clear() is an internal reset transitively covered by SkipList, ' +
+        'never a public reuse invariant',
+    getters: 'peek/topKey/size/length/prefix/query/get/has are O(1) reads and forEach/rangeIter ' +
+        'are O(n) traversals -- reads, not reuse invariants, so there is nothing to clear',
+});
+
+// ===========================================================================
+// Claim-honesty classification (Bench v3, MEMBER-AGNOSTIC MACHINERY copied from the
+// shared kit, RE-WIRED markers). THREE claim classes -- the doc gate keys off this:
+//   - alloc : deterministically PROVEN by the torture gate (0 B/op under --expose-gc),
+//             a deterministic assertion, so the wording KEEPS "proven".
+//   - timing: EMPIRICALLY WITNESSED (the O(log n) straight-line fit AND every constant
+//             claim are OBSERVED, not deduced), so the wording must read "witness" /
+//             "empirical" / "we observe" -- NEVER "proven".
+//   - cited : "proven" refers to CITED LITERATURE, not a measurement on this host, so
+//             the wording KEEPS "proven" (it is a citation, not a claim this suite made).
+// A blanket find-replace of "proven" is a BUG: each hit is classified FIRST.
+// ===========================================================================
+
+/** The three claim classes. Frozen so a typo is a reference error, not a silent miss. */
+export const CLAIM_CLASS = Object.freeze({
+    alloc: 'alloc',
+    timing: 'timing',
+    cited: 'cited',
+});
+
+/**
+ * The signatures the doc gate uses to recognize a NON-timing "prove*" hit. A line
+ * matching a CITED marker is class `cited`; else a line matching an ALLOC marker is
+ * class `alloc`; a "prove*" hit matching NEITHER is class `timing` and MUST read
+ * witness/empirical, never proven. Order matters: cited is checked before alloc.
+ * Markers RE-WIRED for lite-logn: the alloc vocabulary is the family-generic 0-B/op
+ * torture wording; the cited vocabulary is the skip-list literature (Pugh 1990) --
+ * the only place a complexity fact is a CITATION rather than a host measurement.
+ */
+export const CLAIM_MARKERS = Object.freeze({
+    cited: [/\bPugh\b/, /literature/i],
+    alloc: [/0 ?B\/op/i, /zero-alloc/i, /byte-identical/i, /\btorture\b/i],
+});
+
+/**
+ * Classify a single line/segment that contains a "prove*" hit into its CLAIM_CLASS.
+ * Pure. A line with no alloc/cited marker is a TIMING claim (the default) -- so a
+ * softened timing line re-hardened back to "proven" classifies as `timing` and the
+ * doc gate FAILS it. Fail closed: a non-string is a timing claim (caught).
+ * @param {string} line
+ * @returns {'alloc'|'timing'|'cited'}
+ */
+export function classifyClaim(line) {
+    const s = typeof line === 'string' ? line : '';
+    for (const re of CLAIM_MARKERS.cited) if (re.test(s)) return CLAIM_CLASS.cited;
+    for (const re of CLAIM_MARKERS.alloc) if (re.test(s)) return CLAIM_CLASS.alloc;
+    return CLAIM_CLASS.timing;
+}

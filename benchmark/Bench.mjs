@@ -19,9 +19,10 @@ import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
-import { runDimension, vacuityCheck } from './Dimensions.mjs';
+import { runDimension, vacuityCheck, clearWitness } from './Dimensions.mjs';
 import {
     SUBJECTS, DIMENSIONS, DIMENSION_TITLES, baselineFor, counterFoilFor, cells,
+    OP_CLASS, CLEAR_WITNESS_EXCLUDED,
 } from './Matrix.mjs';
 import { DEFAULT_SEED } from './Harness.mjs';
 
@@ -267,6 +268,11 @@ async function orchestrate() {
         subjects: SUBJECTS, dimensions: DIMENSIONS, titles: DIMENSION_TITLES,
         counterFoils: SUBJECTS.reduce((o, m) => { o[m] = counterFoilFor(m); return o; }, {}),
         results,
+        // Bench v3 witnesses (deterministic, no timing in the verdict): rendered ADJACENT
+        // to the D1/D2 O(log n) witness plot by Report.mjs.
+        clearWitness: clearWitness({ n: 4096, cycles: 1000 }),
+        clearWitnessExcluded: CLEAR_WITNESS_EXCLUDED,
+        opClass: OP_CLASS,
     };
     writeFileSync(RESULTS_PATH, JSON.stringify(payload, null, 2));
     console.log('results written to benchmark/results.json (' + all.length + ' cells)');

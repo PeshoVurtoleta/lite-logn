@@ -29,6 +29,7 @@ import {
 } from './Harness.mjs';
 import {
     NA, SUBJECTS, OP_ROWS, baselineFor, counterFoilFor, supportsKeyType, supportsWorkload,
+    CLEAR_WITNESS,
 } from './Matrix.mjs';
 
 /** Global sink: every timed op feeds it so V8 cannot dead-code-eliminate a batch. */
@@ -354,6 +355,81 @@ function fillMember(member, obj, count) {
     if (member === 'SegmentTree') { obj.clear(); for (let i = 0; i < count; i++) obj.update(i, i & 0xffff); return; }
     if (member === 'SkipList') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
+}
+
+// ===========================================================================
+// clear() invariance witness (Bench v3). A first-class, member-scoped witness for
+// EXACTLY the four Matrix.CLEAR_WITNESS members (= SUBJECTS): clear() returns the
+// structure to its pristine EMPTY invariant, retains its fixed backing store across
+// many fill/clear cycles (zero-alloc), and leaves it reusable. This is the same
+// retention contract the torture gate proves at 0 B/op; here it is surfaced as a
+// named, rendered witness. The "content" measure is member-appropriate: the
+// heap/list SIZE for the addressable members (must reach 0), and the residual
+// accumulated total for the index-addressed members (Fenwick prefix / SegmentTree
+// query over the full range -- both 0 once the backing array is cleared). Fail
+// closed on an unhandled member.
+// ===========================================================================
+
+/**
+ * The live-content scalar for a CLEAR_WITNESS member -- 0 iff cleared, > 0 iff filled.
+ * BinaryHeap/SkipList expose `.size`; the index-addressed Fenwick/SegmentTree keep a
+ * fixed length, so their "content" is the residual accumulated total (0 == cleared).
+ */
+function clearContent(member, obj) {
+    if (member === 'BinaryHeap' || member === 'SkipList') return obj.size;
+    if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
+    if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
+    throw new Error('[bench] clearWitness: unhandled member ' + member);
+}
+
+/** Refill a freshly-cleared CLEAR_WITNESS member to its steady state. Returns the fill. */
+function clearWitnessRefill(member, obj, n) {
+    if (member === 'BinaryHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
+    if (member === 'SkipList') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
+    if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
+    if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
+    throw new Error('[bench] clearWitness: unhandled member ' + member);
+}
+
+/**
+ * Run the clear() invariance witness for the four CLEAR_WITNESS members.
+ * Returns per-member { sizeAfterClear, pristine, reusable, cycles, baseBytes,
+ * finalBytes, bytesDelta, zeroAlloc }. Deterministic (no timing in the verdict).
+ * @param {{n?:number, cycles?:number}} [opts]
+ */
+export function clearWitness(opts = {}) {
+    const n = opts.n ?? 4096;
+    const cycles = opts.cycles ?? 1000;
+    const results = {};
+    for (const member of CLEAR_WITNESS) {
+        const { obj } = makeSubject(member, n);               // built + filled to steady state
+        const baseBytes = memberBytes(member, obj);
+        obj.clear();
+        const sizeAfterClear = clearContent(member, obj);     // MUST be 0
+        const refilled = clearWitnessRefill(member, obj, n);  // reuse after clear
+        const sizeAfterRefill = clearContent(member, obj);    // MUST be > 0 (non-vacuous)
+        let grew = false;
+        for (let c = 0; c < cycles; c++) {
+            obj.clear();
+            clearWitnessRefill(member, obj, n);
+            if (memberBytes(member, obj) !== baseBytes) grew = true; // backing store must not grow
+        }
+        obj.clear();
+        const finalBytes = memberBytes(member, obj);
+        results[member] = {
+            member,
+            sizeAfterClear,
+            pristine: sizeAfterClear === 0,
+            reusable: sizeAfterRefill > 0 && refilled > 0,
+            refilledTo: sizeAfterRefill,
+            cycles,
+            baseBytes,
+            finalBytes,
+            bytesDelta: finalBytes - baseBytes,                // MUST be 0 (buffer retained)
+            zeroAlloc: !grew && finalBytes === baseBytes,
+        };
+    }
+    return { probe: 'clearWitness', members: CLEAR_WITNESS.slice(), results };
 }
 
 export function D3(member, opts = {}) {

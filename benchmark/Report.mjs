@@ -233,7 +233,7 @@ export function renderHtml(payload) {
         });
         const rows = subjects.map((m) => [m, num(get(m, 'D2').drift)]);
         sections.push(section('D2 -- Amortized cost over a long mixed trace',
-            'Cumulative ns/op at power-of-two checkpoints; a flat line (drift ~ 1.0) proves the amortized bound holds.',
+            'Cumulative ns/op at power-of-two checkpoints; a flat line (drift ~ 1.0) WITNESSES the amortized bound holding (empirical, never deduced).',
             chart, tableRows(['member', 'drift (last/first)'], rows)));
     }
 
@@ -297,7 +297,7 @@ export function renderHtml(payload) {
                 r.ratio.toFixed(3), r.underForty ? 'yes' : 'NO'];
         });
         sections.push(section('D5 -- Bundle size + tree-shaking',
-            'esbuild minify + gzip. A single-member import must be < 40% of the all-member import (tree-shaking proof).',
+            'esbuild minify + gzip. A single-member import must be < 40% of the all-member import (the tree-shaking result).',
             chart, tableRows(['member', 'single min', 'single gz', 'all min', 'all gz', 'ratio', '< 40%?'], rows)));
     }
 
@@ -345,6 +345,74 @@ export function renderHtml(payload) {
             null, tableRows(['member', 'churn ns/op', 'ordered (successor / range-scan)'], rows)));
     }
 
+    // clear() invariance witness (Bench v3) -- a first-class, member-scoped witness.
+    {
+        const cw = payload.clearWitness;
+        const excl = payload.clearWitnessExcluded || {};
+        if (cw && cw.results && Array.isArray(cw.members)) {
+            // Display-only cycle count for the section prose (not a verdict/assertion). If the
+            // witness payload is degenerate (no members), the cycle count is UNKNOWN, not zero --
+            // 'n/a' matches this file's own never-0-for-unverified convention (see D7/D8 n/a cells).
+            const firstCycles = cw.results[cw.members[0]] ? cw.results[cw.members[0]].cycles : 'n/a';
+            const rows = cw.members.map((m) => {
+                const r = cw.results[m];
+                return [m, String(r.sizeAfterClear), r.pristine ? 'yes' : 'NO',
+                    r.reusable ? 'yes' : 'NO', String(r.cycles), String(r.bytesDelta) + ' B',
+                    r.zeroAlloc ? 'yes' : 'NO'];
+            });
+            const exclRows = Object.keys(excl).map((m) => [m, String(excl[m])]);
+            sections.push(section('clear() invariance witness (4 members)',
+                'clear() returns each structure to its pristine EMPTY invariant (heap/list size 0; the ' +
+                'index-addressed Fenwick/SegmentTree accumulators zeroed), retains the fixed backing ' +
+                'store (bytes delta 0 across ' + firstCycles + ' fill/clear cycles -- zero-alloc), and ' +
+                'leaves it reusable (a refill after clear brings the content back up). All four SUBJECTS ' +
+                'carry a real clear(); the EXCLUDED table names what is out of scope and why (the private ' +
+                'NodePool free-list, and the read/traverse surface -- named with a reason, never dropped).',
+                null,
+                tableRows(['member', 'size after clear', 'pristine', 'reusable', 'cycles', 'bytes delta', 'zero-alloc'], rows) +
+                '<h2>Excluded from the clear() witness (with reasons)</h2>' +
+                tableRows(['excluded', 'reason'], exclRows)));
+        }
+    }
+
+    // Per-op honesty class (Bench v3): each gated op-row -> its honest O(log n) class.
+    {
+        const oc = payload.opClass;
+        if (oc) {
+            const rows = Object.keys(oc).map((k) => [k, String(oc[k])]);
+            sections.push(section('Per-op honesty class (O(log n) per gated op-row)',
+                'Each (member.op) carries its OWN honesty class -- painting any hot op O(1) is the ' +
+                'overclaim this table prevents (O(1) is the SIBLING lite-o1 family\'s contract, not ' +
+                'lite-logn\'s). The deterministic structures (BinaryHeap/Fenwick/SegmentTree) climb a ' +
+                'full-height walk -> O(log n) WORST-case; SkipList\'s randomized towers make its bound ' +
+                'O(log n) EXPECTED (never worst-case) with a DISCLOSED max-single-insert tail. peek/topKey ' +
+                'are O(1) getters, deliberately NOT witness ops, so they are not in this table.',
+                null, tableRows(['op-row', 'honesty class'], rows)));
+        }
+    }
+
+    // Emit order (Bench v3): the corroborating GC-pressure (D6) + workload (D8) dimensions
+    // render ADJACENT to the D1/D2 O(log n) witness plot, together with the clear() + per-op
+    // witnesses -- so the reader sees the witness AND its corroboration in one view. Picked by
+    // title so the order is robust to the section-build order above; fail-open for any future
+    // section (an unlisted section is appended, never dropped).
+    const orderTitles = [
+        'D1 -- O(log n) Witness fit',
+        'D2 -- Amortized cost',
+        'clear() invariance witness',
+        'Per-op honesty class',
+        'D6 -- GC pressure',
+        'D8 -- Workload micro-benchmarks',
+        'D3 -- Memory footprint',
+        'D4 -- Cache behaviour',
+        'D5 -- Bundle size',
+        'D7 -- Scalability',
+    ];
+    const ordered = orderTitles
+        .map((t) => sections.find((s) => s.startsWith('<section><h2>' + t)))
+        .filter(Boolean);
+    for (const s of sections) if (!ordered.includes(s)) ordered.push(s);
+
     const meta = payload.meta;
     const head = '<header><h1>@zakkster/lite-logn -- benchmark report</h1>' +
         '<p class="meta">seed 0x' + (meta.seed >>> 0).toString(16) + ' | node ' + esc(meta.node) +
@@ -356,7 +424,7 @@ export function renderHtml(payload) {
     return '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
         '<meta name="viewport" content="width=device-width, initial-scale=1">' +
         '<title>lite-logn benchmark report</title><style>' + STYLE + '</style></head><body>' +
-        head + sections.join('') + '</body></html>';
+        head + ordered.join('') + '</body></html>';
 }
 
 const STYLE =

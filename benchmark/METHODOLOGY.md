@@ -22,9 +22,10 @@ D1 is the ANCHOR -- the O(log n) Witness. The other seven axes surround it with 
 things a real consumer feels:
 
 - D1 O(log n) Witness -- fit `nsPerOp = intercept + slope*log2(n)` per hot op-row and
-  prove the STRAIGHT log line (r2 >= 0.958, slope in the frozen per-op band) while
-  the O(n) foil LEAVES it (foil r2 < 0.958). DELEGATED to `test/witness.mjs` -- the
-  benchmark re-uses the shipped kernels, sweeps and bands and never re-fits.
+  WITNESS the STRAIGHT log line (r2 >= 0.958, slope in the frozen per-op band) while
+  the O(n) foil LEAVES it (foil r2 < 0.958). This is an EMPIRICAL witness (observed on
+  a host, never deduced -- see "Three claim classes"). DELEGATED to `test/witness.mjs`
+  -- the benchmark re-uses the shipped kernels, sweeps and bands and never re-fits.
 - D2 Amortized cost over a long mixed trace -- cumulative ns/op stays flat.
 - D3 Memory footprint + stability -- bytes/live vs a theoretical floor, AND a
   load-factor CURVE (0.25/0.5/0.75/1.0). BinaryHeap + SkipList shrink their live set
@@ -41,7 +42,8 @@ things a real consumer feels:
 ## Witness-as-dimension-1
 
 Every package in this family has an analytical ANCHOR: a single measurement whose
-SHAPE is the proof of the complexity class.
+SHAPE is the empirical WITNESS of the complexity class (observed on a host, not
+deduced -- see "Three claim classes" below).
 
 - lite-o1: the O(1) Witness -- ops/ms that stays FLAT as n grows.
 - lite-logn (this package): the O(log n) Witness -- a STRAIGHT line on a log-x axis,
@@ -78,6 +80,18 @@ SkipList additionally carries a COUNTER-FOIL: a native `Map`. Map is O(1) at get
 `successor` / `predecessor` / `rangeIter`. The counter-foil makes the ORDER TAX
 visible: the log factor SkipList pays buys exactly the ordered queries Map cannot
 answer. It is a counterpoint carried inside the D1 cell, never a gated rival, never 0.
+
+## Three claim classes (honesty of language)
+
+A timing result is never asserted as if it were deduced: a timing / complexity /
+constant-factor claim is EMPIRICALLY WITNESSED on a host, so it reads "witness" /
+"empirical validation" / "we observe". `benchmark/Matrix.mjs` `classifyClaim` sorts
+every reserved-word hit into three classes, and `test/Bench.test.mjs` gates them
+across all benchmark / report / METHODOLOGY surfaces:
+
+- alloc -- the deterministic 0-B/op allocation guarantee: the torture gate proves every timed op-row at 0 B/op and the perf gate the same (a DETERMINISTIC assertion, not a noisy sample), so this class alone keeps the reserved word.
+- timing -- the O(log n) straight-line fit, the slope bands, and every constant-factor / throughput number are OBSERVED, so they read witness / empirical / we observe, and a timing claim hardened back to the reserved word is a BUG the doc gate catches.
+- cited -- a complexity fact attributed to the LITERATURE (Pugh 1990 for the skip list's EXPECTED O(log n) bound) is a CITATION, not a host measurement, so it too keeps the reserved word.
 
 ## The statistics
 
