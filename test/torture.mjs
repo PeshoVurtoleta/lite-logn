@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -145,6 +145,17 @@ async function main() {
             mmh.peekMin();
             mmh.peekMax();
             tracker.track(mmh, noopRelease, 6 * CYCLES + i, { audit: true });
+            // A fresh SplayTree per cycle, exercised (reads SPLAY -> restructure) then
+            // dropped. Same held-value contract: a SplayTree owns only its four typed-array
+            // columns + a private NodePool (no external resource), so the no-op cleanup never
+            // defeats finalization.
+            const sp = new SplayTree(64);
+            for (let k = 0; k < 32; k++) sp.set((k * 2654435761) & 63, k);
+            sp.get(7);        // a read that splays
+            sp.has(3);
+            sp.successor(3);
+            sp.delete(5);
+            tracker.track(sp, noopRelease, 7 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -462,6 +473,60 @@ async function main() {
         mk = (mk + 1) | 0;
     };
 
+    // SplayTree: one out-of-loop tree prefilled to half capacity (a warmed, stable tree).
+    // Each lane is a real hot op that MUST allocate zero RETAINED bytes -- links are slot
+    // INDICES from a private free-list, never heap objects; the iterative top-down splay uses
+    // only the fixed scratch hands (_hl/_hr) + the slot-0 header (no recursion, no stack); and
+    // the rangeIter generator's per-step {value, done} objects are TRANSIENT, so retained
+    // growth is 0. NOTE: get/has/successor here SPLAY (restructure) every call -- the load-
+    // bearing proof that a self-adjusting READ still allocates zero bytes.
+    const sp = new SplayTree(CAP);
+    for (let i = 0; i < HALF; i++) sp.set(i, (i * 2654435761) & 0xffff);
+
+    let spk = 0, spacc = 0;
+    // get: a hit on a resident cycling key (SPLAYS it to the root), folded into an accumulator.
+    const stepSpGet = () => {
+        spacc = (spacc + (sp.get(spk & HMASK) | 0)) | 0;
+        spk = (spk + 1) | 0;
+    };
+    // WORKING-SET lane: hammer a SMALL hot set of keys (a mask 15 window) so the splay keeps
+    // them near the root -- the self-adjusting fast path. Still 0 B/op (rotations only rewrite
+    // slot links). This is the access pattern a splay tree is BUILT for; it must stay alloc-free.
+    const stepSpWorkingSet = () => {
+        spacc = (spacc + (sp.get(spk & 15) | 0)) | 0;
+        spk = (spk + 1) | 0;
+    };
+    // set: an in-place value update of a resident cycling key (splay + overwrite, no new node).
+    const stepSpSet = () => {
+        sp.set(spk & HMASK, spk & 0xffff);
+        spk = (spk + 1) | 0;
+    };
+    // delete + re-set: addressable delete then re-insert of the SAME key -> steady size,
+    // exercising the free-list free/alloc + the splay-join (no heap object).
+    const stepSpDelete = () => {
+        const key = spk & HMASK;
+        if (sp.delete(key)) sp.set(key, (spk * 2246822519) & 0xffff);
+        spk = (spk + 1) | 0;
+    };
+    // successor: a strictly-greater lookup on a cycling key (SPLAYS the closest node), folded in.
+    const stepSpSuccessor = () => {
+        const v = sp.successor(spk & HMASK);
+        spacc = (spacc + (v === undefined ? 0 : v | 0)) | 0;
+        spk = (spk + 1) | 0;
+    };
+    // forEach: the O(n log n) ascending NON-splaying in-order walk through a HOISTED callback
+    // that closes over nothing but the shared accumulator -- no per-call closure alloc.
+    let spfeAcc = 0;
+    function spForEachCb(key, value) { spfeAcc = (spfeAcc + (key | 0) + (value | 0)) | 0; }
+    const stepSpForEach = () => { sp.forEach(spForEachCb); };
+    // rangeIter: fully consume a small fixed-width window (NON-splaying); the generator is
+    // transient (dropped each call), so retained growth is 0.
+    const stepSpRangeIter = () => {
+        const lo = spk & (HMASK >> 1);
+        for (const key of sp.rangeIter(lo, lo + 8)) spacc = (spacc + (key | 0)) | 0;
+        spk = (spk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -481,7 +546,8 @@ async function main() {
         stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor,
         stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor,
         stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild,
-        stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead]) {
+        stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead,
+        stepSpGet, stepSpWorkingSet, stepSpSet, stepSpDelete, stepSpSuccessor]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -493,7 +559,7 @@ async function main() {
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
-        stepScForEach, stepScRangeIter]) {
+        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -510,6 +576,8 @@ async function main() {
     if (scacc === 0x7fffffff) throw new Error('unreachable'); // keep scacc live
     if (scfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep scfeAcc live
     if (macc === 0x7fffffff) throw new Error('unreachable'); // keep macc live
+    if (spacc === 0x7fffffff) throw new Error('unreachable'); // keep spacc live
+    if (spfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep spfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -578,6 +646,14 @@ async function main() {
         { const id = mmh.popMin(); mmh.push(id, (i * 2654435761) & 0xffff); sink = (sink + id) | 0; }
         if ((i & 7) === 0) { const id = mmh.popMax(); mmh.push(id, (i * 40503) & 0xffff); sink = (sink + id) | 0; }
         if ((i & 63) === 0) sink = (sink + mmh.peekMin() + mmh.peekMax()) | 0;
+        // SplayTree churn every op: an in-place value set and a get (which SPLAYS -- keeps the
+        // restructuring hot inside the GC window), plus a working-set get every op (small hot
+        // set), a successor every 8th and a delete+re-set every 64th (pool free/alloc + splay-
+        // join). Steady tree, zero alloc even though every read restructures.
+        sp.set(i & HMASK, i & 0xffff);
+        sink = (sink + (sp.get(i & HMASK) | 0) + (sp.get(i & 15) | 0)) | 0;
+        if ((i & 7) === 0) { const v = sp.successor(i & HMASK); sink = (sink + (v === undefined ? 0 : v | 0)) | 0; }
+        if ((i & 63) === 0) { const key = i & HMASK; if (sp.delete(key)) sp.set(key, i & 0xffff); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -598,6 +674,7 @@ async function main() {
     const abTr = new Treap(1024, 0x1234);
     const abSc = new Scapegoat(1024);
     const abMmh = new MinMaxHeap(1024);
+    const abSp = new SplayTree(1024);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -652,6 +729,18 @@ async function main() {
         // reuses the SAME backing store, so arrayBuffers must not grow across soak cycles.
         for (let i = 0; i < 1024; i++) abMmh.push(i & 0xffff, (i * 2654435761) & 0xffff);
         abMmh.clear();
+        // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
+        // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
+        // half the slots, then a refill (splaying), then clear -- the invariant must hold
+        // after each phase (a splay/join that leaked or double-freed a slot would break it).
+        for (let i = 0; i < 1024; i++) abSp.set((i * 2654435761) & 1023, i);
+        if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abSp.delete((i * 2654435761) & 1023);
+        if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abSp.set((i * 2654435761) & 1023, i);
+        if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
+        abSp.clear();
+        if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -669,7 +758,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -172,3 +172,41 @@ mmh.remove(3);
 mmh.keyOf(3);
 // @ts-expect-error -- MinMaxHeap has no has (the asymmetry vs BinaryHeap).
 mmh.has(3);
+
+// --- SplayTree -------------------------------------------------------------
+const sp = new SplayTree(1024);
+const spSet: SplayTree = sp.set(3, 2.5);          // fluent -> this
+const spClear: SplayTree = sp.clear();            // fluent -> this
+const spg: number | undefined = sp.get(3);
+const sphas: boolean = sp.has(3);
+const spdel: boolean = sp.delete(3);
+const spsucc: number | undefined = sp.successor(3);
+const sppred: number | undefined = sp.predecessor(3);
+const spsize: number = sp.size;
+const spcap: number = sp.capacity;
+sp.forEach((key, value, self) => { void key; void value; void self; });
+for (const k of sp.rangeIter(-Infinity, Infinity)) { void k; }
+for (const k of sp) { void k; }
+void spSet; void spClear; void spg; void sphas; void spdel; void spsucc; void sppred;
+void spsize; void spcap;
+
+// @ts-expect-error -- set value must be a number.
+sp.set(0, 'x');
+
+// @ts-expect-error -- SplayTree key must be a number.
+sp.get('x');
+
+// @ts-expect-error -- SplayTree is the LEAN member: no rank (the asymmetry vs Treap/Scapegoat).
+sp.rank(3);
+
+// @ts-expect-error -- SplayTree has no select (the LEAN asymmetry vs Treap/Scapegoat).
+sp.select(0);
+
+// @ts-expect-error -- SplayTree has no split (the LEAN asymmetry vs Treap; reviewer nit 2).
+sp.split(3);
+
+// @ts-expect-error -- SplayTree has no static merge (the LEAN asymmetry vs Treap; reviewer nit 2).
+SplayTree.merge(sp, sp);
+
+// @ts-expect-error -- SplayTree takes a single capacity argument (no seed).
+new SplayTree(8, 7);

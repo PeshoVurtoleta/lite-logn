@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -212,6 +212,30 @@ export const SCAPEGOAT_GET_SLOPE_HI = 5.63;        // median 4.02 * 1.4
 export const MINMAXHEAP_POPMIN_SLOPE_LO = 6.18;    // median 10.30 * 0.6
 export const MINMAXHEAP_POPMIN_SLOPE_HI = 14.42;   // median 10.30 * 1.4
 
+// --- SplayTree (v0.8.0): shared R^2 floor, OWN get slope band + sweep (D-SP5 / 0010) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide;
+// SplayTree's gated op is get on a UNIFORM-RANDOM working set of size n (a shuffled
+// permutation of the resident keys, cycled) -- the access pattern that keeps NO key hot,
+// so the SELF-ADJUSTING splay churns the full height each op and the AMORTIZED O(log n)
+// line is visible (a skewed / sequential pattern would trigger splay's working-set /
+// dynamic-finger speedups and FLATTEN the line -- which is the member's whole point, but
+// not what a straight-line log WITNESS measures). get is AMORTIZED, DETERMINISTIC (no
+// RNG): a single cold deep access can splay an O(n) chain, so the harness ALSO prints the
+// MAX single get as a DISCLOSURE, never a gate. A splay get REWRITES links (rotations) on
+// every op -- strictly more work per level than a read-only BST descent -- so its per-
+// level slope (~27.3) sits WELL ABOVE Treap.get's (~4.25) yet still on the family shape;
+// expected, which is exactly why only the R^2 floor is shared and each op declares its own
+// band. Gated over 2^12..2^17 (the 2^11 point is too fast + noisy for the mutating splay
+// and drops R^2 near the floor; 2^12 up gives clean dynamic range -- lite-o1 ADR-0004).
+// Band = median-of-15 fit-runs * [0.6, 1.4] on this machine. The 15 get slope samples
+// (ns/level) over the sweep [2^12..2^17]:
+//   27.07 27.18 27.33 27.25 27.32 26.86 27.71 27.33 27.40 26.75 27.35 27.19 27.11 27.46 27.36
+// with R^2 0.9750..0.9872 (every run >= the 0.958 floor); MEDIAN slope = 27.316 ns/level.
+// Centered on the MEDIAN (never a high sample) so a legitimately faster future run is not
+// false-failed; the R^2 floor independently rejects any non-log shape.
+export const SPLAYTREE_GET_SLOPE_LO = 16.39;       // median 27.316 * 0.6
+export const SPLAYTREE_GET_SLOPE_HI = 38.24;       // median 27.316 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -268,6 +292,12 @@ const SG_AMORT_RATIO_MAX = 4;
 // min-scan-and-splice extract-min over an unordered array) stays on the small O(n^2) sweep.
 const MMH_POP_SWEEP = [1e4, 3e4, 1e5, 3e5, 1e6];
 const MMH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// SplayTree's gated get sweep: EXACT powers of two 2^12..2^17 (a mutating splay descent
+// needs that dynamic range; the 2^11 point is too fast + noisy and drops R^2 near the
+// floor). Exact powers keep the working-set mask (i & (n-1)) a clean uniform cover of all
+// n resident keys. Its O(n) foil (a linear scan) stays on the small O(n^2) sweep.
+const SP_GET_SWEEP = [12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const SP_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -874,6 +904,94 @@ function measureMinMaxHeapFoil(n) {
     return elapsed / count;
 }
 
+// --- SplayTree measurement (get hot op, its O(n) foil, MAX single get) -------
+// The tree is built OUTSIDE timing and held at steady size n; the timed window is the get
+// splay only, hammered over a shuffled permutation of the n resident keys cycled by the
+// power-of-two mask -- a UNIFORM-RANDOM working set of size n, so no key stays hot and the
+// self-adjusting splay churns the full height each op (the amortized O(log n) signal). Same
+// effort as Treap.get (min-over-batches rejects ambient interference).
+const SP_ITERS = 200000;   // hammered ops per timed batch
+const SP_BATCH = 25;       // min-over-batches
+
+// A module-level capture for the MAX single get observed across the get sweep -- the
+// honesty hook the AMORTIZED member must not hide behind its mean (a cold deep splay).
+let SPLAYTREE_MAX_GET_NS = 0;
+
+// get: hammer a splay-get over a shuffled permutation of the n resident keys. Return the
+// MIN per-op time over SP_BATCH batches. Also samples the MAX single get (disclosure).
+function measureSplayGet(n) {
+    const sp = new SplayTree(n);
+    for (let k = 0; k < n; k++) sp.set(k, k);
+    const tg = new Float64Array(n);
+    for (let i = 0; i < n; i++) tg[i] = i;
+    const rnd = mulberry32(0x33A5 ^ n);
+    for (let i = n - 1; i > 0; i--) {                            // Fisher-Yates shuffle
+        const j = (rnd() * (i + 1)) | 0;
+        const t = tg[i]; tg[i] = tg[j]; tg[j] = t;
+    }
+    const mask = n - 1;                                          // n is an exact power of two
+    let sink = 0;
+    for (let w = 0; w < SP_ITERS; w++) sink += sp.get(tg[w & mask]); // warm
+    let best = Infinity;
+    for (let b = 0; b < SP_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SP_ITERS; i++) sink += sp.get(tg[i & mask]);
+        const e = (nowNs() - t0) / SP_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    sampleSplayMaxGet(n);
+    return best;
+}
+
+// Build a splay tree of n keys, then time EVERY individual get over a shuffled access
+// trace on a fresh (cache-cold) tree, keeping the tallest. The random order + fresh tree
+// make this the realistic cold-deep-splay tail -- the honest worst single op an AMORTIZED
+// member must disclose. It is a DISCLOSURE, not gated.
+function sampleSplayMaxGet(n) {
+    const sp = new SplayTree(n);
+    for (let k = 0; k < n; k++) sp.set(k, k);
+    const tg = new Float64Array(n);
+    for (let i = 0; i < n; i++) tg[i] = i;
+    const rnd = mulberry32(0xF00D ^ n);
+    for (let i = n - 1; i > 0; i--) {
+        const j = (rnd() * (i + 1)) | 0;
+        const t = tg[i]; tg[i] = tg[j]; tg[j] = t;
+    }
+    let sink = 0;
+    for (let i = 0; i < n; i++) {
+        const t0 = nowNs();
+        sink += sp.get(tg[i]);
+        const e = nowNs() - t0;
+        if (e > SPLAYTREE_MAX_GET_NS) SPLAYTREE_MAX_GET_NS = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+}
+
+// get FOIL: a naive LINEAR SCAN for the max key over a plain Float64Array = O(n) per search
+// (the default before you know the balanced/self-adjusting-BST trick). Exponential on the
+// log2(n) axis, so a straight-line fit MISSES the R^2 floor. O(n^2) total.
+function measureSplayGetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = i;
+    const target = n - 1;
+    { let idx = -1; for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } } if (idx < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let idx = -1;
+            for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } }
+            sink += idx;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -1004,10 +1122,22 @@ export const MEMBERS = [
         foil: measureMinMaxHeapFoil,
         foilName: 'linear min-scan-and-splice (O(n) per extract-min)',
     },
+    {
+        name: 'SplayTree',
+        op: 'get',
+        sweep: SP_GET_SWEEP,
+        foilSweep: SP_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0010 inherits D-08)
+        slopeLo: SPLAYTREE_GET_SLOPE_LO,       // own band
+        slopeHi: SPLAYTREE_GET_SLOPE_HI,
+        run: measureSplayGet,
+        foil: measureSplayGetFoil,
+        foilName: 'linear scan (O(n) per search)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.7.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.8.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -1067,6 +1197,15 @@ async function main() {
         process.stdout.write(
             'Treap MAX single insert observed = ' + TREAP_MAX_INSERT_NS.toFixed(0) +
             ' ns (expected O(log n) -- disclosed, not gated)\n');
+    }
+    // SplayTree honesty print: the MAX single get (a cold, deep splay chain) observed across
+    // the get sweep. An AMORTIZED-O(log n) member must not masquerade as per-op worst-case --
+    // a single access can splay an O(n) chain even while the mean holds the fitted line. This
+    // is a DISCLOSURE, not a gate.
+    if (SPLAYTREE_MAX_GET_NS > 0) {
+        process.stdout.write(
+            'SplayTree MAX single get observed = ' + SPLAYTREE_MAX_GET_NS.toFixed(0) +
+            ' ns (amortized O(log n) -- disclosed, not gated)\n');
     }
     // Scapegoat amortized-trace assertion (D-S5): the cumulative ascending-insert cost/op --
     // the REBUILD-HEAVY worst case -- must track a LOG curve, NOT the linear curve a rebuild-less

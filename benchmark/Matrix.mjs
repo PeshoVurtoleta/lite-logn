@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The seven shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap'];
+/** The eight shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree'];
 
-/** The ten gated D1 witness op-rows (member.op), in build order. */
+/** The eleven gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -35,6 +35,7 @@ export const OP_ROWS = [
     'Treap.get',
     'Scapegoat.get',
     'MinMaxHeap.popMin',
+    'SplayTree.get',
 ];
 
 /** The eight measurement dimensions. */
@@ -61,6 +62,7 @@ export const BASELINE = {
     Treap: 'linear-scan',
     Scapegoat: 'linear-scan',
     MinMaxHeap: 'linear-min-scan-and-splice',
+    SplayTree: 'linear-scan',
 };
 
 /**
@@ -86,6 +88,9 @@ export const COUNTER_FOIL = {
     // "faster but order-blind" O(1) rival to a min-max heap (a Map cannot serve either extreme),
     // so it has no counter-foil -- NA (the string, never 0).
     MinMaxHeap: NA,
+    // SplayTree is the family's SELF-ADJUSTING ordered map with the same Map order-tax, but the
+    // counter-foil is the one-time family illustration carried by SkipList; SplayTree reads NA.
+    SplayTree: NA,
 };
 
 /**
@@ -149,6 +154,13 @@ export const RATIONALE = {
             'honest DEPQ default before the min-max heap; the min-max heap buys WORST-case O(log n) push / ' +
             'popMin / popMax from ONE array-embedded heap. No Map order-tax counterpoint (a Map serves neither extreme).',
     },
+    SplayTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear scan over a plain array (O(n) per lookup) is the honest default before the self-' +
+            'adjusting BST; the splay tree buys AMORTIZED O(log n) get/set/delete AND moves hot keys near ' +
+            'the root (faster-than-log on skewed access). The Map order-tax counterpoint is carried once by ' +
+            'SkipList (the family\'s ordered representative), so SplayTree does not repeat it.',
+    },
 };
 
 /**
@@ -192,14 +204,14 @@ export function supportsKeyType(member, keyType) {
 export function supportsWorkload(member, workload) {
     if (!SUBJECTS.includes(member)) return false;
     if (workload === 'churn') return true;
-    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap' || member === 'Scapegoat';
+    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'SplayTree';
     return false;
 }
 
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (6 x 8 = 48 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (8 x 8 = 64 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -273,6 +285,9 @@ export const OP_CLASS = Object.freeze({
     'MinMaxHeap.push': OLOGN_WORST,   // sift-up the full height of the alternating heap array
     'MinMaxHeap.popMin': OLOGN_WORST, // trickle-down the full height from the root (the gated row)
     'MinMaxHeap.popMax': OLOGN_WORST, // trickle-down the full height from the max-of-{slot1,slot2}
+    'SplayTree.get': OLOGN_AMORTIZED, // a read SPLAYS -> DETERMINISTIC amortized O(log n) (the gated row)
+    'SplayTree.set': OLOGN_AMORTIZED, // splay + splice -> amortized (a cold deep splay is a DISCLOSED tail)
+    'SplayTree.delete': OLOGN_AMORTIZED, // splay + join -> amortized (DETERMINISTIC, no RNG)
 });
 
 // ===========================================================================
@@ -291,7 +306,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

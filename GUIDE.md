@@ -1,9 +1,9 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.7.0 seven members have
-shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat and
-MinMaxHeap -- so this guide carries their per-member sections. It is NOT an API
+avoid, and how to measure the logarithm yourself. At v0.8.0 eight members have
+shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
+MinMaxHeap and SplayTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -56,7 +56,11 @@ START -- what do you need?
 |   can be amortized?                                           -> Scapegoat (wc/am) [v0.6.0]
 |
 +-- BOTH the min AND the max, repeatedly, with insert
-    (a double-ended priority queue)?                           -> MinMaxHeap (wc)   [v0.7.0]
+|   (a double-ended priority queue)?                           -> MinMaxHeap (wc)   [v0.7.0]
+|
++-- An ORDERED map whose ACCESS is SKEWED (temporal locality:
+    a hot working set), and you want hot keys to ride near
+    the root -- amortized, no order statistics needed?         -> SplayTree (am)    [v0.8.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -76,6 +80,15 @@ for Treap when you need `split` / `merge` (Scapegoat has none) or the smoothest
 per-op latency; reach for Scapegoat when a single slow lookup is unacceptable and
 you can absorb the amortized rebuild on writes. All three are ordered maps; Treap
 and Scapegoat add the order-statistic column, SkipList is the leaner plain store.
+**SplayTree** is the fourth ordered map and the odd one out: it is SELF-ADJUSTING
+(a `get` / `has` SPLAYS the touched key to the root), so it is the pick when your
+access is SKEWED / has temporal locality -- hot keys ride near the top and cost
+less than log n amortized. Its price: a read RESTRUCTURES (so it fails an in-flight
+`rangeIter`, and is not read-only-safe under iteration), it is AMORTIZED not
+worst-case (a cold deep access can splay an O(n) chain, disclosed by the witness),
+and it is LEAN (no `rank` / `select` / `split` / `merge`). Reach for Scapegoat, not
+SplayTree, when a single slow lookup is unacceptable; reach for SplayTree when the
+workload is hot-key-skewed and you want the self-optimizing shape.
 
 ---
 
@@ -90,10 +103,11 @@ and Scapegoat add the order-statistic column, SkipList is the leaner plain store
 | Ordered map + rank / select / split / merge | Treap | expected O(log n) | 0.5.0 |
 | Ordered map + rank / select, WORST-case get (no RNG) | Scapegoat | worst-case O(log n) get, amortized O(log n) set/delete | 0.6.0 |
 | BOTH min AND max + insert (a double-ended PQ) | MinMaxHeap | O(1) peekMin/peekMax, O(log n) push/popMin/popMax | 0.7.0 |
+| Ordered map with SKEWED / hot-key access (self-adjusting) | SplayTree | amortized O(log n) get/set/delete (a read splays) | 0.8.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's and MinMaxHeap's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's and SplayTree's are below).
 
 ---
 
@@ -383,6 +397,45 @@ push / popMin / popMax are ALL worst-case O(log n), so there is no expected-op
 MAX-single-op bar. `node --expose-gc test/torture.mjs` proves the popMin / popMax / mixed
 push+popMin+popMax churn and the peek reads at 0 B/op (hole-punching sifts, only local
 scalar temporaries).
+
+---
+
+## SplayTree -- a self-adjusting ordered map (hot keys ride near the root)
+
+**Reach for it when** your ordered-map access is SKEWED -- a hot working set, temporal
+locality, a Zipf-ish key distribution. A splay tree moves every touched key to the root
+(an iterative top-down splay), so recently / frequently used keys stay shallow and cost
+LESS than log n amortized. Canonical uses: an LRU-ish index whose recent keys dominate,
+a parser / interpreter symbol table where a few identifiers are hot, any ordered store
+where 90% of the lookups hit 10% of the keys. It is DETERMINISTIC (no RNG, no seed) and
+the LEANEST ordered map to build: four flat columns over the shared free-list, no balance
+metadata at all.
+
+**Avoid it when:**
+
+- A single slow lookup is unacceptable. SplayTree is AMORTIZED, not worst-case: a cold,
+  deep access can splay an O(n) chain (the witness DISCLOSES the max single get). For a
+  hard per-lookup bound use **Scapegoat** (worst-case O(log n) get, no RNG).
+- Your access is UNIFORM / random with no locality. There is no hot set to cache, so you
+  pay the splay's restructuring cost (rotations every read) for no benefit -- a plain
+  ordered map (**SkipList**) or a read-cheap balanced BST (**Scapegoat**) is leaner.
+- You need order statistics (`rank` / `select`) or set surgery (`split` / `merge`).
+  SplayTree is LEAN and has NONE -- use **Treap** or **Scapegoat**.
+- You iterate while reading. A `get` / `has` SPLAYS (restructures + bumps the version),
+  so a read taken inside a `rangeIter` fails closed. Reads are not iteration-safe here;
+  finish the walk first (or use a read-only member).
+
+**Measure it yourself:** `npm run witness` fits `get` over a UNIFORM-RANDOM working set of
+size n (so the amortized line shows -- a skewed pattern would flatten it, which is the
+member's WHOLE POINT but not what a straight-log witness measures) against `nsPerOp =
+intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and sit inside its
+own band (`get [16.39, 38.24]` ns/level -- well ABOVE the read-only BST members because a
+splay REWRITES links on every read; see [`decisions/0010-splaytree.md`](./decisions/0010-splaytree.md)),
+over the `[2^12, 2^17]` sweep. The O(n) linear-scan foil must MISS the floor. Because it is
+amortized, the witness also prints the MAX single get (a cold deep splay) as a disclosure,
+never gated. `node --expose-gc test/torture.mjs` proves get (splays!) / working-set get /
+set / delete+re-set / successor / forEach / rangeIter at 0 B/op (the top-down splay uses the
+slot-0 header + two scalar hands; rotations rewrite existing slot links only).
 
 ---
 

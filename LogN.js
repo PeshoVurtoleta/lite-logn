@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.7.0';
+export const VERSION = '0.8.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -2870,5 +2870,455 @@ export class MinMaxHeap {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] MinMaxHeap full (capacity ' + this._cap + ')');
+    }
+}
+
+// SplayTree (v0.8.0 session) -- a SELF-ADJUSTING BST ordered map: a read moves the
+// touched key to the root, so hot keys ride near the top (AMORTIZED O(log n)) (BELOW).
+
+/**
+ * Max SplayTree capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns (`_left` / `_right`); an index must fit an
+ * unsigned 32-bit word. `NIL = 0` reserves slot 0 as the empty-subtree sentinel, so live
+ * slots run [1, capacity]. Slot 0 doubles as the top-down splay's DUMMY HEADER: its
+ * `_left` / `_right` cells are the two assembly roots during a splay and are restored to 0
+ * before the splay returns, so the NIL invariant holds between operations. The index
+ * arithmetic (Uint32 slot indices + `NIL = 0`), not the byte count, is the hard ceiling --
+ * the same "the arithmetic caps it" reasoning as the other pointer-based members.
+ */
+const SP_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A SPLAY TREE: a SELF-ADJUSTING binary search tree (an ordered map key -> value) whose
+ * every access RESTRUCTURES the tree so the touched key becomes the root. Where Treap
+ * randomizes the shape and Scapegoat weight-balances it, a splay tree keeps NO balance
+ * metadata at all: it simply SPLAYS -- a chain of rotations that walks the accessed node
+ * (or, for an absent key, the last node on the search path) to the root. Recently and
+ * frequently used keys therefore ride near the top, giving AMORTIZED O(log n) per op and
+ * genuinely FASTER-than-log behaviour on skewed / working-set access patterns (the reason
+ * a splay tree is the classic self-optimizing map). The trick that keeps it zero-GC is the
+ * family one: nodes are slot INDICES in flat typed-array columns over the same private
+ * free-list (NodePool), never heap objects.
+ *
+ * The splay is ITERATIVE and TOP-DOWN (Sleator & Tarjan 1985): a single downward pass
+ * assembles a left tree and a right tree using two fixed scratch HANDS (`_hl` / `_hr`) and
+ * the dummy header at slot 0, handling zig / zig-zig / zig-zag in place. There is NO parent
+ * column, NO path stack, and NO recursion -- so every hot op allocates ZERO bytes after
+ * construction and no degenerate chain can overflow the native stack.
+ *
+ * Storage (allocated once, sized to capacity + 1; slot 0 is the NIL sentinel / splay header):
+ *   - `_key` / `_value` `Float64Array` -- key and value at each slot.
+ *   - `_left` / `_right` `Uint32Array` -- child slot indices, `NIL = 0`.
+ *   - `_pool` NodePool -- the free-list handing out slot indices [1, capacity].
+ *   - `_n` -- the live-entry counter (there is deliberately NO per-node _size column: this
+ *     is the LEAN member, so it ships NO rank / select / split / merge -- the documented
+ *     asymmetry vs Treap / Scapegoat).
+ *
+ * Honesty (amortized member): `get` / `has` / `set` / `delete` are AMORTIZED O(log n) --
+ * DETERMINISTIC (no RNG), but NOT per-op worst-case. A single cold, deep access can splay a
+ * long chain in O(n); that MAX single op is DISCLOSED by the witness harness, never gated
+ * (decisions/0010-splaytree.md). The amortized bound holds for any access sequence.
+ *
+ * A READ MUTATES: `get` and `has` SPLAY the touched key to the root and BUMP `_version`, so
+ * an in-flight `rangeIter` fails closed even on a read. `set` inserts (or updates the value
+ * in place if the key exists, after splaying it up); `delete` splays the target to the root
+ * then JOINS its two subtrees (splay the MAX of the left subtree up, hang the right subtree
+ * off it). `successor` / `predecessor` splay the closest node to `key` to the root (the
+ * amortization applies to ordered probes too) and are STRICT. `rangeIter` / `forEach` /
+ * `[Symbol.iterator]` are NON-splaying in-order walks (they re-descend by key each step, so
+ * NO scratch stack is allocated) that leave `_root` and `_version` byte-identical -- and
+ * `rangeIter` is VERSION-STAMPED, so any structural OR read (get / has) mutation mid-
+ * iteration throws `[lite-logn]` rather than yield stale data.
+ *
+ * Keys and values are FINITE numbers (typeof-guarded BEFORE coercion -- Symbol / BigInt /
+ * NaN / +-Infinity fail closed with a `[lite-logn]` throw). A missing / empty query returns
+ * `undefined` (never throws). Fixed capacity: a full pool throws, never silently drops.
+ */
+export class SplayTree {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^31-1].
+     */
+    constructor(capacity) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > SP_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] SplayTree capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        this._cap = capacity;                         // max live entries
+        this._key = new Float64Array(capacity + 1);   // key at each slot
+        this._value = new Float64Array(capacity + 1); // value at each slot
+        this._left = new Uint32Array(capacity + 1);   // left child slot; NIL = 0
+        this._right = new Uint32Array(capacity + 1);  // right child slot; NIL = 0
+        this._pool = new NodePool(capacity);          // free-list over slots [1, capacity]
+        this._root = 0;                               // NIL == empty tree
+        this._n = 0;                                  // live-entry counter (size)
+        this._version = 0;                            // iterator invalidation stamp
+        this._hl = 0;                                 // splay scratch hand: left tree max
+        this._hr = 0;                                 // splay scratch hand: right tree min
+    }
+
+    /** Live entry count. O(1). */
+    get size() { return this._n; }
+
+    /** The fixed capacity this tree was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /**
+     * The value stored under `key`, or `undefined` if absent (never throws on a missing /
+     * empty query). AMORTIZED O(log n): a read SPLAYS the touched key (or the last node on
+     * the search path) to the root and BUMPS `_version` (an in-flight iterator fails closed).
+     * Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    get(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (this._root === 0) return undefined;
+        this._splay(key);
+        this._version = (this._version + 1) | 0;
+        return this._key[this._root] === key ? this._value[this._root] : undefined;
+    }
+
+    /**
+     * True iff `key` is currently in the tree. AMORTIZED O(log n): SPLAYS like `get` and
+     * BUMPS `_version`. Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    has(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (this._root === 0) return false;
+        this._splay(key);
+        this._version = (this._version + 1) | 0;
+        return this._key[this._root] === key;
+    }
+
+    /**
+     * Insert `key -> value`, or UPDATE the value in place if `key` already exists (no new
+     * node). AMORTIZED O(log n): splay `key` to the root, then either overwrite it or hang
+     * the old root off a fresh node that becomes the new root. Fails closed: a non-finite
+     * key or value (typeof-guarded first), or a full pool, each throw `[lite-logn]` as a
+     * no-op insert.
+     * @param {number} key    a finite number
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(key, value) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (this._root === 0) {
+            const slot = this._pool.alloc();
+            if (slot === 0) return this._full();
+            this._key[slot] = key; this._value[slot] = value;
+            this._left[slot] = 0; this._right[slot] = 0;
+            this._root = slot;
+            this._n = (this._n + 1) | 0;
+            this._version = (this._version + 1) | 0;
+            return this;
+        }
+        this._splay(key);
+        const r = this._root, K = this._key;
+        if (K[r] === key) {                       // update in place -- no new node
+            this._value[r] = value;
+            this._version = (this._version + 1) | 0;
+            return this;
+        }
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();      // splayed but no insert (fail closed)
+        K[slot] = key; this._value[slot] = value;
+        const L = this._left, R = this._right;
+        if (key < K[r]) {                         // new node is the smaller root
+            L[slot] = L[r];
+            R[slot] = r;
+            L[r] = 0;
+        } else {                                  // new node is the larger root
+            R[slot] = R[r];
+            L[slot] = r;
+            R[r] = 0;
+        }
+        this._root = slot;
+        this._n = (this._n + 1) | 0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove `key`. AMORTIZED O(log n). Idempotent: returns `false` if `key` is absent (no
+     * throw), `true` if it was present and removed. Deletion splays `key` to the root, then
+     * JOINS its two subtrees -- splay the MAX of the left subtree to that subtree's root
+     * (leaving it with no right child) and hang the right subtree there -- and frees the
+     * removed slot. Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    delete(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (this._root === 0) return false;
+        this._splay(key);
+        this._version = (this._version + 1) | 0;
+        if (this._key[this._root] !== key) return false; // absent (closest was splayed up)
+        this._joinDelete();
+        this._n = (this._n - 1) | 0;
+        return true;
+    }
+
+    /**
+     * The smallest key STRICTLY greater than `key`, or `undefined` if none. AMORTIZED
+     * O(log n): it SPLAYS the closest node to `key` to the root (the amortization applies to
+     * ordered probes too) and BUMPS `_version`. `key` itself need not be present. Fails
+     * closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    successor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (this._root === 0) return undefined;
+        this._splay(key);
+        this._version = (this._version + 1) | 0;
+        const r = this._root, K = this._key, L = this._left, R = this._right;
+        if (K[r] > key) return K[r];              // root is already the smallest key > key
+        let t = R[r];                             // else: min of the right subtree
+        if (t === 0) return undefined;
+        while (L[t] !== 0) t = L[t];
+        return K[t];
+    }
+
+    /**
+     * The largest key STRICTLY less than `key`, or `undefined` if none. AMORTIZED O(log n):
+     * SPLAYS the closest node to the root and BUMPS `_version`. `key` itself need not be
+     * present. Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    predecessor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (this._root === 0) return undefined;
+        this._splay(key);
+        this._version = (this._version + 1) | 0;
+        const r = this._root, K = this._key, L = this._left, R = this._right;
+        if (K[r] < key) return K[r];              // root is already the largest key < key
+        let t = L[r];                             // else: max of the left subtree
+        if (t === 0) return undefined;
+        while (R[t] !== 0) t = R[t];
+        return K[t];
+    }
+
+    /**
+     * A VERSION-STAMPED iterator over the keys in `[lo, hi]` INCLUSIVE, ascending. Bounds
+     * may be any number INCLUDING +-Infinity (an unbounded end); `NaN` fails closed, as does
+     * `lo > hi`. This is a NON-SPLAYING in-order walk: it re-descends by key each step (so NO
+     * scratch stack is allocated) and leaves `_root` / `_version` byte-identical. The
+     * generator captures the version and throws `[lite-logn]` if any STRUCTURAL OR READ
+     * (get / has / set / delete) mutation happens mid-iteration, rather than yield stale
+     * data; the one documented per-protocol allocator is the {value, done} per step.
+     * @param {number} lo  lower bound (inclusive); may be -Infinity
+     * @param {number} hi  upper bound (inclusive); may be +Infinity
+     * @returns {IterableIterator<number>} the keys in [lo, hi], ascending
+     */
+    rangeIter(lo, hi) {
+        if (typeof lo !== 'number' || Number.isNaN(lo)) return this._badBound(lo);
+        if (typeof hi !== 'number' || Number.isNaN(hi)) return this._badBound(hi);
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._rangeGen(lo, hi);
+    }
+
+    /** @private version-stamped, NON-splaying range generator (see rangeIter). */
+    *_rangeGen(lo, hi) {
+        const ver = this._version, K = this._key;
+        let x = this._ceilNode(lo);
+        for (;;) {
+            // Check the version stamp UNCONDITIONALLY, BEFORE the exhaustion test: a mid-
+            // iteration mutation that empties the remaining window (clear() -> root 0, or the
+            // in-range remainder deleted) would otherwise make the loop condition false FIRST
+            // and return `done` silently -- a fail-OPEN (silent truncation). Fail closed instead.
+            if (this._version !== ver) {
+                throw new Error('[lite-logn] SplayTree mutated during iteration');
+            }
+            if (x === 0 || K[x] > hi) break;
+            yield K[x];
+            x = this._succNode(K[x]);
+        }
+    }
+
+    /**
+     * Visit every live `(key, value)` pair in ASCENDING key order. NON-splaying: an in-order
+     * walk by repeated key re-descent (no recursion, so a degenerate chain cannot overflow
+     * the native stack; no scratch stack allocated). Leaves `_root` / `_version` byte-
+     * identical. Unlike rangeIter this is NOT version-stamped -- mutating from within the
+     * callback is the caller's responsibility (matching the other members' forEach).
+     * @param {(key:number, value:number, tree:SplayTree)=>void} fn
+     */
+    forEach(fn) {
+        const K = this._key;
+        let x = this._minNode();
+        while (x !== 0) {
+            fn(K[x], this._value[x], this);
+            x = this._succNode(K[x]);
+        }
+    }
+
+    /**
+     * Iterate the keys in ASCENDING order. NON-splaying (a key re-descent walk). The one
+     * documented per-protocol allocator (a {value, done} per step); use forEach for the
+     * alloc-free scan.
+     */
+    *[Symbol.iterator]() {
+        const K = this._key;
+        let x = this._minNode();
+        while (x !== 0) {
+            yield K[x];
+            x = this._succNode(K[x]);
+        }
+    }
+
+    /**
+     * Empty the tree, keeping the fixed capacity. O(capacity) cold path: returns every node
+     * to the pool and points the root at NIL. @returns {this}
+     */
+    clear() {
+        this._pool.clear();
+        this._root = 0;
+        this._n = 0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    // ---- private splay + join (hot bodies) ----------------------------------
+
+    /**
+     * @private The iterative TOP-DOWN splay (Sleator & Tarjan). One downward pass moves the
+     * node with `key` -- or, if absent, the last node on the search path -- to the root,
+     * handling zig / zig-zig / zig-zag in place. Slot 0 is the dummy HEADER: `_right[0]`
+     * accumulates the left tree, `_left[0]` the right tree; `_hl` / `_hr` are the two growing
+     * hands (left-tree max / right-tree min). Restores `_left[0]` / `_right[0]` to 0 before
+     * returning, so the NIL sentinel stays clean. NO recursion, NO stack, 0 B/op.
+     */
+    _splay(key) {
+        const L = this._left, R = this._right, K = this._key;
+        L[0] = 0; R[0] = 0;                       // header.left = header.right = NIL
+        let lm = 0, rm = 0;                       // left-tree max / right-tree min hands (= header)
+        let t = this._root;
+        for (;;) {
+            const kt = K[t];
+            if (key < kt) {
+                let tl = L[t];
+                if (tl === 0) break;
+                if (key < K[tl]) {                // zig-zig: rotate right
+                    L[t] = R[tl];
+                    R[tl] = t;
+                    t = tl;
+                    if (L[t] === 0) break;
+                }
+                L[rm] = t;                        // link right: t is the new right-tree min
+                rm = t;
+                t = L[t];
+            } else if (key > kt) {
+                let tr = R[t];
+                if (tr === 0) break;
+                if (key > K[tr]) {                // zig-zig: rotate left
+                    R[t] = L[tr];
+                    L[tr] = t;
+                    t = tr;
+                    if (R[t] === 0) break;
+                }
+                R[lm] = t;                        // link left: t is the new left-tree max
+                lm = t;
+                t = R[t];
+            } else {
+                break;
+            }
+        }
+        // reassemble around t (the new root)
+        R[lm] = L[t];                             // left-tree max . right = t.left
+        L[rm] = R[t];                             // right-tree min . left  = t.right
+        L[t] = R[0];                              // t.left  = header.right (left tree)
+        R[t] = L[0];                              // t.right = header.left  (right tree)
+        this._root = t;
+        this._hl = lm; this._hr = rm;             // publish the hands (scratch, testable)
+        L[0] = 0; R[0] = 0;                       // restore the NIL sentinel's columns
+    }
+
+    /**
+     * @private Join after the target has been splayed to the root: free the root, then fuse
+     * its two subtrees. If the left subtree is empty the right subtree becomes the tree; else
+     * splay the MAX of the left subtree to its root (leaving it with no right child) and hang
+     * the right subtree there. Every key of the left subtree is < every key of the right, so
+     * the join preserves BST order. 0 B/op.
+     */
+    _joinDelete() {
+        const t = this._root;
+        const l = this._left[t], r = this._right[t];
+        this._pool.free(t);
+        if (l === 0) { this._root = r; return; }
+        this._root = l;
+        this._splay(Infinity);                    // drive the rightmost (max) of l to its root
+        this._right[this._root] = r;              // its right child is NIL -> hang r there
+    }
+
+    // ---- private NON-splaying read descents (iteration only) ----------------
+
+    /** @private slot of the smallest key (leftmost node), or 0 (NIL) if empty. */
+    _minNode() {
+        const L = this._left;
+        let t = this._root;
+        if (t === 0) return 0;
+        while (L[t] !== 0) t = L[t];
+        return t;
+    }
+
+    /** @private slot of the smallest key >= `lo`, or 0 (NIL). Non-splaying descent. */
+    _ceilNode(lo) {
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best = 0;
+        while (t !== 0) {
+            if (K[t] >= lo) { best = t; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    /** @private slot of the smallest key STRICTLY > `key`, or 0 (NIL). Non-splaying descent. */
+    _succNode(key) {
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best = 0;
+        while (t !== 0) {
+            if (K[t] > key) { best = t; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] SplayTree key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] SplayTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badBound(b) {
+        throw new TypeError(
+            '[lite-logn] SplayTree rangeIter bound must be a number (not NaN), got ' + String(b));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] SplayTree rangeIter needs lo <= hi, got lo=' + String(lo) +
+            ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] SplayTree full (capacity ' + this._cap + ')');
     }
 }

@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.7.0 at the MinMaxHeap release', () => {
-    assert.equal(VERSION, '0.7.0');
+test('VERSION is exactly 0.8.0 at the SplayTree release', () => {
+    assert.equal(VERSION, '0.8.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (7 members) --------
+// --- frozen export surface: VERSION + the shipped members (8 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat and MinMaxHeap at v0.7.0 (7 members)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap and SplayTree at v0.8.0 (8 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -51,6 +51,7 @@ test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipLis
     assert.equal(typeof LogNModule.Treap, 'function');
     assert.equal(typeof LogNModule.Scapegoat, 'function');
     assert.equal(typeof LogNModule.MinMaxHeap, 'function');
+    assert.equal(typeof LogNModule.SplayTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -344,4 +345,46 @@ test('MinMaxHeap fails closed with a [lite-logn]-tagged throw on every coercion 
     // there is deliberately NO changeKey / remove on MinMaxHeap (non-addressable DEPQ)
     assert.equal(typeof h.changeKey, 'undefined', 'MinMaxHeap has no changeKey');
     assert.equal(typeof h.remove, 'undefined', 'MinMaxHeap has no remove');
+});
+
+// --- SplayTree (v0.8.0): coercion + [lite-logn] fail-closed tag ---------------
+
+test('SplayTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { SplayTree } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 0x100000000, 3n]) {
+        assert.throws(() => new SplayTree(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    const sp = new SplayTree(8);
+    // non-finite / non-number key, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => sp.get(bad), /\[lite-logn\]/, 'get ' + String(bad));
+        assert.throws(() => sp.has(bad), /\[lite-logn\]/, 'has ' + String(bad));
+        assert.throws(() => sp.set(bad, 1), /\[lite-logn\]/, 'set key ' + String(bad));
+        assert.throws(() => sp.delete(bad), /\[lite-logn\]/, 'delete ' + String(bad));
+        assert.throws(() => sp.successor(bad), /\[lite-logn\]/, 'successor ' + String(bad));
+        assert.throws(() => sp.predecessor(bad), /\[lite-logn\]/, 'predecessor ' + String(bad));
+    }
+    // non-finite / non-number value, typeof-first
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => sp.set(0, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+    }
+    // a failed value door leaves the tree unchanged (size steady, no ghost node)
+    assert.equal(sp.size, 0);
+    // rangeIter bounds: NaN + non-number fail closed; lo > hi fails closed
+    for (const bad of [NaN, '0', null, undefined, {}, Symbol('b'), 3n]) {
+        assert.throws(() => sp.rangeIter(bad, 5), /\[lite-logn\]/, 'rangeIter lo ' + String(bad));
+        assert.throws(() => sp.rangeIter(0, bad), /\[lite-logn\]/, 'rangeIter hi ' + String(bad));
+    }
+    assert.throws(() => sp.rangeIter(5, 2), /\[lite-logn\]/); // lo > hi
+    assert.doesNotThrow(() => [...sp.rangeIter(-Infinity, Infinity)]);
+    // full pool fails closed (never a silent drop)
+    const full = new SplayTree(2);
+    full.set(1, 1); full.set(2, 2);
+    assert.throws(() => full.set(3, 3), /\[lite-logn\]/);
+    // SplayTree is the LEAN member: deliberately NO rank / select / split / merge
+    assert.equal(typeof sp.rank, 'undefined', 'SplayTree has no rank (LEAN)');
+    assert.equal(typeof sp.select, 'undefined', 'SplayTree has no select (LEAN)');
+    assert.equal(typeof sp.split, 'undefined', 'SplayTree has no split (LEAN)');
+    assert.equal(typeof SplayTree.merge, 'undefined', 'SplayTree has no static merge (LEAN)');
 });

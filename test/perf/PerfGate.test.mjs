@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -644,6 +644,98 @@ const mmhReadMix = {
     statsOf(s) { return { grows: mmhGrows(s) }; },
 };
 
+/** SplayTree's zero-alloc counter: its four typed-array columns plus the private pool's
+ *  free-stack, all fixed at construction, so the delta across the window must be 0 even
+ *  though every read SPLAYS (rotations only rewrite existing slot links, never allocate). */
+function spGrows(s) {
+    const t = s.sp;
+    return t._key.buffer.byteLength + t._value.buffer.byteLength +
+        t._left.buffer.byteLength + t._right.buffer.byteLength +
+        t._pool._free.buffer.byteLength;
+}
+
+/** A SplayTree prefilled to half capacity (a warmed, stable tree). */
+function spFill() {
+    const sp = new SplayTree(CAP);
+    for (let i = 0; i < (CAP >> 1); i++) sp.set(i, (i * 2654435761) & 0xffff);
+    return sp;
+}
+
+const SPMASK = (CAP >> 1) - 1; // keys 0..CAP/2-1 resident
+
+/**
+ * get churn: a hit on a resident cycling key, folded into an int32 accumulator. The get
+ * SPLAYS the touched key to the root (rotations rewrite slot INDICES, no heap object);
+ * zero allocation.
+ */
+const spGetChurn = {
+    name: 'SplayTree get churn (splays every read)',
+    setup() { return { sp: spFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sp = s.sp;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) { acc = (acc + (sp.get(t & SPMASK) | 0)) | 0; t = (t + 1) | 0; }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: spGrows(s) }; },
+};
+
+/**
+ * set churn: an in-place value update of a resident cycling key (no new node) -- the pure
+ * set hot path (splay + overwrite), zero allocation.
+ */
+const spSetChurn = {
+    name: 'SplayTree set churn (in-place update)',
+    setup() { return { sp: spFill(), tick: 0 }; },
+    hot(s, n) {
+        const sp = s.sp;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { sp.set(t & SPMASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: spGrows(s) }; },
+};
+
+/**
+ * delete + re-set churn: addressable delete then re-insert of the SAME key -> steady size,
+ * exercising the private free-list free/alloc + the splay-join (no heap object). Zero allocation.
+ */
+const spDeleteChurn = {
+    name: 'SplayTree delete + re-set churn',
+    setup() { return { sp: spFill(), tick: 0 }; },
+    hot(s, n) {
+        const sp = s.sp;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & SPMASK;
+            if (sp.delete(key)) sp.set(key, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: spGrows(s) }; },
+};
+
+/**
+ * successor churn: a strictly-greater lookup on a resident cycling key (SPLAYS the closest
+ * node), folded into an int32 accumulator. Zero allocation.
+ */
+const spSuccessorChurn = {
+    name: 'SplayTree successor churn',
+    setup() { return { sp: spFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sp = s.sp;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const v = sp.successor(t & SPMASK);
+            acc = (acc + (v === undefined ? 0 : v | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: spGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -679,6 +771,7 @@ zgcSuite({
         slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn,
         trGetChurn, trSetChurn, trDeleteChurn, trOrderMix,
         sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix,
-        mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix],
+        mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix,
+        spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn],
     mustFail: [teethMustFailAlloc],
 });

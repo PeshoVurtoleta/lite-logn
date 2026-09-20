@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-21
+
+### Added
+
+- **SplayTree** -- the eighth member and the family's SELF-ADJUSTING BST ordered map
+  (key -> value): every access SPLAYS -- a chain of rotations that walks the touched node
+  (or, for an absent key, the last node on the search path) to the root (Sleator & Tarjan
+  1985). Recently / frequently used keys ride near the top, giving AMORTIZED O(log n) per op
+  and genuinely FASTER-than-log behaviour on skewed / working-set access. Surface: `get` /
+  `has` / `set` / `delete` / `successor` / `predecessor` / `rangeIter` / `forEach` /
+  `[Symbol.iterator]` / `clear`, and `size` / `capacity` getters. Keys and values are finite
+  numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN / +-Infinity fail closed
+  with a `[lite-logn]` throw, key checked FIRST).
+- **Iterative TOP-DOWN splay, zero-stack (D-SP1).** A single downward pass assembles a left
+  and a right tree, handling zig / zig-zig / zig-zag in place. Slot 0 (the NIL sentinel)
+  DOUBLES as the splay's dummy header; two fixed scratch hands (`_hl` / `_hr`) grow the two
+  trees. NO parent column, NO path stack, NO recursion -- so every hot op is 0 B/op and no
+  degenerate chain can overflow the native stack. The header columns are restored to 0 before
+  the splay returns (the NIL invariant holds between ops).
+- **A READ MUTATES (D-SP2).** `get` / `has` / `successor` / `predecessor` SPLAY the touched
+  (or closest) node to the root and BUMP the iteration version -- the defining property that
+  keeps hot keys shallow. So an in-flight `rangeIter` fails closed even on a READ.
+  `rangeIter` / `forEach` / `[Symbol.iterator]` are the only non-mutating reads: NON-splaying
+  in-order walks that leave `_root` + `_version` byte-identical. `delete` splays the target up
+  then JOINS its subtrees (splay the max of the left subtree up, hang the right there).
+- **LEAN + DETERMINISTIC (D-SP3 / D-SP4).** Four columns (`_key` / `_value` Float64, `_left` /
+  `_right` Uint32) over the shared free-list, plus a scalar size counter -- NO subtree-size
+  column and therefore deliberately NO rank / select / split / merge (Treap / Scapegoat carry
+  the augmented surface; the documented asymmetry). No RNG, no seed argument: the shape is a
+  deterministic function of the access sequence.
+
+### Verified
+
+- **Witness (D-SP5).** `SplayTree.get` is the gated O(log n) witness op, measured over a
+  UNIFORM-RANDOM working set of size n (so the splay churns the full height and the AMORTIZED
+  line shows; a skewed pattern would flatten it -- the member's speedup, not what a straight-
+  log witness measures). It inherits the FROZEN family R^2 floor 0.958 and calibrates its OWN
+  slope band by the shared ADR-0004 method: median-of-15 get fit-runs = 27.316 ns/level (runs
+  spanned 26.75..27.71, R^2 0.9750..0.9872), band = median x `[0.6, 1.4]` = `[16.39, 38.24]`,
+  gated over 2^12..2^17. AMORTIZED + DETERMINISTIC: the harness DISCLOSES the MAX single get (a
+  cold deep splay), never gates it. The O(n) foil is a linear scan (OFF the line).
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the get (splays!) / working-set
+  / set / delete+re-set / successor / forEach / rangeIter lanes, gc major = 0, the deliberately-
+  allocating control lane still non-zero (teeth), the free-list conservation invariant holds,
+  arrayBuffers do not grow across fill/clear soak cycles. `npm run test:perf` -- 0 scavenges +
+  `grows === 0` on every SplayTree scenario.
+
+### Notes
+
+- `LogN.js` gains `SP_MAX_CAPACITY` (`0x7FFFFFFF`) + the `SplayTree` class, appended after
+  MinMaxHeap; the prior seven classes stay BYTE-IDENTICAL (only the `VERSION` const changes
+  above the append point -- a two-hunk diff). Version bumped to 0.8.0 across `package.json`,
+  `LogN.js`, and `llms.txt`. See `decisions/0010-splaytree.md`.
+
 ## [0.7.0] - 2026-09-20
 
 ### Added

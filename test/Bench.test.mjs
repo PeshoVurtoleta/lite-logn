@@ -53,7 +53,7 @@ import { renderHtml } from '../benchmark/Report.mjs';
 import {
     MEMBERS as WITNESS_MEMBERS, BINARYHEAP_R2_FLOOR, BINARYHEAP_SLOPE_LO, BINARYHEAP_SLOPE_HI,
 } from './witness.mjs';
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../LogN.js';
 import { readFileSync } from 'node:fs';
 
 const SEED = 0x9e3779b1 >>> 0;
@@ -75,7 +75,7 @@ const SYNC = { D1, D2, D3, D4, D7, D8 };
 const ASYNC = { D5, D6 };
 
 /** Op-row count per member (the gated D1 witness rows). */
-const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2, Treap: 1, Scapegoat: 1, MinMaxHeap: 1 };
+const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2, Treap: 1, Scapegoat: 1, MinMaxHeap: 1, SplayTree: 1 };
 
 for (const member of SUBJECTS) {
     test('anti-vacuity: ' + member + ' D1/D2/D3/D4/D7/D8 return positive numbers', () => {
@@ -134,7 +134,7 @@ for (const member of SUBJECTS) {
         assert.equal(r.keyTypes.string, NA, member + ' string key must be the NA string');
         assert.equal(r.keyTypes.object, NA, member + ' object key must be the NA string');
         assert.notEqual(r.keyTypes.string, 0, member + ' string key must never be 0');
-        if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap') {
+        if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree') {
             assert.equal(typeof r.insertionOrder, 'object', member + ' insertion order must be measured');
             assert.ok(r.insertionOrder.adversarial > 0, member + ' adversarial order must be positive');
         } else {
@@ -146,7 +146,7 @@ for (const member of SUBJECTS) {
     test('D8: ' + member + ' ordered workload is the NA string unless SkipList (never 0)', () => {
         const r = D8(member, OPTS.D8);
         assert.ok(r.churn.nsPerOp > 0, member + ' churn must be positive');
-        if (member === 'SkipList' || member === 'Treap' || member === 'Scapegoat') {
+        if (member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'SplayTree') {
             assert.equal(typeof r.ordered, 'object', member + ' ordered workload must be measured');
             assert.ok(r.ordered.successorNsPerOp > 0 && r.ordered.rangeScanNsPerKey > 0);
         } else {
@@ -178,7 +178,7 @@ for (const member of SUBJECTS) {
     });
 }
 
-test('structure: D1 emits exactly the 10 gated witness op-rows across the 7 members', () => {
+test('structure: D1 emits exactly the 11 gated witness op-rows across the 8 members', () => {
     let total = 0;
     const rowKeys = [];
     for (const m of SUBJECTS) {
@@ -186,18 +186,18 @@ test('structure: D1 emits exactly the 10 gated witness op-rows across the 7 memb
         total += r.ops.length;
         for (const o of r.ops) rowKeys.push(m + '.' + o.op);
     }
-    assert.equal(total, 10, 'D1 must emit exactly 10 gated op-rows');
+    assert.equal(total, 11, 'D1 must emit exactly 11 gated op-rows');
     assert.deepEqual(rowKeys, OP_ROWS, 'the emitted op-rows must equal Matrix.OP_ROWS');
 });
 
-test('structure: the FOILS registry is the 10 gated rows + the SkipList counter-foil; cells() is 7 x 8 = 56', () => {
+test('structure: the FOILS registry is the 11 gated rows + the SkipList counter-foil; cells() is 8 x 8 = 64', () => {
     assert.deepEqual(foilRowKeys(), OP_ROWS, 'FOILS gated rows must equal OP_ROWS');
     for (const k of OP_ROWS) assert.ok(FOILS[k] && typeof FOILS[k].run === 'function', k + ' must carry a kernel');
     assert.ok(FOILS['SkipList.counter'] && FOILS['SkipList.counter'].kind === 'counter-foil',
         'the SkipList counter-foil must be registered');
-    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 10 gated rows + 1 counter-foil');
-    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 7 x 8 = 56 cells');
-    assert.equal(cells().length, 56);
+    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 11 gated rows + 1 counter-foil');
+    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 8 x 8 = 64 cells');
+    assert.equal(cells().length, 64);
 });
 
 test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line', () => {
@@ -218,7 +218,7 @@ test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line'
 // only 2 or 3 points is nearly-always R^2 ~ 1 regardless of the underlying shape (a
 // line is trivially perfectly determined by too few points), which would make this
 // assertion vacuously pass on ANY foil, defeating the whole point of the check.
-test('D1 foil departure (all 10 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
+test('D1 foil departure (all 11 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
     let checked = 0;
     for (const member of SUBJECTS) {
         const r = D1(member, { seed: SEED, points: 5, foil: true });
@@ -230,7 +230,7 @@ test('D1 foil departure (all 10 gated op-rows): every foil genuinely MISSES the 
             checked++;
         }
     }
-    assert.equal(checked, 10, 'must have checked all 10 gated op-rows for foil departure');
+    assert.equal(checked, 11, 'must have checked all 11 gated op-rows for foil departure');
 });
 
 test('vacuityCheck has teeth: an impossible 0 in _check throws', () => {
@@ -264,7 +264,7 @@ test('fall-through THROWS: every per-member dispatch site rejects an unknown mem
     }
 });
 
-test('RATIONALE: all 7 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
+test('RATIONALE: all 8 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
     for (const m of SUBJECTS) {
         const r = RATIONALE[m];
         assert.ok(r, m + ' must have a rationale');
@@ -396,7 +396,7 @@ test('#1 witness gate UNCHANGED: R^2 floor 0.958, BinaryHeap band [5.76,13.44], 
     assert.equal(BINARYHEAP_R2_FLOOR, 0.958, 'the frozen R^2 floor');
     assert.equal(BINARYHEAP_SLOPE_LO, 5.76, 'the frozen BinaryHeap slope band low');
     assert.equal(BINARYHEAP_SLOPE_HI, 13.44, 'the frozen BinaryHeap slope band high');
-    assert.equal(WITNESS_MEMBERS.length, 10, 'the 10 gated witness op-rows (9 prior + MinMaxHeap.popMin)');
+    assert.equal(WITNESS_MEMBERS.length, 11, 'the 11 gated witness op-rows (10 prior + SplayTree.get)');
 });
 
 test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughput-invariant', () => {
@@ -417,7 +417,7 @@ test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughp
         'the Template smoke manifest must declare the O(log n) witness flavor');
 });
 
-test('#2 OP_CLASS: covers the 10 witness rows; SkipList/Treap EXPECTED; Scapegoat get WORST + set/delete AMORTIZED; MinMaxHeap WORST; no op painted O(1)', () => {
+test('#2 OP_CLASS: covers the 11 witness rows; SkipList/Treap EXPECTED; Scapegoat get WORST + set/delete AMORTIZED; SplayTree get/set/delete AMORTIZED; MinMaxHeap WORST; no op painted O(1)', () => {
     // Every gated witness op-row carries an honest O(log n) class.
     for (const key of OP_ROWS) {
         assert.ok(key in OP_CLASS, key + ' (a gated witness row) must have an OP_CLASS entry');
@@ -444,9 +444,13 @@ test('#2 OP_CLASS: covers the 10 witness rows; SkipList/Treap EXPECTED; Scapegoa
     // Scapegoat's DETERMINISTIC set/delete pay for the worst-case get with an occasional rebuild
     // -> AMORTIZED, a THIRD honesty class distinct from both worst-case and (randomized) expected.
     // Mislabelling either as worst-case (hiding the rebuild spike) or expected (implying RNG) BITES.
-    for (const op of ['Scapegoat.set', 'Scapegoat.delete']) {
+    // SplayTree is DETERMINISTIC (no RNG) but SELF-ADJUSTING -- get/set/delete all SPLAY, so
+    // the cost is AMORTIZED O(log n) (a cold deep splay is a DISCLOSED tail), the same third
+    // honesty class as Scapegoat's rebuild-absorbed set/delete -- and get, uniquely, is an
+    // amortized (not worst-case) READ. Mislabelling any as worst-case or expected BITES.
+    for (const op of ['Scapegoat.set', 'Scapegoat.delete', 'SplayTree.get', 'SplayTree.set', 'SplayTree.delete']) {
         assert.equal(OP_CLASS[op], OLOGN_AMORTIZED, op + ' must be the AMORTIZED class string');
-        assert.ok(!/worst-case/.test(OP_CLASS[op]), op + ' must not be labelled worst-case (amortized rebuild)');
+        assert.ok(!/worst-case/.test(OP_CLASS[op]), op + ' must not be labelled worst-case (amortized)');
         assert.ok(!/expected/.test(OP_CLASS[op]), op + ' must not be labelled expected (it is DETERMINISTIC, no RNG)');
     }
     // Full-teeth partition: every OP_CLASS key is accounted for by EXACTLY one of the three
@@ -454,14 +458,14 @@ test('#2 OP_CLASS: covers the 10 witness rows; SkipList/Treap EXPECTED; Scapegoa
     // not wired into any list here would otherwise pass unnoticed.
     const worstOps = ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query', 'Scapegoat.get', 'MinMaxHeap.push', 'MinMaxHeap.popMin', 'MinMaxHeap.popMax'];
     const expectedOps = ['SkipList.get', 'SkipList.set', 'SkipList.delete', 'Treap.get', 'Treap.set', 'Treap.delete'];
-    const amortizedOps = ['Scapegoat.set', 'Scapegoat.delete'];
+    const amortizedOps = ['Scapegoat.set', 'Scapegoat.delete', 'SplayTree.get', 'SplayTree.set', 'SplayTree.delete'];
     assert.deepEqual([...worstOps, ...expectedOps, ...amortizedOps].sort(), Object.keys(OP_CLASS).sort(),
         'every OP_CLASS key must be asserted as WORST, EXPECTED or AMORTIZED above (no silent gap)');
 });
 
-test('#3 CLEAR_WITNESS is EXACTLY the seven SUBJECTS; NodePool is EXCLUDED with a reason; each has a real clear()', () => {
-    assert.deepEqual(CLEAR_WITNESS, SUBJECTS, 'the clear() witness set must be exactly SUBJECTS (7)');
-    assert.equal(CLEAR_WITNESS.length, 7, 'exactly seven members');
+test('#3 CLEAR_WITNESS is EXACTLY the eight SUBJECTS; NodePool is EXCLUDED with a reason; each has a real clear()', () => {
+    assert.deepEqual(CLEAR_WITNESS, SUBJECTS, 'the clear() witness set must be exactly SUBJECTS (8)');
+    assert.equal(CLEAR_WITNESS.length, 8, 'exactly eight members');
     // Adding NodePool (the private free-list) to the set would break the SUBJECTS equality above.
     assert.ok(!CLEAR_WITNESS.includes('NodePool'), 'the private NodePool is NOT a clear() witness');
     assert.ok(typeof CLEAR_WITNESS_EXCLUDED.NodePool === 'string' && CLEAR_WITNESS_EXCLUDED.NodePool.length > 0,
@@ -472,7 +476,7 @@ test('#3 CLEAR_WITNESS is EXACTLY the seven SUBJECTS; NodePool is EXCLUDED with 
     }
 });
 
-test('#3 clearWitness probe: the seven members reach size/content 0 + zero-alloc + reusable', () => {
+test('#3 clearWitness probe: the eight members reach size/content 0 + zero-alloc + reusable', () => {
     const cw = clearWitness({ n: 512, cycles: 200 });
     assert.deepEqual(cw.members, CLEAR_WITNESS);
     for (const m of CLEAR_WITNESS) {
@@ -487,7 +491,7 @@ test('#3 clearWitness probe: the seven members reach size/content 0 + zero-alloc
 });
 
 test('#3 clearWitness is NON-VACUOUS: it calls each member\'s REAL prototype clear() exactly cycles+2 times', () => {
-    const CLASSES = { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap };
+    const CLASSES = { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree };
     assert.deepEqual(Object.keys(CLASSES).sort(), [...CLEAR_WITNESS].sort(),
         'the spy table must cover exactly the CLEAR_WITNESS members');
     const counts = {}; const originals = {};
@@ -500,7 +504,7 @@ test('#3 clearWitness is NON-VACUOUS: it calls each member\'s REAL prototype cle
     try {
         const cycles = 37; // odd, non-default: a coincidental match is astronomically unlikely
         const cw = clearWitness({ n: 64, cycles });
-        assert.equal(cw.members.length, 7);
+        assert.equal(cw.members.length, 8);
         for (const m of CLEAR_WITNESS) {
             assert.equal(counts[m], cycles + 2,
                 m + ' clearWitness must invoke the REAL prototype clear() exactly cycles+2 times ' +
@@ -524,6 +528,7 @@ test('#3 retention: 1000 clear->refill cycles leave content 0 + free-list restor
             else if (m === 'Treap') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
             else if (m === 'Scapegoat') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
             else if (m === 'MinMaxHeap') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.push(k, k); }
+            else if (m === 'SplayTree') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
             else if (m === 'Fenwick') { assert.equal(obj.prefix(obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
             else { assert.equal(obj.query(0, obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
         }
@@ -632,9 +637,9 @@ test('#5 report: clear() witness cycle count in the prose is n/a (never 0) when 
         'the cycle count must never silently read 0 for an unverified/degenerate witness');
 });
 
-test('#6 shipping discipline: package.json.version is 0.7.0; benchmark/ stays repo-only', () => {
+test('#6 shipping discipline: package.json.version is 0.8.0; benchmark/ stays repo-only', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    assert.equal(pkg.version, '0.7.0', 'the MinMaxHeap release: version is 0.7.0');
+    assert.equal(pkg.version, '0.8.0', 'the SplayTree release: version is 0.8.0');
     assert.ok(!pkg.files.includes('benchmark'), 'benchmark/ must not appear in package.json files[]');
 });
 

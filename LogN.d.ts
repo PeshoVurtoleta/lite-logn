@@ -329,3 +329,54 @@ export class MinMaxHeap {
         capacity: number,
     ): MinMaxHeap;
 }
+
+/**
+ * A splay tree: a SELF-ADJUSTING BST ordered map (key -> value) whose every access moves
+ * the touched key (or, for an absent key, the last node on the search path) to the root via
+ * an iterative TOP-DOWN splay, so hot / recently-used keys ride near the top. get / has /
+ * set / delete / successor / predecessor are AMORTIZED O(log n) and DETERMINISTIC (no RNG);
+ * a single cold deep access can splay an O(n) chain (disclosed by the witness, not gated).
+ * A READ MUTATES: get / has / successor / predecessor SPLAY and bump the iteration version,
+ * so an in-flight rangeIter fails closed even on a read. Nodes are slot INDICES in flat
+ * typed-array columns over a private free-list (no heap object per op). This is the LEAN
+ * member: NO rank / select / split / merge (the documented asymmetry vs Treap / Scapegoat).
+ * Keys and values are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN
+ * / +-Infinity fail closed). set on an existing key updates the value in place. Fixed
+ * capacity: a full pool throws. Every hot op allocates zero bytes.
+ */
+export class SplayTree {
+    /** @param capacity exact max live entries; integer in [1, 2^31-1]. */
+    constructor(capacity: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this tree was sized for. */
+    readonly capacity: number;
+
+    /** The value under key, or undefined if absent (no throw). SPLAYS + bumps version.
+     *  Non-finite key throws. */
+    get(key: number): number | undefined;
+    /** True iff key is currently stored. SPLAYS + bumps version. Non-finite key throws. */
+    has(key: number): boolean;
+    /** Insert key -> value, or update the value in place if key exists. Non-finite
+     *  key/value throws; a full pool throws. */
+    set(key: number, value: number): this;
+    /** Remove key; true if it was present, false if absent (idempotent). Non-finite key throws. */
+    delete(key: number): boolean;
+    /** The smallest key strictly greater than key, or undefined. SPLAYS the closest node.
+     *  Non-finite key throws. */
+    successor(key: number): number | undefined;
+    /** The largest key strictly less than key, or undefined. SPLAYS the closest node.
+     *  Non-finite key throws. */
+    predecessor(key: number): number | undefined;
+    /** A version-stamped, NON-splaying iterator over keys in [lo, hi] inclusive, ascending.
+     *  Bounds may be +-Infinity (unbounded ends); NaN or lo > hi throws; any mutation
+     *  (INCLUDING a get / has) during iteration throws. */
+    rangeIter(lo: number, hi: number): IterableIterator<number>;
+    /** Visit every (key, value) pair in ascending key order (NON-splaying). */
+    forEach(fn: (key: number, value: number, tree: SplayTree) => void): void;
+    /** Iterate the keys in ascending order (NON-splaying). */
+    [Symbol.iterator](): IterableIterator<number>;
+    /** Empty the tree, keeping capacity. */
+    clear(): this;
+}

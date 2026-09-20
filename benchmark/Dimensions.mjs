@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -204,6 +204,28 @@ function kMinMaxHeapPopMin(n) {
     };
 }
 
+function kSplayGet(n) {
+    // A full ordered map of n keys; each op searches a random resident key. A splay-get
+    // RESTRUCTURES (moves the touched key to the root), so cost is AMORTIZED O(log n). The
+    // index is `rng() >>> 1` (drop the high bit) so it stays a 31-bit Smi (a raw uint32 >= 2^31
+    // is a HeapNumber, and boxing one per op would masquerade as per-op alloc in D6).
+    const sp = new SplayTree(n);
+    for (let k = 0; k < n; k++) sp.set(k, k);
+    const rng = prng(0x33A5 ^ n);
+    return { obj: sp, op: () => { const v = sp.get((rng() >>> 1) % n); if (v !== undefined) SINK = (SINK + v) | 0; } };
+}
+
+function kSplaySet(n) {
+    // A resident map of n keys with one free slot; each op inserts the integer key `n` (the
+    // single free slot, just past the resident [0, n) range) then deletes it -- the amortized
+    // O(log n) splay-insert + splay-join pair, size steady at n. An INTEGER (Smi) key is used,
+    // not a fractional one: a non-integer double is a HeapNumber that would masquerade as alloc.
+    const sp = new SplayTree(n + 1);
+    for (let k = 0; k < n; k++) sp.set(k, k);
+    let i = 0;
+    return { obj: sp, op: () => { sp.set(n, i); sp.delete(n); i = (i + 1) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -224,6 +246,7 @@ export function makeOpKernel(member, op, n) {
         case 'Treap.get': return kTreapGet(n);
         case 'Scapegoat.get': return kScapegoatGet(n);
         case 'MinMaxHeap.popMin': return kMinMaxHeapPopMin(n);
+        case 'SplayTree.get': return kSplayGet(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -237,6 +260,7 @@ export function makeSubject(member, n) {
     if (member === 'Treap') return kTreapSet(n);
     if (member === 'Scapegoat') return kScapegoatSet(n);
     if (member === 'MinMaxHeap') return kMinMaxHeapPopMin(n);
+    if (member === 'SplayTree') return kSplaySet(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -408,6 +432,11 @@ export function memberBytes(member, obj) {
             obj._flat.buffer.byteLength + obj._stack.buffer.byteLength;
     }
     if (member === 'MinMaxHeap') return obj._key.buffer.byteLength + obj._id.buffer.byteLength;
+    if (member === 'SplayTree') {
+        return obj._key.buffer.byteLength + obj._value.buffer.byteLength +
+            obj._left.buffer.byteLength + obj._right.buffer.byteLength +
+            obj._pool._free.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -420,6 +449,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'Treap') return 16;       // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'Scapegoat') return 16;   // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'MinMaxHeap') return 12;  // key (Float64, 8) + id (Uint32, 4) per live entry
+    if (member === 'SplayTree') return 16;   // key (Float64, 8) + value (Float64, 8) per live entry
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -437,6 +467,7 @@ function fillMember(member, obj, count) {
     if (member === 'Treap') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'Scapegoat') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'MinMaxHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
+    if (member === 'SplayTree') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -459,7 +490,7 @@ function fillMember(member, obj, count) {
  * fixed length, so their "content" is the residual accumulated total (0 == cleared).
  */
 function clearContent(member, obj) {
-    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap') return obj.size;
+    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree') return obj.size;
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -472,6 +503,7 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'Treap') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'Scapegoat') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'MinMaxHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
+    if (member === 'SplayTree') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -529,6 +561,7 @@ export function D3(member, opts = {}) {
     else if (member === 'Treap') obj = new Treap(n);
     else if (member === 'Scapegoat') obj = new Scapegoat(n);
     else if (member === 'MinMaxHeap') obj = new MinMaxHeap(n);
+    else if (member === 'SplayTree') obj = new SplayTree(n);
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -616,6 +649,7 @@ function randomLookupOp(member, obj, n, rng) {
     if (member === 'SkipList') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     if (member === 'Treap') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     if (member === 'Scapegoat') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
+    if (member === 'SplayTree') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     // MinMaxHeap is NOT addressable by key (a DEPQ, not a map); its only O(1) reads are the
     // two extremes. rng parity picks an end so the read is not constant-folded. PROXY-only.
     if (member === 'MinMaxHeap') return () => { const v = (rng() & 1) ? obj.peekMax() : obj.peekMin(); if (v !== undefined) SINK += v; };
@@ -630,6 +664,7 @@ function seqLookupOp(member, obj, n) {
     if (member === 'SkipList') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     if (member === 'Treap') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     if (member === 'Scapegoat') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    if (member === 'SplayTree') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     // MinMaxHeap has no per-key read; the O(1) minimum read is its sequential analogue. PROXY-only.
     if (member === 'MinMaxHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
@@ -645,6 +680,7 @@ function buildFull(member, n) {
     else if (member === 'Treap') { obj = new Treap(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'Scapegoat') { obj = new Scapegoat(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'MinMaxHeap') { obj = new MinMaxHeap(n); for (let k = 0; k < n; k++) obj.push(k, k); }
+    else if (member === 'SplayTree') { obj = new SplayTree(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -857,6 +893,12 @@ function buildOrderNs(member, n, order) {
             for (let i = 0; i < n; i++) mmh.push(i, keys[i]);
             elapsed += performance.now() - t0;
             SINK += mmh.size;
+        } else if (member === 'SplayTree') {
+            const sp = new SplayTree(n);
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) sp.set(keys[i], i);
+            elapsed += performance.now() - t0;
+            SINK += sp.size;
         } else { // SkipList
             const sl = new SkipList(n, 0x13 >>> 0);
             const t0 = performance.now();
@@ -892,7 +934,7 @@ export function D7(member, opts = {}) {
     const nearFullNs = loadOpNs(member, n, 0.99);
 
     // Insertion order: applicable only to the comparison/order-sensitive members.
-    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap');
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree');
     const on = opts.orderN ?? Math.min(n, 1 << 14);
     const insertionOrder = orderSensitive
         ? {
@@ -926,13 +968,15 @@ export function churnNs(member, n, seed) {
     return median(collect(makeSubject(member, n).op, 4000, 60));
 }
 
-/** Ordered-scan workload (SkipList / Treap / Scapegoat): successor walk + bounded rangeIter scan. */
+/** Ordered-scan workload (SkipList / Treap / Scapegoat / SplayTree): successor walk + bounded rangeIter scan. */
 function orderedNs(member, n, seed) {
     const obj = member === 'Treap'
         ? new Treap(n, (seed ^ 0x1357) >>> 0)
         : member === 'Scapegoat'
             ? new Scapegoat(n)
-            : new SkipList(n, (seed ^ 0x1357) >>> 0);
+            : member === 'SplayTree'
+                ? new SplayTree(n)
+                : new SkipList(n, (seed ^ 0x1357) >>> 0);
     for (let k = 0; k < n; k++) obj.set(k, k);
     let key = 0;
     const succ = () => { const s = obj.successor(key); if (s !== undefined) SINK += s; key++; if (key >= n - 1) key = 0; };
@@ -987,7 +1031,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
     let mode;
     if (member === 'BinaryHeap' || member === 'Fenwick' ||
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
-        member === 'Scapegoat' || member === 'MinMaxHeap') mode = 0;
+        member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

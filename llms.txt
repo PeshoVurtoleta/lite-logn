@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.7.0
+Version: 0.8.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -19,8 +19,8 @@ FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
-adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap. The
-roster (one member per session, each landing append-only):
+adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
+v0.8.0 adds SplayTree. The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -88,6 +88,24 @@ roster (one member per session, each landing append-only):
   (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed). This is
   the classic one-element-per-node min-max heap only; the interval-heap DEPQ is deferred.
   Zero allocation on every hot op.
+
+- SplayTree (v0.8.0) -- a SELF-ADJUSTING BST ordered map (key -> value) whose every access
+  RESTRUCTURES the tree so the touched key becomes the root (an iterative TOP-DOWN splay,
+  Sleator & Tarjan 1985). Recently / frequently used keys ride near the top, giving AMORTIZED
+  O(log n) per op and genuinely FASTER-than-log behaviour on skewed / working-set access. It
+  keeps NO balance metadata: four typed-array columns (`_key` / `_value` Float64, `_left` /
+  `_right` Uint32) over the same private free-list (NodePool); slot 0 is the NIL sentinel AND
+  the splay's dummy header, with two fixed scratch hands (`_hl` / `_hr`) -- so the splay uses
+  NO parent column, NO path stack and NO recursion (0 B/op, no chain can overflow the stack).
+  A READ MUTATES: get / has / successor / predecessor SPLAY and bump the iteration version, so
+  an in-flight rangeIter fails closed even on a read; rangeIter / forEach / [Symbol.iterator]
+  are NON-splaying in-order walks (re-descend by key each step, leave _root + _version byte-
+  identical). delete splays the target up then JOINS its subtrees (splay the max of the left
+  subtree, hang the right subtree off it). AMORTIZED + DETERMINISTIC (no RNG): a single cold
+  deep access can splay an O(n) chain, DISCLOSED by the witness, never gated. This is the LEAN
+  member: deliberately NO rank / select / split / merge (the documented asymmetry vs Treap /
+  Scapegoat). Keys and values are finite numbers (typeof-guarded before coercion; Symbol /
+  BigInt / NaN / +-Infinity fail closed). Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -270,6 +288,25 @@ roster (one member per session, each landing append-only):
   - `MinMaxHeap.build(ids, keys, capacity)` -> MinMaxHeap. Floyd O(n) bulk build from parallel
     arrays (deepest-first, level-aware sift-down); fails closed on non-array-like / length
     mismatch, count > capacity, out-of-range id, or non-finite key.
+- `SplayTree` -- class. A SELF-ADJUSTING BST ordered map (key -> value) via top-down splay;
+  the LEAN member (no rank / select / split / merge).
+  - `new SplayTree(capacity)` -- capacity an integer in [1, 2^31-1]. Allocates the four typed-
+    array columns + the private free-list once; no seed argument (DETERMINISTIC, no RNG).
+  - `get(key)` -> value | undefined. AMORTIZED O(log n). SPLAYS the touched key (or the last
+    node on the search path) to the root and BUMPS the iteration version -- a read restructures.
+  - `has(key)` -> boolean. AMORTIZED O(log n); SPLAYS + bumps version like get.
+  - `set(key, value)` -> this. Insert, or update the value in place if key exists (splay the
+    key up first). AMORTIZED O(log n). Fails closed on non-finite key/value or a full pool.
+  - `delete(key)` -> boolean (idempotent). AMORTIZED O(log n): splay the target to the root,
+    then JOIN its two subtrees (splay the max of the left subtree up, hang the right there).
+  - `successor(key)` / `predecessor(key)` -> number | undefined. STRICT. AMORTIZED O(log n):
+    each SPLAYS the closest node to `key` to the root and bumps the version.
+  - `rangeIter(lo, hi)` -> IterableIterator<number>. Keys in [lo, hi] INCLUSIVE, ascending; a
+    NON-splaying, VERSION-STAMPED in-order walk (leaves _root + _version byte-identical). Bounds
+    may be +-Infinity; NaN or lo > hi throws; any mutation mid-iteration (INCLUDING a get/has,
+    since reads splay) throws `[lite-logn]`.
+  - `size` / `capacity` getters; `clear()` -> this; `forEach(fn)` and `[Symbol.iterator]()`
+    are NON-splaying ascending-key walks (forEach passes (key, value, tree)).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.
