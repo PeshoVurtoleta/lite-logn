@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.5.0 ships five members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), and Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.6.0 ships six members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge), and Scapegoat (a DETERMINISTIC weight-balanced augmented ordered map: worst-case-O(log n) get, amortized-O(log n) set / delete, zero-GC rebuild) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,7 +19,7 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.5.0 ships five members: BinaryHeap, Fenwick, SegmentTree, SkipList and Treap.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
+**v0.6.0 ships six members: BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
@@ -61,6 +61,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
   - [SegmentTree](#segmenttree)
   - [SkipList](#skiplist)
   - [Treap](#treap)
+  - [Scapegoat](#scapegoat)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -85,7 +86,7 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 
 ## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.5.0, BinaryHeap, Fenwick, SegmentTree, SkipList and Treap are shipped.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.6.0, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat are shipped.
 
 | Member | Version | Status | Shape | Hot ops |
 | --- | --- | --- | --- | --- |
@@ -94,8 +95,9 @@ One member per session, each landing append-only (prior members stay byte-identi
 | **SegmentTree** | 0.3.0 | shipped | single flat `Float64Array(2n)` (leaves n..2n-1); associative fold (min/max/sum/gcd) chosen at construction | `query` / `update` O(log n), `at` O(1) |
 | **SkipList** | 0.4.0 | shipped | pointer-free over a private free-list node pool; expected O(log n) | `get` / `set` / `delete` / `successor` / `predecessor` |
 | **Treap** | 0.5.0 | shipped | randomized-balanced augmented BST over the same node pool; expected O(log n) | `get` / `has` / `set` / `delete` / `rank` / `select` / `successor` / `predecessor` / `forEach` / `rangeIter` / `split` + `merge` |
+| **Scapegoat** | 0.6.0 | shipped | DETERMINISTIC weight-balanced augmented BST over the same node pool; worst-case O(log n) get, amortized O(log n) set/delete (zero-GC rebuild) | `get` / `has` / `set` / `delete` / `rank` / `select` / `successor` / `predecessor` / `forEach` / `rangeIter` (NO split/merge) |
 
-Later tiers (Scapegoat, OrderStatTree, IndexedHeap, SortedArray, MinMaxHeap, SplayTree, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
+Later tiers (OrderStatTree, IndexedHeap, SortedArray, MinMaxHeap, SplayTree, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
 
 ## The O(log n) Witness
 
@@ -105,7 +107,7 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.5.0 the witness gates eight ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), and Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`) all ON the line. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.6.0 the witness gates nine ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`), and Scapegoat `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.41, 5.63]`) all ON the line. Scapegoat is DETERMINISTIC, so its `get` is WORST-case (not expected) O(log n); its rebuild spike lives on the AMORTIZED `set` path and is proven not by a per-op line but by an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio ~1.5x over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would degenerate to an O(n)-amortized chain and blow the ratio to ~64x. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
 
 ## Benchmarks
 
@@ -145,6 +147,9 @@ Each op fits `nsPerOp = intercept + slope*log2(n)`. ON-LINE = `R^2 >= 0.958` (th
 | `SkipList.get` | 0.988 | 8.0 | `[5.27, 12.30]` | ON | linear scan | 0.79 | off |
 | `SkipList.set` | 0.985 | 12.1 | `[8.36, 19.50]` | ON | sorted-array insert | 0.77 | off |
 | `Treap.get` | 0.988 | 4.0 | `[2.55, 5.95]` | ON | linear scan | 0.79 | off |
+| `Scapegoat.get` | 0.988 | 3.8 | `[2.41, 5.63]` | ON | linear scan | 0.79 | off |
+
+**Scapegoat amortized-trace (the rebuild honesty).** Scapegoat's `get` is WORST-case O(log n) (a deterministic weight-balance height bound), so it carries no expected-op MAX-single-op disclosure. The rebuild spike lives on the AMORTIZED `set` path; D1 proves the amortization not with a per-op line but with an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio `~1.5x` over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would blow to `~64x`.
 
 **SkipList counter-foil (the order tax).** A native `Map` is O(1) at get/set (`~27 ns/op`, FLATTER than any log line) but ORDER-BLIND: it cannot answer `successor` / `predecessor` / `rangeIter`. The log factor SkipList pays buys exactly the ordered queries Map cannot. SkipList is EXPECTED O(log n), so D1 also DISCLOSES its MAX single insert (an unlucky tall tower over a randomized build: `~18-130 us`, not gated).
 
@@ -178,8 +183,8 @@ All seven gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, with 
 
 - **D2 amortized cost** -- cumulative ns/op stays bounded over a `~1M`-op mixed trace (drift `< 1.0` here: the trace speeds up as the JIT warms, never degrades).
 - **D4 cache (PROXY, labelled)** -- dense `forEach` iteration vs random single-element lookup; the random/dense gap is `~1.9x` (SegmentTree) to `~2.9x` (SkipList). No native perf counters.
-- **D7 scalability** -- numeric substrates: string + object keys read `n/a`. Load factors `0.3/0.5/0.7/0.9`; insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList + Treap, `n/a` for the index-addressed Fenwick + SegmentTree.
-- **D8 workloads** -- churn (all members) + an ordered scan (`successor` + `rangeIter`, SkipList + Treap; `n/a` elsewhere).
+- **D7 scalability** -- numeric substrates: string + object keys read `n/a`. Load factors `0.3/0.5/0.7/0.9`; insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList + Treap + Scapegoat, `n/a` for the index-addressed Fenwick + SegmentTree.
+- **D8 workloads** -- churn (all members) + an ordered scan (`successor` + `rangeIter`, SkipList + Treap + Scapegoat; `n/a` elsewhere).
 
 ## API reference
 
@@ -187,7 +192,7 @@ All seven gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, with 
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.5.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.6.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -372,6 +377,42 @@ const whole = Treap.merge(lo, hi);// fuse back (all lo keys < all hi keys); both
 | `merge` (static) | `Treap.merge(a, b) -> Treap` | expected O(log n) | Fuse two arena-sharing treaps where every key of `a` < every key of `b`; CONSUMES both. Non-Treap inputs, cross-arena treaps, or an overlapping range throw. |
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 
+### Scapegoat
+
+A **scapegoat tree**: a **DETERMINISTIC**, weight-balanced **binary search tree** that is also an **order-statistic tree** -- an AUGMENTED ordered map (key -> value) -- the honest **pair to Treap**. Where a treap randomizes its shape to be balanced *in expectation*, a scapegoat keeps a hard **worst-case height bound** (`height <= log_{1/alpha}(n) + 1`), so `get` is **worst-case O(log n)** (never merely expected). It pays for that with **amortized O(log n)** `set` / `delete`: after a mutation makes the tree too deep (or, on delete, too sparse), an occasional **subtree rebuild** restores balance in bulk. A subtree-size column (maintained in the same pass as every link rewrite and every rebuild) adds `rank(x)` / `select(k)`, O(log n). **No priorities, no RNG anywhere** -- the shape is a deterministic function of the insert / delete order. Nodes are slot **indices** in five flat columns (`_key` / `_value` `Float64`; `_left` / `_right` / `_size` `Uint32`, `NIL = 0`) over the SAME private free-list (`NodePool`) SkipList and Treap use. Keys and values are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed); `set` on an existing key updates the value in place. Every hot op allocates zero bytes after construction.
+
+Zero-GC rebuild (the load-bearing design call): there is **no fresh array per rebuild**. One `_flat` (`Uint32Array(capacity)`) + one `_stack` (`Uint32Array(capacity+1)`) are allocated at construction and reused every rebuild -- an ITERATIVE, Morris-free in-order flatten (via `_stack`) writes sorted slot indices into `_flat`, and a bounded log-depth balanced rebuild re-links `_left` / `_right` / `_size` on the native call stack. Proven 0 B/op even under a rebuild-HEAVY ascending-insert trace (see [`decisions/0008-scapegoat.md`](./decisions/0008-scapegoat.md)). Unlike Treap there is **no `split` / `merge`**: a scapegoat has no priority heap to merge by, and an honest deterministic split/merge would be O(n) rebuilds -- the documented asymmetry vs Treap. `alpha` (the weight-balance factor) is validated to the OPEN interval `(0.55, 0.75)` -- both ends throw -- and frozen at construction (default `2/3`).
+
+```js
+import { Scapegoat } from '@zakkster/lite-logn';
+
+const sg = new Scapegoat(1000);   // capacity 1000, alpha = 2/3 (deterministic, no seed)
+sg.set(50, 500);                  // insert key 50 -> value 500
+sg.set(20, 200);
+sg.set(80, 800);
+sg.get(20);            // -> 200                                   -- worst-case O(log n)
+sg.rank(50);           // -> 1    (one key, 20, is strictly less than 50)
+sg.select(0);          // -> 20   (the smallest key)
+sg.successor(20);      // -> 50   (smallest key strictly greater)
+[...sg.rangeIter(20, 80)]; // -> [20, 50, 80]  (inclusive, ascending)
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new Scapegoat(capacity, alpha?)` | O(capacity) | `capacity` integer in `[1, 2^31-1]` (slot indices + subtree counts are `Uint32`, `NIL = 0` reserves slot 0); `alpha` in the OPEN interval `(0.55, 0.75)` (both ends throw), frozen at construction (default `2/3`). Allocates five columns + private pool + two rebuild scratch buffers once. |
+| `get` | `get(key) -> number \| undefined` | worst-case O(log n) | The value under `key`, or `undefined` if absent (no throw). Non-finite key throws. |
+| `has` | `has(key) -> boolean` | worst-case O(log n) | True iff `key` is stored. Non-finite key throws. |
+| `set` | `set(key, value) -> this` | amortized O(log n) | Insert `key -> value`, or update the value in place if `key` exists (no rebuild). Non-finite key/value throws; a full pool throws. |
+| `delete` | `delete(key) -> boolean` | amortized O(log n) | Idempotent: `false` if absent, `true` if removed. Non-finite key throws. |
+| `rank` | `rank(x) -> number` | worst-case O(log n) | Count of stored keys STRICTLY less than `x`, in `[0, size]`. `x` need not be present. Non-finite `x` throws. |
+| `select` | `select(k) -> number \| undefined` | worst-case O(log n) | The k-th smallest key (0-based), or `undefined` if `k` is out of `[0, size)`. Non-integer `k` throws. |
+| `successor` | `successor(key) -> number \| undefined` | worst-case O(log n) | The smallest key STRICTLY greater than `key`, or `undefined`. |
+| `predecessor` | `predecessor(key) -> number \| undefined` | worst-case O(log n) | The largest key STRICTLY less than `key`, or `undefined`. |
+| `rangeIter` | `rangeIter(lo, hi) -> IterableIterator<number>` | O(k log n) | Version-stamped iterator over keys in `[lo, hi]` INCLUSIVE, ascending. Bounds may be `+-Infinity`; `NaN` or `lo > hi` throws; a structural OR value mutation mid-iteration throws. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(key, value, tree)` in ascending key order. |
+| `clear` | `clear() -> this` | O(capacity) | Empties the tree, keeps capacity. |
+| `size` / `capacity` / `alpha` | getters | O(1) | Live entry count / fixed capacity / frozen weight-balance factor. |
+
 Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
@@ -399,8 +440,12 @@ Member signatures for later members are appended here as each ships.
 | `Treap` forEach | 0 B/op in the loop body (recursive in-order walk, hoisted callback) |
 | `Treap` rangeIter | one iterator + `{value, done}` per step (the documented per-protocol allocator; transient, not retained) |
 | `Treap` split / merge | 0 B/op beyond the returned Treap view(s); rewire in place, share the arena, consume the input(s) |
+| `Scapegoat` get / has / set / delete / rank / select / successor / predecessor | 0 B/op (nodes are slot indices; the rebuild reuses the preallocated `_flat` + `_stack` scratch and the native call stack, so even a rebuild storm is 0 B/op) |
+| `Scapegoat` constructor / `clear` | O(capacity) five columns + pool + two rebuild scratch buffers, once (cold) |
+| `Scapegoat` forEach | 0 B/op in the loop body (recursive in-order walk, hoisted callback) |
+| `Scapegoat` rangeIter | one iterator + `{value, done}` per step (the documented per-protocol allocator; transient, not retained) |
 
-Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`). The allocation table is extended per member as each lands.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`); Scapegoat `get` R^2 ~ 0.99, slope ~ 3.8-4.0 ns/level (band `[2.41, 5.63]`, sweep `[2^11, 2^17]`) -- WORST-case (deterministic), with the AMORTIZED `set` rebuild spike proven by the amortized-trace assertion (ratio `< 4x`), not a per-op line. The allocation table is extended per member as each lands.
 
 ## Testing
 

@@ -226,3 +226,57 @@ export class Treap {
      *  both. Non-Treap inputs, different arenas, or an overlapping range throw. */
     static merge(a: Treap, b: Treap): Treap;
 }
+
+/**
+ * A scapegoat tree: a DETERMINISTIC, weight-balanced BST that is also an order-statistic
+ * tree (an AUGMENTED ordered map key -> value) -- the honest pair to Treap. `get` is
+ * WORST-case O(log n) (a hard height bound, never merely expected); `set` / `delete` are
+ * AMORTIZED O(log n) (an occasional subtree rebuild absorbs the imbalance). A subtree-size
+ * column adds O(log n) rank / select. No priorities, no RNG: the shape is a deterministic
+ * function of the insert / delete order. Nodes are slot INDICES in flat typed-array columns
+ * over a private free-list, and every rebuild reuses ONE preallocated scratch buffer + index
+ * stack (no heap object, no fresh array per op). Keys and values are finite numbers (typeof-
+ * guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed). set on an existing
+ * key updates the value in place. Fixed capacity: a full pool throws. Every hot op allocates
+ * zero bytes. There is deliberately NO split / merge (the treap's arena-sharing surgery has no
+ * honest deterministic O(log n) analogue here) -- the documented asymmetry vs Treap.
+ */
+export class Scapegoat {
+    /** @param capacity exact max live entries; integer in [1, 2^31-1].
+     *  @param alpha weight-balance factor in the OPEN interval (0.55, 0.75); default 2/3.
+     *         Both ends throw. Frozen after construction. */
+    constructor(capacity: number, alpha?: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this tree was sized for. */
+    readonly capacity: number;
+    /** The frozen weight-balance factor. */
+    readonly alpha: number;
+
+    /** The value under key, or undefined if absent (no throw). Non-finite key throws. */
+    get(key: number): number | undefined;
+    /** True iff key is currently stored. Non-finite key throws. */
+    has(key: number): boolean;
+    /** Insert key -> value, or update the value in place if key exists. Non-finite
+     *  key/value throws; a full pool throws. */
+    set(key: number, value: number): this;
+    /** Remove key; true if it was present, false if absent (idempotent). Non-finite key throws. */
+    delete(key: number): boolean;
+    /** Count of stored keys strictly less than x (its rank), in [0, size]. Non-finite x throws. */
+    rank(x: number): number;
+    /** The k-th smallest key (0-based), or undefined if k is out of [0, size). Non-integer k throws. */
+    select(k: number): number | undefined;
+    /** The smallest key strictly greater than key, or undefined. Non-finite key throws. */
+    successor(key: number): number | undefined;
+    /** The largest key strictly less than key, or undefined. Non-finite key throws. */
+    predecessor(key: number): number | undefined;
+    /** A version-stamped iterator over keys in [lo, hi] inclusive, ascending. Bounds
+     *  may be +-Infinity (unbounded ends); NaN or lo > hi throws; mutation during
+     *  iteration throws. */
+    rangeIter(lo: number, hi: number): IterableIterator<number>;
+    /** Visit every (key, value) pair in ascending key order. */
+    forEach(fn: (key: number, value: number, tree: Scapegoat) => void): void;
+    /** Empty the tree, keeping capacity. */
+    clear(): this;
+}

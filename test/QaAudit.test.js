@@ -33,22 +33,23 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.5.0 at the Treap release', () => {
-    assert.equal(VERSION, '0.5.0');
+test('VERSION is exactly 0.6.0 at the Scapegoat release', () => {
+    assert.equal(VERSION, '0.6.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (5 members) --------
+// --- frozen export surface: VERSION + the shipped members (6 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList and Treap at v0.5.0 (5 members)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat at v0.6.0 (6 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'Scapegoat', 'SegmentTree', 'SkipList', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
     assert.equal(typeof LogNModule.SegmentTree, 'function');
     assert.equal(typeof LogNModule.SkipList, 'function');
     assert.equal(typeof LogNModule.Treap, 'function');
+    assert.equal(typeof LogNModule.Scapegoat, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -258,4 +259,54 @@ test('Treap fails closed with a [lite-logn]-tagged throw on every coercion door'
     for (let k = 0; k < 8; k++) src.set(k, k);
     const [lo, hi] = src.split(4);
     assert.throws(() => Treap.merge(hi, lo), /\[lite-logn\]/); // hi keys not < lo keys
+});
+
+// --- Scapegoat (v0.6.0): coercion + [lite-logn] fail-closed tag --------------
+
+test('Scapegoat fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { Scapegoat } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 0x100000000]) {
+        assert.throws(() => new Scapegoat(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    // constructor: bad alpha -- the OPEN interval (0.55, 0.75), so BOTH ends throw
+    for (const bad of [0.55, 0.75, 0.5, 0.8, 0, 1, -1, NaN, Infinity, '0.6', null, {}, Symbol('a'), 3n]) {
+        assert.throws(() => new Scapegoat(8, bad), /\[lite-logn\]/, 'ctor alpha ' + String(bad));
+    }
+    assert.doesNotThrow(() => new Scapegoat(8, 0.56));
+    assert.doesNotThrow(() => new Scapegoat(8, 0.74));
+    assert.doesNotThrow(() => new Scapegoat(8)); // alpha omitted -> default 2/3
+    const sg = new Scapegoat(8);
+    // non-finite / non-number key, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => sg.get(bad), /\[lite-logn\]/, 'get ' + String(bad));
+        assert.throws(() => sg.has(bad), /\[lite-logn\]/, 'has ' + String(bad));
+        assert.throws(() => sg.set(bad, 1), /\[lite-logn\]/, 'set key ' + String(bad));
+        assert.throws(() => sg.delete(bad), /\[lite-logn\]/, 'delete ' + String(bad));
+        assert.throws(() => sg.rank(bad), /\[lite-logn\]/, 'rank ' + String(bad));
+        assert.throws(() => sg.successor(bad), /\[lite-logn\]/, 'successor ' + String(bad));
+        assert.throws(() => sg.predecessor(bad), /\[lite-logn\]/, 'predecessor ' + String(bad));
+    }
+    // non-finite / non-number value, typeof-first
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => sg.set(0, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+    }
+    // select index: non-integer fails closed (a programming error)
+    for (const bad of [1.5, NaN, '0', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => sg.select(bad), /\[lite-logn\]/, 'select ' + String(bad));
+    }
+    // rangeIter bounds: NaN + non-number fail closed; lo > hi fails closed
+    for (const bad of [NaN, '0', null, undefined, {}, Symbol('b'), 3n]) {
+        assert.throws(() => sg.rangeIter(bad, 5), /\[lite-logn\]/, 'rangeIter lo ' + String(bad));
+        assert.throws(() => sg.rangeIter(0, bad), /\[lite-logn\]/, 'rangeIter hi ' + String(bad));
+    }
+    assert.throws(() => sg.rangeIter(5, 2), /\[lite-logn\]/); // lo > hi
+    assert.doesNotThrow(() => [...sg.rangeIter(-Infinity, Infinity)]);
+    // full pool fails closed (never a silent drop)
+    const full = new Scapegoat(2);
+    full.set(1, 1); full.set(2, 2);
+    assert.throws(() => full.set(3, 3), /\[lite-logn\]/);
+    // there is deliberately NO split / merge on Scapegoat (the asymmetry vs Treap)
+    assert.equal(typeof sg.split, 'undefined', 'Scapegoat has no split');
+    assert.equal(typeof Scapegoat.merge, 'undefined', 'Scapegoat has no static merge');
 });

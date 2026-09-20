@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.5.0 five members have
-shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList and Treap -- so this guide
-carries their per-member sections. It is NOT an API encyclopedia (that is the
-README + `LogN.d.ts`); it answers "which member, and is my logarithm real?"
+avoid, and how to measure the logarithm yourself. At v0.6.0 six members have
+shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat -- so
+this guide carries their per-member sections. It is NOT an API encyclopedia (that
+is the README + `LogN.d.ts`); it answers "which member, and is my logarithm real?"
 
 Scope discipline (mirrors lite-o1's GUIDE): a decision flowchart + a picker
 table up top, then reach-for / avoid + measure-it per member. No re-documenting
@@ -48,15 +48,24 @@ START -- what do you need?
 |   ordered iteration)?                                         -> SkipList (exp)     [v0.4.0]
 |
 +-- ORDER STATISTICS (rank / select) or set SURGERY (split /
-    merge) on an ordered map?                                   -> Treap (exp)       [v0.5.0]
+|   merge) on an ordered map?                                   -> Treap (exp)       [v0.5.0]
+|
++-- ORDER STATISTICS (rank / select) with a HARD WORST-CASE
+    per-lookup bound (no unlucky-tail spike), and set/delete
+    can be amortized?                                           -> Scapegoat (wc/am) [v0.6.0]
 ```
 
 Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
 / range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
 many keys are `< x`), `select(k)` (the k-th smallest), or O(log n) `split` /
-`merge`. Both are expected O(log n); Treap's per-level cost is actually LOWER (a
-single BST descent vs a tower of links), and it adds the order-statistic column
-for free -- SkipList is the leaner store when you never call rank / select.
+`merge`; **Scapegoat** when you need the same order statistics but a DETERMINISTIC
+**worst-case** per-lookup bound -- no RNG, no unlucky-tail spike (its `get` is
+worst-case O(log n), the price being amortized-O(log n) `set` / `delete` with an
+occasional rebuild). Treap vs Scapegoat is the expected-vs-worst-case pair: reach
+for Treap when you need `split` / `merge` (Scapegoat has none) or the smoothest
+per-op latency; reach for Scapegoat when a single slow lookup is unacceptable and
+you can absorb the amortized rebuild on writes. All three are ordered maps; Treap
+and Scapegoat add the order-statistic column, SkipList is the leaner plain store.
 
 ---
 
@@ -69,10 +78,11 @@ for free -- SkipList is the leaner store when you never call rank / select.
 | Associative range query + point update | SegmentTree | O(log n) query / update | 0.3.0 |
 | Ordered map / successor / range iterate | SkipList | expected O(log n) | 0.4.0 |
 | Ordered map + rank / select / split / merge | Treap | expected O(log n) | 0.5.0 |
+| Ordered map + rank / select, WORST-case get (no RNG) | Scapegoat | worst-case O(log n) get, amortized O(log n) set/delete | 0.6.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's and Treap's are below).
+SkipList's, Treap's and Scapegoat's are below).
 
 ---
 
@@ -277,6 +287,54 @@ The O(n) linear-scan foil must MISS the floor. The witness ALSO prints the MAX s
 insert (the unlucky-priority rotation-chain tail): if your workload cares about the
 tail, not the mean, read that bar. `node --expose-gc test/torture.mjs` proves every hot
 op (get / set / delete / rank / select / successor / forEach / rangeIter) at 0 B/op.
+
+---
+
+## Scapegoat -- a deterministic ordered map with order statistics, worst-case get
+
+**Reach for it when** you need everything Treap's ordered-map + order-statistic surface
+offers (get / set / delete, `successor` / `predecessor` / `rangeIter`, `rank(x)`,
+`select(k)`) BUT a single slow lookup is unacceptable: Scapegoat is DETERMINISTIC, so
+`get` / `rank` / `select` are WORST-CASE O(log n) (a hard height bound
+`<= log_{1/alpha}(n) + 1`), never merely expected -- there is no RNG and therefore no
+unlucky-tail spike on reads. It is the honest PAIR to Treap: the reads are worst-case,
+the price being AMORTIZED O(log n) `set` / `delete` (an occasional subtree rebuild
+absorbs the imbalance in bulk). Canonical uses: a read-latency-sensitive
+order-statistic index / leaderboard where a tail-spike on a query would breach an SLA,
+a percentile query over a changing set with predictable lookup cost, any ordered map
+where you want a reproducible shape from the insert order (no seed, no RNG). Keys are
+arbitrary finite numbers; `alpha` (default `2/3`) trades rebuild frequency against
+height -- closer to `0.55` = tighter height, more rebuilds; closer to `0.75` = looser
+height, fewer rebuilds.
+
+**Avoid it when:**
+
+- You need `split` / `merge`. Scapegoat has NEITHER (no priority heap to merge by; an
+  honest deterministic split/merge would be O(n) rebuilds) -- reach for **Treap**
+  (v0.5.0), which carries the arena-sharing set surgery for the family.
+- Your WRITES are latency-sensitive at the tail. Scapegoat's `set` / `delete` are
+  AMORTIZED: most are a plain descent, but an occasional one triggers a subtree (or, on
+  delete, whole-tree) rebuild -- a real spike, disclosed by the amortized-trace witness.
+  If you need smooth per-write latency AND can tolerate an expected (not worst-case)
+  read, **Treap** (v0.5.0) is the fit; if you need worst-case writes too, that is a
+  different structure than any lite-logn member ships.
+- You need a plain ordered map and never call rank / select. **SkipList** (v0.4.0) is
+  the leaner store.
+- You only need MIN / MAX with insert (**BinaryHeap**), or your keys are dense integer
+  indices for prefix sums / range folds (**Fenwick** / **SegmentTree**).
+
+**Measure it yourself:** `npm run witness` fits `get` against
+`nsPerOp = intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and
+sit inside its own band (`get [2.41, 5.63]` ns/level -- a touch LOWER than Treap's
+because a scapegoat is more balanced than a random treap; see
+[`decisions/0008-scapegoat.md`](./decisions/0008-scapegoat.md)), over the `[2^11, 2^17]`
+sweep. The O(n) linear-scan foil must MISS the floor. Because `get` is worst-case there
+is no expected-op MAX-single-op bar; instead the witness runs the AMORTIZED-TRACE
+assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op must track a LOG
+curve (last/first ratio `< 4x` over `[2^11, 2^17]`), proving the rebuilds amortize away.
+`node --expose-gc test/torture.mjs` proves every hot op -- INCLUDING a rebuild-heavy
+ascending-insert lane -- at 0 B/op (the rebuild reuses preallocated scratch, never a
+fresh array).
 
 ---
 

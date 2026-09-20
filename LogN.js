@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -1981,5 +1981,518 @@ export class Treap {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] Treap full (capacity ' + this._cap + ')');
+    }
+}
+
+// Scapegoat (v0.6.0 session) -- a DETERMINISTIC weight-balanced augmented ordered map (BELOW).
+
+/**
+ * Max Scapegoat capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns (`_left` / `_right`), each subtree count
+ * lives in a `Uint32Array` (`_size`), and the rebuild scratch (`_flat`) plus the
+ * flatten index-stack (`_stack`) are `Uint32Array` slot buffers; an index and a count
+ * must both fit an unsigned 32-bit word. `NIL = 0` reserves slot 0 as the empty-subtree
+ * sentinel, so live slots run [1, capacity]. The index / count arithmetic (Uint32 slot
+ * indices + `NIL = 0` + Uint32 subtree sizes), not the byte count, is the hard ceiling
+ * -- the same "the arithmetic caps it" reasoning as the array-embedded members.
+ */
+const SG_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A SCAPEGOAT TREE: a DETERMINISTIC, weight-balanced BINARY SEARCH TREE that is ALSO an
+ * order-statistic tree (an AUGMENTED ordered map key -> value). It is the honest PAIR to
+ * Treap: where a treap randomizes its shape to be balanced IN EXPECTATION, a scapegoat
+ * keeps a hard WORST-CASE height bound (`get` is O(log n) worst-case, never merely
+ * expected) by paying for it with AMORTIZED O(log n) `set` / `delete` -- an occasional
+ * subtree rebuild absorbs the imbalance. No priorities, no RNG anywhere: the tree shape
+ * is a deterministic function of the insert / delete order. The trick that keeps it
+ * zero-GC is the SkipList / Treap one: nodes are slot INDICES in flat typed-array columns
+ * over the same private free-list (NodePool), never heap objects; AND the rebuild reuses
+ * ONE preallocated scratch buffer (`_flat`) + ONE preallocated index-stack (`_stack`),
+ * so even a rebuild-heavy trace allocates ZERO bytes after construction.
+ *
+ * Two invariants held at once:
+ *   - BST order on `_key` (an in-order walk is ascending by key); and
+ *   - alpha-WEIGHT-BALANCE: after every mutation the height stays <= log_{1/alpha}(n) + 1
+ *     (h_alpha), enforced by the dual trigger below. The augmentation is a third
+ *     invariant: `_size[x]` is the number of nodes in x's subtree, maintained in the SAME
+ *     pass as every link rewrite, so `rank` (keys < x) and `select` (k-th smallest key)
+ *     are O(log n) via subtree counts.
+ *
+ * The DUAL trigger (alpha frozen at construction, `alpha` in the OPEN interval
+ * (0.55, 0.75); default 2/3):
+ *   - `set`: descend recording the path, link the new leaf at depth d, then if the node
+ *     is "too deep" (d > h_alpha(size)) walk the recorded path back up to the SCAPEGOAT
+ *     -- the lowest ancestor whose child subtree exceeds `alpha` of its own size -- and
+ *     rebuild THAT subtree perfectly balanced. `_maxCount` tracks the high-water size.
+ *   - `delete`: remove the node (standard BST delete, `_size` fixed on the unwind), then
+ *     when `size < alpha * _maxCount` rebuild the WHOLE tree and reset `_maxCount = size`.
+ * The depth test uses NO per-op `Math.log`: since `_invAlpha = 1/alpha` is ctor-cached,
+ * `d > h_alpha(n)` (= `d > floor(_invLog * log2(n))`, `_invLog = 1/log2(1/alpha)`) is
+ * tested EXACTLY as `_invAlpha^d > n` (for integer d the strict `>` matches the floor),
+ * accumulated with one float multiply per path level -- only on the `set` path.
+ *
+ * ZERO-GC rebuild (the load-bearing design call, decisions/0008-scapegoat.md): NO fresh
+ * array per rebuild. `_flatten` walks the target subtree in-order ITERATIVELY (Morris-
+ * free) using the preallocated `_stack` index-column, writing sorted slot indices into
+ * the preallocated `_flat` buffer; `_buildBalanced` reads that sorted range and re-links
+ * `_left` / `_right` / `_size` via bounded native recursion whose depth is O(log
+ * subtree) <= ~31 (it produces a perfectly balanced subtree), so it runs on the native
+ * call stack, never the GC heap. Both are 0 B/op -- proven by the torture gate's rebuild-
+ * heavy ascending-insert lane. RECURSION: `delete` and `forEach` also recurse to a depth
+ * equal to the tree height, which is O(log n) worst-case here (the weight balance bounds
+ * it) -- strictly safer than Treap's expected bound, disclosed here + in the ADR, on the
+ * native stack, so still 0 B/op.
+ *
+ * Keys and values are FINITE numbers (typeof-guarded BEFORE coercion -- Symbol / BigInt /
+ * NaN / +-Infinity fail closed with a `[lite-logn]` throw). `set` on an EXISTING key
+ * updates its value in place (no new node, no rebuild). A missing / empty query returns
+ * `undefined` (never throws). Fixed capacity: a full pool throws, never silently drops.
+ * `rangeIter` is a VERSION-STAMPED iterator -- any structural OR value mutation mid-
+ * iteration throws `[lite-logn]` rather than yield stale data.
+ *
+ * Unlike Treap there is NO `split` / `merge`: those are the treap's arena-sharing set
+ * surgery (they rewire a randomized heap in place); a scapegoat has no priority heap to
+ * merge by, and an honest deterministic split/merge would be O(n) rebuilds, forfeiting
+ * the sub-linear headline -- so the surface is deliberately the ordered-map + order-
+ * statistic core (get / has / set / delete / rank / select / successor / predecessor /
+ * rangeIter / forEach / clear), documented in the ADR as the asymmetry vs Treap.
+ */
+export class Scapegoat {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^31-1].
+     * @param {number} [alpha]    weight-balance factor in the OPEN interval (0.55, 0.75)
+     *                            (both ends throw); default 2/3. Frozen after construction.
+     */
+    constructor(capacity, alpha = 2 / 3) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > SG_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] Scapegoat capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        // typeof guard BEFORE the range check; the interval is OPEN (both 0.55 and 0.75 throw).
+        if (typeof alpha !== 'number' || !Number.isFinite(alpha) || alpha <= 0.55 || alpha >= 0.75) {
+            throw new RangeError(
+                '[lite-logn] Scapegoat alpha must be a number in the open interval (0.55, 0.75), got ' +
+                String(alpha));
+        }
+        this._cap = capacity;                          // max live entries
+        this._key = new Float64Array(capacity + 1);    // key at each slot
+        this._value = new Float64Array(capacity + 1);  // value at each slot
+        this._left = new Uint32Array(capacity + 1);    // left child slot; NIL = 0
+        this._right = new Uint32Array(capacity + 1);   // right child slot; NIL = 0
+        this._size = new Uint32Array(capacity + 1);    // subtree node count; _size[0] = 0
+        this._pool = new NodePool(capacity);           // free-list over slots [1, capacity]
+        this._flat = new Uint32Array(capacity);        // rebuild scratch: sorted slot indices
+        this._stack = new Uint32Array(capacity + 1);   // flatten / descent index-stack (reused)
+        this._root = 0;                                // NIL == empty tree
+        this._maxCount = 0;                            // high-water size since the last full rebuild
+        this._version = 0;                             // iterator invalidation stamp
+        this._alpha = alpha;                           // ctor-frozen weight-balance factor
+        this._invAlpha = 1 / alpha;                    // ctor-cached: no per-op Math.log
+    }
+
+    /** Live entry count. O(1) (the root subtree count). */
+    get size() { return this._root === 0 ? 0 : this._size[this._root]; }
+
+    /** The fixed capacity this tree was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen weight-balance factor. O(1). */
+    get alpha() { return this._alpha; }
+
+    /**
+     * The value stored under `key`, or `undefined` if absent (never throws on a missing /
+     * empty query). O(log n) WORST-case: a plain BST descent over a weight-balanced tree.
+     * Fails closed on a non-number / non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    get(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else return this._value[t];
+        }
+        return undefined;
+    }
+
+    /**
+     * True iff `key` is currently in the tree. O(log n) worst-case. Fails closed on a
+     * non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    has(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else return true;
+        }
+        return false;
+    }
+
+    /**
+     * Insert `key -> value`, or UPDATE the value in place if `key` already exists (no new
+     * node, no rebuild). AMORTIZED O(log n): a descent recording the path, then (on
+     * insert) an amortized-cheap weight-balance check that occasionally rebuilds the
+     * scapegoat subtree. Fails closed: a non-finite key or value (typeof-guarded first),
+     * or a full pool, each throw `[lite-logn]` as a no-op.
+     * @param {number} key    a finite number
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(key, value) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        const K = this._key, L = this._left, R = this._right, S = this._size, stk = this._stack;
+        let t = this._root, sp = 0;
+        while (t !== 0) { // descend, recording the path; update in place if present
+            stk[sp++] = t;
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else { this._value[t] = value; this._version = (this._version + 1) | 0; return this; }
+        }
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        K[slot] = key; this._value[slot] = value; L[slot] = 0; R[slot] = 0; S[slot] = 1;
+        if (sp === 0) this._root = slot;             // first node
+        else { const p = stk[sp - 1]; if (key < K[p]) L[p] = slot; else R[p] = slot; }
+        for (let i = 0; i < sp; i++) S[stk[i]]++;     // every ancestor gained one node
+        const newSize = S[this._root];                // == old size + 1
+        if (newSize > this._maxCount) this._maxCount = newSize;
+        this._version = (this._version + 1) | 0;
+        // Depth test with NO Math.log: the new node sits at depth d == sp; it is too deep
+        // iff d > h_alpha(newSize) == floor(_invLog * log2(newSize)), tested EXACTLY as
+        // _invAlpha^d > newSize (integer d, so strict > matches the floor). One float
+        // multiply per level -- only on this insert path, never on get.
+        let bound = 1;
+        for (let i = 0; i < sp; i++) bound *= this._invAlpha;
+        if (bound > newSize) {
+            // Walk the recorded path up to the SCAPEGOAT: the lowest ancestor whose
+            // path-child subtree exceeds alpha of its own (post-insert) size.
+            let g = -1;
+            for (let i = sp - 1; i >= 0; i--) {
+                const node = stk[i];
+                const child = i === sp - 1 ? slot : stk[i + 1];
+                if (S[child] > this._alpha * S[node]) { g = i; break; }
+            }
+            if (g === -1) {
+                this._rebuildSubtree(this._root, 0, false); // defensive: rebuild whole tree
+            } else {
+                const node = stk[g];
+                const parent = g > 0 ? stk[g - 1] : 0;
+                const wasLeft = parent !== 0 && L[parent] === node;
+                this._rebuildSubtree(node, parent, wasLeft);
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Remove `key`. AMORTIZED O(log n). Idempotent: returns `false` if `key` is absent (no
+     * throw), `true` if it was present and removed. A standard BST delete fixes `_size` on
+     * the unwind; when the tree has shrunk below `alpha * _maxCount` the WHOLE tree is
+     * rebuilt perfectly balanced and `_maxCount` reset. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    delete(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, found = false;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else { found = true; break; }
+        }
+        if (!found) return false; // absent (no throw)
+        this._root = this._delete(this._root, key);
+        this._version = (this._version + 1) | 0;
+        const newSize = this._root === 0 ? 0 : this._size[this._root];
+        if (newSize < this._alpha * this._maxCount) {
+            this._rebuildSubtree(this._root, 0, false); // global rebuild
+            this._maxCount = newSize;
+        }
+        return true;
+    }
+
+    /**
+     * The number of stored keys STRICTLY LESS than `x` (its rank / position). O(log n) via
+     * subtree counts. `x` need not be present; `rank` of the smallest key is 0, of a key
+     * past the max is `size`. Fails closed on a non-finite `x`.
+     * @param {number} x  a finite number
+     * @returns {number} count of keys < x, in [0, size]
+     */
+    rank(x) {
+        if (typeof x !== 'number' || !Number.isFinite(x)) return this._badKey(x);
+        const L = this._left, R = this._right, K = this._key, S = this._size;
+        let t = this._root, r = 0;
+        while (t !== 0) {
+            if (x <= K[t]) t = L[t];              // t (and its right) are >= x
+            else { r += S[L[t]] + 1; t = R[t]; }  // t's left subtree + t precede x
+        }
+        return r;
+    }
+
+    /**
+     * The k-th smallest KEY (0-based order statistic), or `undefined` if `k` is out of
+     * range [0, size). O(log n) via subtree counts. Fails closed on a non-integer `k`
+     * (typeof-guarded first); an in-type out-of-range `k` returns `undefined`.
+     * @param {number} k  integer in [0, size)
+     * @returns {number|undefined} the k-th smallest key
+     */
+    select(k) {
+        if (typeof k !== 'number' || !Number.isInteger(k)) return this._badRank(k);
+        const sz = this._root === 0 ? 0 : this._size[this._root];
+        if (k < 0 || k >= sz) return undefined;
+        const L = this._left, R = this._right, K = this._key, S = this._size;
+        let t = this._root;
+        for (;;) {
+            const ls = S[L[t]];
+            if (k < ls) t = L[t];
+            else if (k > ls) { k -= ls + 1; t = R[t]; }
+            else return K[t];
+        }
+    }
+
+    /**
+     * The smallest key STRICTLY greater than `key`, or `undefined` if none. O(log n).
+     * `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    successor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] > key) { best = K[t]; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    /**
+     * The largest key STRICTLY less than `key`, or `undefined` if none. O(log n). `key`
+     * itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    predecessor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] < key) { best = K[t]; t = R[t]; }
+            else t = L[t];
+        }
+        return best;
+    }
+
+    /**
+     * A VERSION-STAMPED iterator over the keys in `[lo, hi]` INCLUSIVE, ascending. Bounds
+     * may be any number INCLUDING +-Infinity (an unbounded end); `NaN` fails closed, as
+     * does `lo > hi`. The generator captures the tree's version and throws `[lite-logn]`
+     * if any STRUCTURAL or VALUE mutation happens mid-iteration, rather than yield stale
+     * data. It walks by repeated `successor` (each step a fresh O(log n) descent, so NO
+     * scratch stack is allocated); the one documented per-protocol allocator is the
+     * {value, done} per step.
+     * @param {number} lo  lower bound (inclusive); may be -Infinity
+     * @param {number} hi  upper bound (inclusive); may be +Infinity
+     * @returns {IterableIterator<number>} the keys in [lo, hi], ascending
+     */
+    rangeIter(lo, hi) {
+        if (typeof lo !== 'number' || Number.isNaN(lo)) return this._badBound(lo);
+        if (typeof hi !== 'number' || Number.isNaN(hi)) return this._badBound(hi);
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._rangeGen(lo, hi);
+    }
+
+    /** @private version-stamped range generator (see rangeIter). */
+    *_rangeGen(lo, hi) {
+        const ver = this._version;
+        let cur = this._ceil(lo); // smallest key >= lo, or undefined
+        while (cur !== undefined && cur <= hi) {
+            if (this._version !== ver) {
+                throw new Error('[lite-logn] Scapegoat mutated during iteration');
+            }
+            yield cur;
+            cur = this.successor(cur);
+        }
+    }
+
+    /**
+     * Visit every live `(key, value)` pair in ASCENDING key order. O(n) cold in-order walk
+     * (recursion depth = tree height, O(log n)), allocation-free in the loop body (pass a
+     * hoisted callback). Unlike rangeIter this is NOT version-stamped -- mutating from
+     * within the callback is the caller's responsibility (matching the other members).
+     * @param {(key:number, value:number, tree:Scapegoat)=>void} fn
+     */
+    forEach(fn) {
+        this._forEach(this._root, fn);
+    }
+
+    /** @private recursive in-order walk. */
+    _forEach(t, fn) {
+        if (t === 0) return;
+        this._forEach(this._left[t], fn);
+        fn(this._key[t], this._value[t], this);
+        this._forEach(this._right[t], fn);
+    }
+
+    /**
+     * Empty the tree, keeping the fixed capacity. O(capacity) cold path: returns every
+     * node to the pool and points the root at NIL. @returns {this}
+     */
+    clear() {
+        this._pool.clear();
+        this._root = 0;
+        this._maxCount = 0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    // ---- private structure (rebuild + recursive delete; hot bodies elsewhere) ----
+
+    /**
+     * @private In-order flatten of subtree `root` into `_flat` using the preallocated
+     * `_stack` index-column (Morris-free, ITERATIVE -- so a degenerate pre-rebuild chain
+     * cannot overflow the native stack). Returns the node count written. 0 B/op.
+     */
+    _flatten(root) {
+        const L = this._left, R = this._right, stk = this._stack, flat = this._flat;
+        let node = root, sp = 0, c = 0;
+        while (node !== 0 || sp > 0) {
+            while (node !== 0) { stk[sp++] = node; node = L[node]; }
+            node = stk[--sp];
+            flat[c++] = node;
+            node = R[node];
+        }
+        return c;
+    }
+
+    /**
+     * @private Build a perfectly balanced BST from the sorted slot range `_flat[lo..hi]`,
+     * re-linking `_left` / `_right` / `_size`. Returns the subtree root (NIL if empty).
+     * Bounded native recursion: depth is O(log(hi-lo+1)) <= ~31 (it produces a balanced
+     * subtree), so it runs on the native call stack, never the GC heap. 0 B/op.
+     */
+    _buildBalanced(lo, hi) {
+        if (lo > hi) return 0;
+        const mid = (lo + hi) >> 1;
+        const s = this._flat[mid];
+        const l = this._buildBalanced(lo, mid - 1);
+        const r = this._buildBalanced(mid + 1, hi);
+        this._left[s] = l;
+        this._right[s] = r;
+        this._size[s] = this._size[l] + this._size[r] + 1; // _size[0] is a permanent 0
+        return s;
+    }
+
+    /**
+     * @private Rebuild subtree `root` perfectly balanced and re-link it under `parent`
+     * (or the tree root when `parent === 0`). `wasLeft` records which child link to
+     * rewrite. Reuses the preallocated `_flat` + `_stack` scratch: 0 B/op.
+     */
+    _rebuildSubtree(root, parent, wasLeft) {
+        const count = this._flatten(root);
+        const nr = this._buildBalanced(0, count - 1);
+        if (parent === 0) this._root = nr;
+        else if (wasLeft) this._left[parent] = nr;
+        else this._right[parent] = nr;
+    }
+
+    /** @private recursive BST delete of `key` from subtree `t`; frees the removed slot,
+     *  fixing `_size` on the unwind. Depth = tree height = O(log n). */
+    _delete(t, key) {
+        const L = this._left, R = this._right, S = this._size, K = this._key;
+        if (key < K[t]) {
+            L[t] = this._delete(L[t], key);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            return t;
+        }
+        if (key > K[t]) {
+            R[t] = this._delete(R[t], key);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            return t;
+        }
+        // found t
+        const l = L[t], r = R[t];
+        if (l === 0) { this._pool.free(t); return r; }
+        if (r === 0) { this._pool.free(t); return l; }
+        // two children: copy the in-order successor (min of the right subtree) into t,
+        // then delete that successor from the right subtree (frees ITS slot).
+        let m = r; while (L[m] !== 0) m = L[m];
+        K[t] = K[m]; this._value[t] = this._value[m];
+        R[t] = this._deleteMin(R[t]);
+        S[t] = S[L[t]] + S[R[t]] + 1;
+        return t;
+    }
+
+    /** @private remove the minimum of subtree `t`, freeing its slot; return the new root. */
+    _deleteMin(t) {
+        const L = this._left, R = this._right, S = this._size;
+        if (L[t] === 0) { const r = R[t]; this._pool.free(t); return r; }
+        L[t] = this._deleteMin(L[t]);
+        S[t] = S[L[t]] + S[R[t]] + 1;
+        return t;
+    }
+
+    /** @private smallest key >= `lo`, or undefined (the range-iter start). */
+    _ceil(lo) {
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] >= lo) { best = K[t]; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] Scapegoat key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] Scapegoat value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badRank(k) {
+        throw new TypeError(
+            '[lite-logn] Scapegoat select index must be an integer, got ' + String(k));
+    }
+
+    /** @private */
+    _badBound(b) {
+        throw new TypeError(
+            '[lite-logn] Scapegoat rangeIter bound must be a number (not NaN), got ' + String(b));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] Scapegoat rangeIter needs lo <= hi, got lo=' + String(lo) +
+            ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] Scapegoat full (capacity ' + this._cap + ')');
     }
 }

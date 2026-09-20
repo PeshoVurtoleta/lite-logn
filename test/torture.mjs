@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -123,6 +123,18 @@ async function main() {
             tr.successor(3);
             tr.delete(5);
             tracker.track(tr, noopRelease, 4 * CYCLES + i, { audit: true });
+            // A fresh Scapegoat per cycle, exercised (incl. rebuild-forcing ascending
+            // inserts) then dropped. Same held-value contract: a Scapegoat owns only its
+            // typed-array columns + a private NodePool + two rebuild scratch buffers (no
+            // external resource), so the no-op cleanup never defeats finalization.
+            const sc = new Scapegoat(64);
+            for (let k = 0; k < 40; k++) sc.set(k, k); // ascending -> forces rebuilds
+            sc.get(7);
+            sc.rank(20);
+            sc.select(3);
+            sc.successor(3);
+            sc.delete(5);
+            tracker.track(sc, noopRelease, 5 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -341,6 +353,72 @@ async function main() {
         trk = (trk + 1) | 0;
     };
 
+    // Scapegoat: one out-of-loop tree prefilled to half capacity (a warmed, stable tree).
+    // Each lane is a real hot op that MUST allocate zero RETAINED bytes -- links are slot
+    // INDICES from a private free-list, never heap objects; the rebuild reuses the ONE
+    // preallocated _flat + _stack scratch (never a fresh array); the recursive delete /
+    // buildBalanced / forEach run on the native call stack; and the rangeIter generator's
+    // per-step {value, done} objects are TRANSIENT, so retained growth is 0.
+    const sc = new Scapegoat(CAP);
+    for (let i = 0; i < HALF; i++) sc.set(i, (i * 2654435761) & 0xffff);
+
+    let sck = 0, scacc = 0;
+    // get: a hit on a resident cycling key, folded into an accumulator.
+    const stepScGet = () => {
+        scacc = (scacc + (sc.get(sck & HMASK) | 0)) | 0;
+        sck = (sck + 1) | 0;
+    };
+    // set: an in-place value update of a resident cycling key (no new node, no rebuild) --
+    // the pure set hot path, zero allocation.
+    const stepScSet = () => {
+        sc.set(sck & HMASK, sck & 0xffff);
+        sck = (sck + 1) | 0;
+    };
+    // delete + re-set: addressable delete then re-insert of the SAME key -> steady size,
+    // exercising the free-list free/alloc + the recursive delete/insert (call stack).
+    const stepScDelete = () => {
+        const key = sck & HMASK;
+        if (sc.delete(key)) sc.set(key, (sck * 2246822519) & 0xffff);
+        sck = (sck + 1) | 0;
+    };
+    // rank / select: order-statistic descents over subtree counts, folded in.
+    const stepScRankSelect = () => {
+        scacc = (scacc + (sc.rank(sck & HMASK) | 0)) | 0;
+        const v = sc.select(sck & (HMASK >> 1));
+        scacc = (scacc + (v === undefined ? 0 : v | 0)) | 0;
+        sck = (sck + 1) | 0;
+    };
+    // successor: a strictly-greater lookup on a cycling key, folded in.
+    const stepScSuccessor = () => {
+        const v = sc.successor(sck & HMASK);
+        scacc = (scacc + (v === undefined ? 0 : v | 0)) | 0;
+        sck = (sck + 1) | 0;
+    };
+    // REBUILD-HEAVY trace: a dedicated small tree fed EVER-INCREASING (ascending) keys,
+    // wrap-cleared when full. Ascending insertion is the pathological case that forces the
+    // scapegoat subtree REBUILD (_flatten + _buildBalanced) to fire repeatedly -- the load-
+    // bearing 0-B/op proof: the rebuild reuses the preallocated _flat + _stack scratch and
+    // the native stack, so even a rebuild-storm allocates zero retained bytes.
+    const scReb = new Scapegoat(512);
+    let screbk = 0;
+    const stepScRebuild = () => {
+        if (scReb.size >= 511) scReb.clear();
+        scReb.set(screbk, screbk & 0xffff); // ascending key -> triggers repeated rebuilds
+        screbk = (screbk + 1) | 0;
+    };
+    // forEach: the O(n) ascending in-order recursive walk through a HOISTED callback that
+    // closes over nothing but the shared accumulator -- no per-call closure alloc.
+    let scfeAcc = 0;
+    function scForEachCb(key, value) { scfeAcc = (scfeAcc + (key | 0) + (value | 0)) | 0; }
+    const stepScForEach = () => { sc.forEach(scForEachCb); };
+    // rangeIter: fully consume a small fixed-width window; the generator is transient
+    // (dropped each call), so retained growth is 0.
+    const stepScRangeIter = () => {
+        const lo = sck & (HMASK >> 1);
+        for (const key of sc.rangeIter(lo, lo + 8)) scacc = (scacc + (key | 0)) | 0;
+        sck = (sck + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -358,7 +436,8 @@ async function main() {
         stepUpdate, stepPrefix, stepAt, stepRangeSum, stepSet,
         stepSegUpdate, stepSegQuery, stepSegAt,
         stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor,
-        stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor]) {
+        stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor,
+        stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -369,7 +448,8 @@ async function main() {
     // iteration budget. rangeIter walks a window and drives the generator protocol,
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
-    for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter]) {
+    for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
+        stepScForEach, stepScRangeIter]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -383,6 +463,8 @@ async function main() {
     if (lacc === 0x7fffffff) throw new Error('unreachable'); // keep lacc live
     if (tracc === 0x7fffffff) throw new Error('unreachable'); // keep tracc live
     if (trfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep trfeAcc live
+    if (scacc === 0x7fffffff) throw new Error('unreachable'); // keep scacc live
+    if (scfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep scfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -431,6 +513,20 @@ async function main() {
             sink = (sink + (sv === undefined ? 0 : sv | 0) + (su === undefined ? 0 : su | 0)) | 0;
         }
         if ((i & 63) === 0) { const key = i & HMASK; if (tr.delete(key)) tr.set(key, i & 0xffff); }
+        // Scapegoat churn every op: an in-place value set, a get and a rank, plus a
+        // delete+re-set every 64th (free/alloc + recursive delete) and a select+successor
+        // every 8th. A rebuild-heavy ascending-insert step every op keeps the _rebuild path
+        // hot inside the GC window. Steady trees, zero alloc.
+        sc.set(i & HMASK, i & 0xffff);
+        sink = (sink + (sc.get(i & HMASK) | 0) + (sc.rank(i & HMASK) | 0)) | 0;
+        if ((i & 7) === 0) {
+            const sv = sc.select(i & (HMASK >> 1));
+            const su = sc.successor(i & HMASK);
+            sink = (sink + (sv === undefined ? 0 : sv | 0) + (su === undefined ? 0 : su | 0)) | 0;
+        }
+        if ((i & 63) === 0) { const key = i & HMASK; if (sc.delete(key)) sc.set(key, i & 0xffff); }
+        if (scReb.size >= 511) scReb.clear();
+        scReb.set(i, i & 0xffff); // ascending -> forces repeated subtree rebuilds
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -449,6 +545,7 @@ async function main() {
     const abSeg = new SegmentTree(1024, 'sum');
     const abSl = new SkipList(1024, 0x1234);
     const abTr = new Treap(1024, 0x1234);
+    const abSc = new Scapegoat(1024);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -487,6 +584,18 @@ async function main() {
         if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
         abTr.clear();
         if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
+        // Scapegoat: same free-list conservation contract. An ASCENDING fill (forces subtree
+        // rebuilds), then a real delete() round trip on half the slots (recursive delete +
+        // possible global rebuild), then a refill, then clear -- the invariant must hold after
+        // each phase (a rebuild that leaked/double-freed a slot would break it here).
+        for (let i = 0; i < 1024; i++) abSc.set(i, i); // ascending -> rebuild-heavy
+        if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abSc.delete((i * 2654435761) & 1023);
+        if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abSc.set((i * 2654435761) & 1023, i);
+        if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
+        abSc.clear();
+        if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -504,7 +613,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

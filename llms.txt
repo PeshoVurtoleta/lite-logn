@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.5.0
+Version: 0.6.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -19,8 +19,8 @@ FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
-adds SkipList; v0.5.0 adds Treap. The roster (one member per session, each landing
-append-only):
+adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat. The roster (one member per
+session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -59,6 +59,22 @@ append-only):
   value in place. split / merge REWIRE in place (O(log n)) so the two treaps SHARE a
   backing arena and CONSUME their inputs. EXPECTED, not worst-case: the MAX single
   insert (rotation chain) is DISCLOSED, never gated. Zero allocation on every hot op.
+- Scapegoat (v0.6.0) -- a DETERMINISTIC, weight-balanced AUGMENTED ordered map (key ->
+  value) that is also an order-statistic tree -- the honest PAIR to Treap. get is
+  WORST-case O(log n) (a hard height bound <= log_{1/alpha}(n) + 1, never merely
+  expected); set / delete are AMORTIZED O(log n) (an occasional subtree rebuild absorbs
+  the imbalance). A subtree-size column adds rank(x) / select(k), O(log n). NO priorities,
+  NO RNG anywhere: the shape is a deterministic function of the insert / delete order.
+  Nodes are slot INDICES in flat typed-array columns (_key / _value / _left / _right /
+  _size) over the SAME private free-list (NodePool); the ZERO-GC rebuild reuses ONE
+  preallocated scratch buffer (_flat) + ONE preallocated index-stack (_stack) -- an
+  iterative Morris-free flatten + a bounded log-depth balanced rebuild on the native
+  stack -- so even a rebuild-heavy trace is 0 B/op. alpha is frozen at construction in the
+  OPEN interval (0.55, 0.75) (both ends throw); default 2/3. Unlike Treap there is NO
+  split / merge (no priority heap to merge by; an honest deterministic split/merge would
+  be O(n) rebuilds) -- the documented asymmetry vs Treap. set updates an existing key's
+  value in place. The amortized-trace witness shows cumulative insert cost/op tracks log n
+  despite the rebuild spikes. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -188,6 +204,39 @@ append-only):
   - `Treap.merge(a, b)` -> Treap. Merge two arena-sharing treaps where every key of a
     < every key of b; O(log n) EXPECTED, CONSUMES both. Non-Treap inputs, treaps from
     different arenas, or an overlapping key range each throw.
+
+- `Scapegoat` -- class. A DETERMINISTIC, weight-balanced AUGMENTED ordered map (key ->
+  value) that is also an order-statistic tree -- the honest PAIR to Treap. A BST on
+  `_key` kept alpha-weight-balanced (get WORST-case O(log n); set / delete AMORTIZED
+  O(log n) via an occasional subtree rebuild); a `_size` subtree-count column adds O(log n)
+  order statistics. NO priorities, NO RNG. Nodes are slot INDICES in flat typed-array
+  columns (`_key` / `_value` Float64, `_left` / `_right` / `_size` Uint32, `NIL = 0`) over
+  a PRIVATE free-list (NodePool); the zero-GC rebuild reuses ONE preallocated `_flat`
+  scratch + ONE `_stack` index-stack (iterative Morris-free flatten + bounded log-depth
+  balanced rebuild on the native stack) -- no heap object, no fresh array, 0 B/op even
+  under a rebuild storm. Keys and values are finite numbers (typeof-guarded before
+  coercion; Symbol / BigInt / NaN / +-Infinity fail closed).
+  - `new Scapegoat(capacity, alpha?)` -- capacity an integer in [1, 2^31-1] (slot indices
+    + subtree counts are Uint32, `NIL = 0` reserves slot 0); alpha the weight-balance
+    factor in the OPEN interval (0.55, 0.75) (both ends throw), frozen at construction;
+    default 2/3. Allocates five columns + a free-list + two rebuild scratch buffers once.
+  - `get(key)` -> value | undefined. Absent -> undefined (no throw).
+  - `has(key)` -> boolean.
+  - `set(key, value)` -> this. Insert, or update the value in place if key exists (no new
+    node, no rebuild). Non-finite key/value throws; a full pool throws.
+  - `delete(key)` -> boolean. Idempotent: false if absent, true if removed.
+  - `rank(x)` -> number. Count of stored keys STRICTLY LESS than x, in [0, size].
+  - `select(k)` -> key | undefined. The k-th smallest key (0-based); undefined if k is out
+    of [0, size). Non-integer k throws.
+  - `successor(key)` -> key | undefined. Smallest key STRICTLY greater than key.
+  - `predecessor(key)` -> key | undefined. Largest key STRICTLY less than key.
+  - `rangeIter(lo, hi)` -> iterator of keys in [lo, hi] INCLUSIVE, ascending; VERSION-
+    STAMPED (structural OR value mutation mid-iteration throws). Bounds may be +-Infinity;
+    NaN or lo > hi throws.
+  - `size` / `capacity` / `alpha` getters; `clear()` -> this (empty, keep capacity);
+    `forEach(fn)` visits (key, value, tree) ascending.
+  - There is deliberately NO `split` / `merge` (the documented asymmetry vs Treap: no
+    priority heap to merge by; an honest deterministic split/merge would be O(n) rebuilds).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

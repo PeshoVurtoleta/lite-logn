@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -172,6 +172,25 @@ export const SKIPLIST_SET_SLOPE_HI = 19.50;        // median 13.93 * 1.4
 export const TREAP_GET_SLOPE_LO = 2.55;            // median 4.25 * 0.6
 export const TREAP_GET_SLOPE_HI = 5.95;            // median 4.25 * 1.4
 
+// --- Scapegoat (v0.6.0): shared R^2 floor, OWN get slope band + sweep (D-S5/0008) ---
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide;
+// Scapegoat's gated op is get, a pure BST descent over a DETERMINISTICALLY weight-balanced
+// tree -- one node touched per level, WORST-CASE O(log n) (height <= log_{1/alpha}(n) + 1,
+// never merely expected). It is gated over the same 2^11..2^17 window Treap.get / SkipList.get
+// use (a pointer-chasing search needs that dynamic range above the timing floor; above it the
+// working set leaves the steady cache band and the fit flakes -- lite-o1 ADR-0004). A scapegoat
+// is MORE balanced than a random treap (shorter descents), so its per-level slope (~4.02) is a
+// touch LOWER than Treap.get's (~4.25) -- expected, which is exactly why only the R^2 floor is
+// shared family-wide and each op declares its own band. Unlike SkipList / Treap, get is WORST-
+// case (deterministic), so there is NO expected-op MAX-single-op disclosure for get; the rebuild
+// spike lives on the AMORTIZED set path and is disclosed by the amortized-trace assertion below
+// (cumulative ascending-insert cost/op tracks log n, never the linear curve a rebuild-less BST
+// degenerates to). Band = median-of-15 fit-runs * [0.6, 1.4] on this machine: MEDIAN slope 4.02
+// ns/level (15 runs spanned 3.82..4.10, R^2 0.965..0.977), centered on the MEDIAN (never a high
+// sample) so a legitimately faster future run is not false-failed.
+export const SCAPEGOAT_GET_SLOPE_LO = 2.41;        // median 4.02 * 0.6
+export const SCAPEGOAT_GET_SLOPE_HI = 5.63;        // median 4.02 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -211,6 +230,18 @@ const SL_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // stays on the small O(n^2) sweep.
 const TR_GET_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 const TR_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// Scapegoat's gated get sweep: the same 2^11..2^17 window (a weight-balanced BST descent has
+// the same pointer-chasing dynamic-range need as Treap.get). Its O(n) foil (a linear scan) stays
+// on the small O(n^2) sweep. The amortized-insert trace uses the same exact-power sweep so the
+// staircase maps cleanly onto the log2(n) axis.
+const SG_GET_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const SG_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+const SG_AMORT_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+// The amortized ns/op ratio ceiling across the sweep: a genuine amortized-O(log n) build stays
+// LOG-like (last/first ~ log2(2^17)/log2(2^11) = 17/11 ~ 1.5x, measured ~1.4..1.7x); a rebuild-
+// LESS BST would degenerate to an O(n)-amortized chain and blow the ratio to ~2^(17-11) = 64x.
+// A fixed, meaningful teeth threshold well between the two -- not a widenable budget.
+const SG_AMORT_RATIO_MAX = 4;
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -696,6 +727,80 @@ function measureTreapGetFoil(n) {
     return elapsed / count;
 }
 
+// --- Scapegoat measurement (get hot op, its O(n) foil, amortized-insert trace) ---
+// The tree is built OUTSIDE timing and held at steady size n; the timed window is the get
+// descent only, hammered over 1024 random resident targets so many BST paths are averaged.
+// Same effort as Treap.get (min-over-batches rejects ambient interference). Scapegoat has NO
+// RNG, so its get line is a pure DETERMINISTIC worst-case O(log n) descent.
+const SG_ITERS = 200000;   // hammered ops per timed batch
+const SG_BATCH = 25;       // min-over-batches
+const SG_TARGETS = 1024;   // distinct random targets cycled per batch (pow2 mask)
+const SG_AMORT_BATCH = 8;  // min-over-batches for the amortized ascending-build trace
+
+// get: hammer a search for random resident keys over a dense 0..n-1 tree. Return the MIN
+// per-op time over SG_BATCH batches.
+function measureScapegoatGet(n) {
+    const sg = new Scapegoat(n);
+    for (let i = 0; i < n; i++) sg.set(i, i);
+    const tg = new Float64Array(SG_TARGETS);
+    const rnd = mulberry32(0x33A5 ^ n);
+    for (let i = 0; i < SG_TARGETS; i++) tg[i] = (rnd() * n) | 0;
+    let sink = 0;
+    for (let w = 0; w < SG_ITERS; w++) sink += sg.get(tg[w & (SG_TARGETS - 1)]); // warm
+    let best = Infinity;
+    for (let b = 0; b < SG_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SG_ITERS; i++) sink += sg.get(tg[i & (SG_TARGETS - 1)]);
+        const e = (nowNs() - t0) / SG_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// get FOIL: a naive LINEAR SCAN for the max key over a plain Float64Array = O(n) per search
+// (the default before you know the balanced-BST trick). Exponential on the log2(n) axis, so a
+// straight-line fit MISSES the R^2 floor. O(n^2) total.
+function measureScapegoatGetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = i;
+    const target = n - 1;
+    { let idx = -1; for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } } if (idx < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let idx = -1;
+            for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } }
+            sink += idx;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// amortized-insert trace: the cumulative ns/op of an ASCENDING build of n keys -- the REBUILD-
+// HEAVY worst case (each rebuild absorbs the imbalance). Reuses ONE tree, clear()ing between
+// batches (outside timing), min-over-batches. Returns the amortized per-insert ns. Fitting this
+// across the sweep shows it tracks a LOG curve despite the rebuild spikes (the amortization
+// theorem made visible); the O(n)-amortized chain a rebuild-less BST degenerates to would NOT.
+function measureScapegoatAmortized(n) {
+    const sg = new Scapegoat(n);
+    for (let k = 0; k < n; k++) sg.set(k, k); sg.clear();     // warm
+    let best = Infinity;
+    for (let b = 0; b < SG_AMORT_BATCH; b++) {
+        sg.clear();
+        const t0 = nowNs();
+        for (let k = 0; k < n; k++) sg.set(k, k);
+        const e = (nowNs() - t0) / n;
+        if (e < best) best = e;
+    }
+    return best;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -802,10 +907,22 @@ export const MEMBERS = [
         foil: measureTreapGetFoil,
         foilName: 'linear scan (O(n) per search)',
     },
+    {
+        name: 'Scapegoat',
+        op: 'get',
+        sweep: SG_GET_SWEEP,
+        foilSweep: SG_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0008 inherits D-08)
+        slopeLo: SCAPEGOAT_GET_SLOPE_LO,       // own band
+        slopeHi: SCAPEGOAT_GET_SLOPE_HI,
+        run: measureScapegoatGet,
+        foil: measureScapegoatGetFoil,
+        foilName: 'linear scan (O(n) per search)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.5.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.6.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -865,6 +982,27 @@ async function main() {
         process.stdout.write(
             'Treap MAX single insert observed = ' + TREAP_MAX_INSERT_NS.toFixed(0) +
             ' ns (expected O(log n) -- disclosed, not gated)\n');
+    }
+    // Scapegoat amortized-trace assertion (D-S5): the cumulative ascending-insert cost/op --
+    // the REBUILD-HEAVY worst case -- must track a LOG curve, NOT the linear curve a rebuild-less
+    // BST degenerates to. Robust, non-flaky gate: the largest/smallest amortized ns/op ratio over
+    // 2^11..2^17 stays LOG-like (< SG_AMORT_RATIO_MAX ~ 4x), where an O(n)-amortized chain would
+    // blow it to ~2^(17-11) = 64x. The fitted R^2/slope are printed as a corroborating disclosure.
+    {
+        const xs = [], ys = [];
+        for (const n of SG_AMORT_SWEEP) { xs.push(Math.log2(n)); ys.push(measureScapegoatAmortized(n)); }
+        const af = fitLogLinear(xs, ys);
+        const ratio = ys[0] > 0 ? ys[ys.length - 1] / ys[0] : Infinity;
+        const amortOk = ratio > 0 && ratio < SG_AMORT_RATIO_MAX;
+        ok = ok && amortOk;
+        process.stdout.write(
+            'Scapegoat amortized ascending-insert (rebuild-heavy) ns/op ratio ' + ratio.toFixed(2) +
+            'x over 2^11..2^17 (log-like; an O(n) chain would be ~' + (2 ** (17 - 11)) + 'x)' +
+            ' fit R^2=' + af.r2.toFixed(4) + ' slope=' + af.slope.toFixed(2) + ' ns/level  ' +
+            (amortOk ? 'TRACKS-LOG' : 'LINEAR-BLOWUP') + '\n');
+        if (!amortOk) process.stderr.write(
+            '  violation Scapegoat amortized insert ratio ' + ratio.toFixed(2) + 'x >= ' +
+            SG_AMORT_RATIO_MAX + ' (amortization broke: rebuilds not absorbing the imbalance)\n');
     }
     process.stdout.write('WITNESS ' + (ok ? 'ok' : 'FAIL') + '\n');
     if (!ok) process.exitCode = 1;

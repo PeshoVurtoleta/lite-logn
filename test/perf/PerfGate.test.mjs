@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -429,6 +429,126 @@ const trOrderMix = {
     statsOf(s) { return { grows: trGrows(s) }; },
 };
 
+/** Scapegoat's zero-alloc counter: its five typed-array columns, the private pool's
+ *  free-stack, PLUS the two rebuild scratch buffers (_flat + _stack) -- all fixed at
+ *  construction, so the delta across the window must be 0 even under a rebuild storm. */
+function sgGrows(s) {
+    const t = s.sg;
+    return t._key.buffer.byteLength + t._value.buffer.byteLength +
+        t._left.buffer.byteLength + t._right.buffer.byteLength +
+        t._size.buffer.byteLength + t._pool._free.buffer.byteLength +
+        t._flat.buffer.byteLength + t._stack.buffer.byteLength;
+}
+
+/** A Scapegoat prefilled to half capacity (a warmed, stable tree). */
+function sgFill() {
+    const sg = new Scapegoat(CAP);
+    for (let i = 0; i < (CAP >> 1); i++) sg.set(i, (i * 2654435761) & 0xffff);
+    return sg;
+}
+
+const SGMASK = (CAP >> 1) - 1; // keys 0..CAP/2-1 resident
+
+/**
+ * get churn: a hit on a resident cycling key, folded into an int32 accumulator. The
+ * deterministic BST descent chases slot INDICES (no heap object); zero allocation.
+ */
+const sgGetChurn = {
+    name: 'Scapegoat get churn',
+    setup() { return { sg: sgFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sg = s.sg;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) { acc = (acc + (sg.get(t & SGMASK) | 0)) | 0; t = (t + 1) | 0; }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: sgGrows(s) }; },
+};
+
+/**
+ * set churn: an in-place value update of a resident cycling key (no new node, no rebuild)
+ * -- the pure set hot path, zero allocation.
+ */
+const sgSetChurn = {
+    name: 'Scapegoat set churn (in-place update)',
+    setup() { return { sg: sgFill(), tick: 0 }; },
+    hot(s, n) {
+        const sg = s.sg;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { sg.set(t & SGMASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: sgGrows(s) }; },
+};
+
+/**
+ * delete + re-set churn: addressable delete then re-insert of the SAME key -> steady size,
+ * exercising the free-list free/alloc + the recursive delete/insert (native call stack, no
+ * heap object). Zero allocation.
+ */
+const sgDeleteChurn = {
+    name: 'Scapegoat delete + re-set churn',
+    setup() { return { sg: sgFill(), tick: 0 }; },
+    hot(s, n) {
+        const sg = s.sg;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & SGMASK;
+            if (sg.delete(key)) sg.set(key, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: sgGrows(s) }; },
+};
+
+/**
+ * REBUILD-HEAVY churn: a dedicated small tree fed ever-increasing ASCENDING keys and wrap-
+ * cleared when full -- the pathological trace that forces the subtree REBUILD (_flatten +
+ * _buildBalanced) to fire repeatedly. The rebuild reuses the preallocated _flat + _stack
+ * scratch and the native stack, so the buffer byte lengths never grow: zero allocation even
+ * under a rebuild storm. This is the load-bearing scavenge-clean proof for the rebuild path.
+ */
+const sgRebuildChurn = {
+    name: 'Scapegoat rebuild-heavy ascending-insert churn',
+    setup() { return { sg: new Scapegoat(512), key: 0 }; },
+    hot(s, n) {
+        const sg = s.sg;
+        let key = s.key | 0;
+        for (let i = 0; i < n; i++) {
+            if (sg.size >= 511) sg.clear();
+            sg.set(key, key & 0xffff);
+            key = (key + 1) | 0;
+        }
+        s.key = key | 0;
+    },
+    statsOf(s) { return { grows: sgGrows(s) }; },
+};
+
+/**
+ * rank / select / successor mix: the order-statistic + ordered lookups over a resident
+ * cycling key, folded into an int32 accumulator. All O(log n) descents; zero allocation.
+ */
+const sgOrderMix = {
+    name: 'Scapegoat rank/select/successor mix',
+    setup() { return { sg: sgFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sg = s.sg;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & SGMASK;
+            acc = (acc + (sg.rank(key) | 0)) | 0;
+            const sv = sg.select(key & (SGMASK >> 1));
+            acc = (acc + (sv === undefined ? 0 : sv | 0)) | 0;
+            const su = sg.successor(key);
+            acc = (acc + (su === undefined ? 0 : su | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: sgGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -462,6 +582,7 @@ zgcSuite({
         fenUpdateChurn, fenPrefixChurn, fenAtRangeMix,
         segUpdateChurn, segQueryChurn, segGrowsMix,
         slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn,
-        trGetChurn, trSetChurn, trDeleteChurn, trOrderMix],
+        trGetChurn, trSetChurn, trDeleteChurn, trOrderMix,
+        sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix],
     mustFail: [teethMustFailAlloc],
 });

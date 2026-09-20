@@ -6,6 +6,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-20
+
+### Added
+
+- **Scapegoat** -- the sixth member and the family's DETERMINISTIC balanced BST, the
+  honest PAIR to Treap: a weight-balanced binary search tree that is ALSO an
+  order-statistic tree (an AUGMENTED ordered map key -> value). Where a treap randomizes
+  its shape to be balanced IN EXPECTATION, a scapegoat keeps a hard WORST-CASE height
+  bound -- so `get` is O(log n) WORST-case (never merely expected) -- and pays for it with
+  AMORTIZED O(log n) `set` / `delete`, where an occasional subtree rebuild absorbs the
+  imbalance. A subtree-size column `_size` (maintained in the same pass as every link
+  rewrite and every rebuild) adds O(log n) order statistics. Surface: `get` / `has` /
+  `set` (updates the value in place on an existing key) / `delete` (idempotent) /
+  `rank(x)` (count of keys STRICTLY less than x) / `select(k)` (the k-th smallest key,
+  0-based) / `successor` (strictly greater) / `predecessor` (strictly less) /
+  `rangeIter(lo, hi)` (a VERSION-STAMPED iterator over `[lo, hi]` inclusive, ascending;
+  `+-Infinity` bounds allowed, structural OR value mutation mid-iteration throws) /
+  `forEach` / `clear`, and `size` / `capacity` / `alpha` getters. Keys and values are
+  finite numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN / +-Infinity
+  fail closed with a `[lite-logn]` throw).
+- **NO priorities, NO RNG (fully deterministic).** Unlike Treap, Scapegoat draws no random
+  priority and uses no LCG / `Math.random` anywhere: the tree shape is a deterministic
+  function of the insert / delete order. `alpha` (the weight-balance factor) is validated
+  to the OPEN interval `(0.55, 0.75)` -- both ends throw -- and frozen at construction
+  (default `2/3`); the alpha-derived depth constant `_invAlpha = 1/alpha` is ctor-cached so
+  the hot insert path uses no per-op `Math.log` (the depth test is `_invAlpha^d > size`).
+- **Zero-GC rebuild over preallocated scratch (the load-bearing design call).** No fresh
+  array per rebuild: ONE `_flat` (`Uint32Array(capacity)`) + ONE `_stack`
+  (`Uint32Array(capacity+1)`) are allocated at construction and reused every rebuild. An
+  ITERATIVE, Morris-free in-order flatten (via `_stack`) writes sorted slot indices into
+  `_flat`; a bounded log-depth balanced rebuild re-links `_left` / `_right` / `_size` on
+  the native call stack. Proven 0 B/op even under a rebuild-HEAVY ascending-insert trace by
+  the torture gate and a dedicated PerfGate scavenge-clean scenario
+  (decisions/0008-scapegoat.md).
+- **Third bind of the shared NodePool.** Nodes are slot INDICES in five flat columns
+  (`_key` / `_value` Float64; `_left` / `_right` / `_size` Uint32, `NIL = 0`) over the SAME
+  private free-list (`NodePool`) SkipList and Treap ship -- design-parity, not a fork or a
+  runtime dep. The conservation invariant `activeSlots + freeListLength === capacity` holds
+  after every op, INCLUDING across rebuild storms. `SG_MAX_CAPACITY = 0x7FFFFFFF` (2^31 - 1:
+  slot indices + subtree counts fit a `Uint32`).
+- **The documented asymmetry vs Treap: NO `split` / `merge`.** A scapegoat has no priority
+  heap to merge by, and an honest deterministic split/merge would be O(n) rebuilds
+  (forfeiting the sub-linear headline), so Scapegoat's surface is the ordered-map +
+  order-statistic core and split/merge are deliberately absent -- named on the public
+  surface (JSDoc + `llms.txt` + README + the `.d.ts`), not hidden.
+- **Witness: `Scapegoat.get` gated + the amortized-trace assertion.** `get` (a
+  deterministic weight-balanced descent) is gated ON the O(log n) line in its own
+  calibrated band `SCAPEGOAT_GET_SLOPE_LO/HI = [2.41, 5.63]` (median-of-15 slope 4.02
+  ns/level * [0.6, 1.4], MEDIAN-centered per ADR-0004), inheriting the FROZEN shared R^2
+  floor 0.958; its O(n) linear-scan foil leaves the line. The rebuild spike lives on the
+  AMORTIZED `set` path and is NEVER gated as a per-op line; instead the amortized-trace
+  assertion proves the amortization -- the cumulative ascending-insert (rebuild-heavy)
+  cost/op tracks a LOG curve (last/first ratio ~1.5x, gated `< 4x`) where a rebuild-less
+  BST would blow to ~64x. The five prior members' bands are UNTOUCHED.
+
+### Notes
+
+- Append-only: `LogN.js` gains `SG_MAX_CAPACITY` + the `Scapegoat` class after Treap;
+  BinaryHeap / Fenwick / SegmentTree / SkipList / Treap are BYTE-IDENTICAL (only the
+  `VERSION` const changes). The repo-only benchmark admits Scapegoat as the 6th SUBJECT
+  (matrix 5x8=40 -> 6x8=48, a new `OLOGN_AMORTIZED` honesty class for `set` / `delete`).
+
 ## [0.5.0] - 2026-09-20
 
 ### Added

@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -109,3 +109,33 @@ tr.set(0, 'x');
 
 // @ts-expect-error -- Treap key must be a number.
 tr.get('x');
+
+// --- Scapegoat -------------------------------------------------------------
+const sg = new Scapegoat(1024, 2 / 3);
+const sgDefault = new Scapegoat(1024); // alpha defaults to 2/3
+void sgDefault;
+const sgSet: Scapegoat = sg.set(3, 2.5);          // fluent -> this
+const sgClear: Scapegoat = sg.clear();            // fluent -> this
+const sgg: number | undefined = sg.get(3);
+const sghas: boolean = sg.has(3);
+const sgdel: boolean = sg.delete(3);
+const sgrank: number = sg.rank(3);
+const sgsel: number | undefined = sg.select(0);
+const sgsucc: number | undefined = sg.successor(3);
+const sgpred: number | undefined = sg.predecessor(3);
+const sgsize: number = sg.size;
+const sgcap: number = sg.capacity;
+const sgalpha: number = sg.alpha;
+sg.forEach((key, value, self) => { void key; void value; void self; });
+for (const k of sg.rangeIter(-Infinity, Infinity)) { void k; }
+void sgSet; void sgClear; void sgg; void sghas; void sgdel; void sgrank; void sgsel;
+void sgsucc; void sgpred; void sgsize; void sgcap; void sgalpha;
+
+// @ts-expect-error -- set value must be a number.
+sg.set(0, 'x');
+
+// @ts-expect-error -- Scapegoat key must be a number.
+sg.get('x');
+
+// @ts-expect-error -- Scapegoat has no split (the documented asymmetry vs Treap).
+sg.split(5);

@@ -23,16 +23,17 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The five shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap'];
+/** The six shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat'];
 
-/** The eight gated D1 witness op-rows (member.op), in build order. */
+/** The nine gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
     'SegmentTree.update', 'SegmentTree.query',
     'SkipList.get', 'SkipList.set',
     'Treap.get',
+    'Scapegoat.get',
 ];
 
 /** The eight measurement dimensions. */
@@ -57,6 +58,7 @@ export const BASELINE = {
     SegmentTree: 'whole-tree-rebuild/scan-fold',
     SkipList: 'sorted-array-insert/linear-scan',
     Treap: 'linear-scan',
+    Scapegoat: 'linear-scan',
 };
 
 /**
@@ -75,6 +77,9 @@ export const COUNTER_FOIL = {
     // is a one-time family illustration carried by SkipList (the family's ordered
     // representative); Treap reads NA here to avoid a redundant second Map comparison.
     Treap: NA,
+    // Scapegoat is the family's DETERMINISTIC ordered map with the same Map order-tax, but the
+    // counter-foil is the one-time family illustration carried by SkipList; Scapegoat reads NA.
+    Scapegoat: NA,
 };
 
 /**
@@ -126,6 +131,12 @@ export const RATIONALE = {
             'BST; the treap buys O(log n) get/rank/select/successor. The Map order-tax counterpoint is ' +
             'carried once by SkipList (the family\'s ordered representative), so Treap does not repeat it.',
     },
+    Scapegoat: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear scan over a plain array (O(n) per lookup) is the honest default before the balanced ' +
+            'BST; the scapegoat buys WORST-case O(log n) get + amortized O(log n) set/delete + O(log n) ' +
+            'rank/select. The Map order-tax counterpoint is carried once by SkipList, so Scapegoat does not repeat it.',
+    },
 };
 
 /**
@@ -169,14 +180,14 @@ export function supportsKeyType(member, keyType) {
 export function supportsWorkload(member, workload) {
     if (!SUBJECTS.includes(member)) return false;
     if (workload === 'churn') return true;
-    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap';
+    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap' || member === 'Scapegoat';
     return false;
 }
 
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (5 x 8 = 40 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (6 x 8 = 48 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -217,6 +228,12 @@ export const OLOGN_WORST = 'O(log n) worst-case';
 /** The O(log n) honesty class label for an EXPECTED (randomized-tower) op. */
 export const OLOGN_EXPECTED = 'O(log n) expected';
 
+/** The O(log n) honesty class label for an AMORTIZED (rebuild-absorbed) op -- Scapegoat's
+ *  DETERMINISTIC set/delete pay for their hard worst-case height bound with an occasional
+ *  subtree rebuild, so the per-op cost is O(log n) AMORTIZED, not per-op worst-case. This is
+ *  a THIRD honesty class distinct from both worst-case and (randomized) expected. */
+export const OLOGN_AMORTIZED = 'O(log n) amortized';
+
 /**
  * The per-op honesty table, keyed `member.op`. Covers the 8 gated witness op-rows
  * (Matrix.OP_ROWS) PLUS the four non-gated-but-honest ops the family surface exposes
@@ -238,6 +255,9 @@ export const OP_CLASS = Object.freeze({
     'Treap.get': OLOGN_EXPECTED,      // randomized priority-heap height -> EXPECTED (the gated row)
     'Treap.set': OLOGN_EXPECTED,      // ditto (+ a DISCLOSED max-single-insert rotation-chain tail)
     'Treap.delete': OLOGN_EXPECTED,   // ditto
+    'Scapegoat.get': OLOGN_WORST,     // DETERMINISTIC weight-balanced height -> WORST-case (the gated row)
+    'Scapegoat.set': OLOGN_AMORTIZED, // an occasional subtree rebuild absorbs the imbalance -> AMORTIZED
+    'Scapegoat.delete': OLOGN_AMORTIZED, // ditto (a global rebuild fires when the tree shrinks)
 });
 
 // ===========================================================================
@@ -255,8 +275,8 @@ export const OP_CLASS = Object.freeze({
 // length/prefix/query/get/has + forEach/rangeIter) is not a reuse invariant at all.
 // ===========================================================================
 
-/** The four members whose clear()+reuse cycle is an elevated first-class witness. */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap'];
+/** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are
