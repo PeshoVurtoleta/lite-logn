@@ -1,10 +1,11 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.6.0 six members have
-shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat -- so
-this guide carries their per-member sections. It is NOT an API encyclopedia (that
-is the README + `LogN.d.ts`); it answers "which member, and is my logarithm real?"
+avoid, and how to measure the logarithm yourself. At v0.7.0 seven members have
+shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat and
+MinMaxHeap -- so this guide carries their per-member sections. It is NOT an API
+encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
+my logarithm real?"
 
 Scope discipline (mirrors lite-o1's GUIDE): a decision flowchart + a picker
 table up top, then reach-for / avoid + measure-it per member. No re-documenting
@@ -51,9 +52,18 @@ START -- what do you need?
 |   merge) on an ordered map?                                   -> Treap (exp)       [v0.5.0]
 |
 +-- ORDER STATISTICS (rank / select) with a HARD WORST-CASE
-    per-lookup bound (no unlucky-tail spike), and set/delete
-    can be amortized?                                           -> Scapegoat (wc/am) [v0.6.0]
+|   per-lookup bound (no unlucky-tail spike), and set/delete
+|   can be amortized?                                           -> Scapegoat (wc/am) [v0.6.0]
+|
++-- BOTH the min AND the max, repeatedly, with insert
+    (a double-ended priority queue)?                           -> MinMaxHeap (wc)   [v0.7.0]
 ```
+
+Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
+addressable `changeKey` / `remove` by entity id; **MinMaxHeap** when you need BOTH
+extremes from one structure (a DEPQ: O(1) `peekMin` AND `peekMax`, O(log n)
+`push` / `popMin` / `popMax`) and do NOT need addressable reprioritize/remove (its
+id is an opaque, non-unique payload -- no reverse map).
 
 Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
 / range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
@@ -79,10 +89,11 @@ and Scapegoat add the order-statistic column, SkipList is the leaner plain store
 | Ordered map / successor / range iterate | SkipList | expected O(log n) | 0.4.0 |
 | Ordered map + rank / select / split / merge | Treap | expected O(log n) | 0.5.0 |
 | Ordered map + rank / select, WORST-case get (no RNG) | Scapegoat | worst-case O(log n) get, amortized O(log n) set/delete | 0.6.0 |
+| BOTH min AND max + insert (a double-ended PQ) | MinMaxHeap | O(1) peekMin/peekMax, O(log n) push/popMin/popMax | 0.7.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's and Scapegoat's are below).
+SkipList's, Treap's, Scapegoat's and MinMaxHeap's are below).
 
 ---
 
@@ -335,6 +346,43 @@ curve (last/first ratio `< 4x` over `[2^11, 2^17]`), proving the rebuilds amorti
 `node --expose-gc test/torture.mjs` proves every hot op -- INCLUDING a rebuild-heavy
 ascending-insert lane -- at 0 B/op (the rebuild reuses preallocated scratch, never a
 fresh array).
+
+---
+
+## MinMaxHeap -- a double-ended priority queue (both extremes from one heap)
+
+**Reach for it when** you need BOTH the smallest AND the largest element, repeatedly, with
+insert -- a double-ended priority queue (DEPQ). MinMaxHeap serves both ends from ONE
+array-embedded binary heap whose levels alternate min / max: `peekMin` / `peekMax` /
+`peekMinKey` / `peekMaxKey` are O(1), and `push` / `popMin` / `popMax` are all WORST-case
+O(log n). Canonical uses: a bounded "keep the k best AND drop the worst" buffer, a
+sliding min-and-max window, a median-ish / trimming structure that evicts from both ends,
+any priority workload that pops from the top AND the bottom. It is the id+key idiom
+BinaryHeap uses (an opaque Uint32 payload + a finite-number key), so it stores a payload
+per entry without object nodes.
+
+**Avoid it when:**
+
+- You only ever need ONE extreme (min OR max). **BinaryHeap** (v0.1.0) is the leaner
+  single-ended heap -- and it is ALSO the one to reach for when you need addressable
+  `changeKey` / `remove` by entity id: MinMaxHeap is deliberately NON-addressable (no
+  reverse map), so it has no `changeKey` / `remove`, and its id is an opaque, NON-unique
+  payload (duplicates allowed).
+- You need to reprioritize or remove an arbitrary element. MinMaxHeap cannot (no `_pos`
+  map) -- use **BinaryHeap** for the addressable priority queue.
+- Your priorities are small bounded integers -> `@zakkster/lite-o1` `BucketQueue` (O(1)),
+  not a comparator heap's O(log n).
+
+**Measure it yourself:** `npm run witness` fits `popMin` (the full-height level-aware
+trickle-down) against `nsPerOp = intercept + slope*log2(n)`; it must clear the shared R^2
+floor (0.958) and sit inside its own band (`popMin [6.18, 14.42]` ns/level -- a touch
+ABOVE BinaryHeap.pop's because a min-max trickle-down compares against up to six
+descendants per level; see [`decisions/0009-minmaxheap.md`](./decisions/0009-minmaxheap.md)),
+over the `[1e4, 1e6]` sweep. The O(n) linear min-scan-and-splice foil must MISS the floor.
+push / popMin / popMax are ALL worst-case O(log n), so there is no expected-op
+MAX-single-op bar. `node --expose-gc test/torture.mjs` proves the popMin / popMax / mixed
+push+popMin+popMax churn and the peek reads at 0 B/op (hole-punching sifts, only local
+scalar temporaries).
 
 ---
 

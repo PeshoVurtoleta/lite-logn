@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.6.0
+Version: 0.7.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -19,8 +19,8 @@ FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
-adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat. The roster (one member per
-session, each landing append-only):
+adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap. The
+roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -75,6 +75,19 @@ session, each landing append-only):
   be O(n) rebuilds) -- the documented asymmetry vs Treap. set updates an existing key's
   value in place. The amortized-trace witness shows cumulative insert cost/op tracks log n
   despite the rebuild spikes. Zero allocation on every hot op.
+- MinMaxHeap (v0.7.0) -- a DOUBLE-ENDED priority queue (DEPQ) held in ONE array-embedded
+  binary heap whose levels ALTERNATE min / max (Atkinson et al. 1986). Even depth is a MIN
+  level, odd depth a MAX level, so the minimum is the root and the maximum is the LARGER of
+  the root's up-to-two children: peekMin / peekMax are O(1); push / popMin / popMax are all
+  WORST-case O(log n) from that single heap (no second heap, no paired-heap correspondence).
+  Two parallel typed-array columns (`_key` Float64, `_id` Uint32) in the BinaryHeap id+key
+  idiom; the id is an OPAQUE Uint32 payload in [0, 2^32) (NOT unique, no reverse map), so
+  there is deliberately NO changeKey / remove -- the documented asymmetry vs BinaryHeap.
+  Level parity is `((31 - Math.clz32(i + 1)) & 1) === 0` (min iff even depth), computed
+  zero-alloc; the sifts are hole-punching (one write per level). Keys are finite numbers
+  (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed). This is
+  the classic one-element-per-node min-max heap only; the interval-heap DEPQ is deferred.
+  Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -237,6 +250,26 @@ session, each landing append-only):
     `forEach(fn)` visits (key, value, tree) ascending.
   - There is deliberately NO `split` / `merge` (the documented asymmetry vs Treap: no
     priority heap to merge by; an honest deterministic split/merge would be O(n) rebuilds).
+
+- `MinMaxHeap` -- class. A DOUBLE-ENDED priority queue (DEPQ) in ONE array-embedded binary
+  heap whose levels ALTERNATE min / max (Atkinson et al. 1986). The minimum is the root; the
+  maximum is the larger of the root's up-to-two children. Two parallel typed-array columns
+  (`_key` Float64, `_id` Uint32); the id is an OPAQUE Uint32 payload in [0, 2^32) (not unique,
+  no reverse map). Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt /
+  NaN / +-Infinity fail closed). Non-addressable: deliberately NO changeKey / remove.
+  - `new MinMaxHeap(capacity)` -- capacity an integer in [1, 2^31-1]. Allocates the two typed
+    arrays once. NO `kind` argument (a DEPQ serves both ends).
+  - `push(id, key)` -> void. id integer in [0, 2^32); key finite. The key is checked FIRST,
+    then the id, then a full heap; each throws `[lite-logn]` as a no-op (size unchanged).
+  - `popMin()` -> id | undefined. Removes the minimum; undefined if empty (no throw).
+  - `popMax()` -> id | undefined. Removes the maximum; undefined if empty (no throw).
+  - `peekMin()` / `peekMax()` -> id | undefined. `peekMinKey()` / `peekMaxKey()` -> key |
+    undefined. All O(1), read-only, undefined if empty (never throw).
+  - `size` / `capacity` getters; `clear()`; `forEach(fn)` and `[Symbol.iterator]()` yield
+    live ids in UNSPECIFIED (heap-array) order -- NOT sorted / pop order.
+  - `MinMaxHeap.build(ids, keys, capacity)` -> MinMaxHeap. Floyd O(n) bulk build from parallel
+    arrays (deepest-first, level-aware sift-down); fails closed on non-array-like / length
+    mismatch, count > capacity, out-of-range id, or non-finite key.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

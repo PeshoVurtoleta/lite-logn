@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -135,6 +135,16 @@ async function main() {
             sc.successor(3);
             sc.delete(5);
             tracker.track(sc, noopRelease, 5 * CYCLES + i, { audit: true });
+            // A fresh MinMaxHeap per cycle, exercised (both ends) then dropped. Same held-
+            // value contract: a MinMaxHeap owns only its two typed arrays (no external
+            // resource), so the no-op cleanup never defeats finalization.
+            const mmh = new MinMaxHeap(64);
+            for (let k = 0; k < 40; k++) mmh.push(k & 63, (k * 2654435761) & 0xffff);
+            mmh.popMin();
+            mmh.popMax();
+            mmh.peekMin();
+            mmh.peekMax();
+            tracker.track(mmh, noopRelease, 6 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -419,6 +429,39 @@ async function main() {
         sck = (sck + 1) | 0;
     };
 
+    // MinMaxHeap: one out-of-loop DEPQ prefilled to capacity. Each lane is a real hot op
+    // (a size-preserving pop+push pair) that MUST allocate zero bytes -- the two typed
+    // arrays are fixed at construction; the hole-punching sifts use only local scalars.
+    const mmh = new MinMaxHeap(CAP);
+    for (let i = 0; i < CAP; i++) mmh.push(i & 0xffff, (i * 2654435761) & 0xffff);
+
+    let mk = (VERSION.length | 0), macc = 0;
+    // push/popMin churn: pop the minimum, push a fresh id/key back -> steady full heap.
+    const stepMmhPopMin = () => {
+        const id = mmh.popMin();
+        mmh.push(id, (mk * 2654435761) & 0xffff);
+        mk = (mk + 1) | 0;
+    };
+    // push/popMax churn: pop the maximum, push a fresh id/key back -> steady full heap.
+    const stepMmhPopMax = () => {
+        const id = mmh.popMax();
+        mmh.push(id, (mk * 40503) & 0xffff);
+        mk = (mk + 1) | 0;
+    };
+    // mixed churn: pop BOTH ends then push both back -> steady full heap, both sifts hot.
+    const stepMmhMixed = () => {
+        const lo = mmh.popMin();
+        const hi = mmh.popMax();
+        mmh.push(lo, (mk * 2246822519) & 0xffff);
+        mmh.push(hi, (mk * 2654435761) & 0xffff);
+        mk = (mk + 1) | 0;
+    };
+    // read mix: peekMin / peekMax / peekMinKey / peekMaxKey folded into an accumulator.
+    const stepMmhRead = () => {
+        macc = (macc + mmh.peekMin() + mmh.peekMax() + (mmh.peekMinKey() | 0) + (mmh.peekMaxKey() | 0)) | 0;
+        mk = (mk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -437,7 +480,8 @@ async function main() {
         stepSegUpdate, stepSegQuery, stepSegAt,
         stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor,
         stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor,
-        stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild]) {
+        stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild,
+        stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -465,6 +509,7 @@ async function main() {
     if (trfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep trfeAcc live
     if (scacc === 0x7fffffff) throw new Error('unreachable'); // keep scacc live
     if (scfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep scfeAcc live
+    if (macc === 0x7fffffff) throw new Error('unreachable'); // keep macc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -527,6 +572,12 @@ async function main() {
         if ((i & 63) === 0) { const key = i & HMASK; if (sc.delete(key)) sc.set(key, i & 0xffff); }
         if (scReb.size >= 511) scReb.clear();
         scReb.set(i, i & 0xffff); // ascending -> forces repeated subtree rebuilds
+        // MinMaxHeap churn every op: pop the min and push a fresh id/key back (steady full
+        // heap), plus a popMax+push every 8th (the other trickle-down) and a peek-both every
+        // 64th. Steady DEPQ, zero alloc.
+        { const id = mmh.popMin(); mmh.push(id, (i * 2654435761) & 0xffff); sink = (sink + id) | 0; }
+        if ((i & 7) === 0) { const id = mmh.popMax(); mmh.push(id, (i * 40503) & 0xffff); sink = (sink + id) | 0; }
+        if ((i & 63) === 0) sink = (sink + mmh.peekMin() + mmh.peekMax()) | 0;
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -546,6 +597,7 @@ async function main() {
     const abSl = new SkipList(1024, 0x1234);
     const abTr = new Treap(1024, 0x1234);
     const abSc = new Scapegoat(1024);
+    const abMmh = new MinMaxHeap(1024);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -596,6 +648,10 @@ async function main() {
         if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
         abSc.clear();
         if (abSc._pool.activeSlots + abSc._pool.freeListLength !== abSc._pool.capacity) conservationOk = false;
+        // MinMaxHeap: fixed two typed arrays, no free-list. A full fill then bulk clear
+        // reuses the SAME backing store, so arrayBuffers must not grow across soak cycles.
+        for (let i = 0; i < 1024; i++) abMmh.push(i & 0xffff, (i * 2654435761) & 0xffff);
+        abMmh.clear();
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -613,7 +669,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

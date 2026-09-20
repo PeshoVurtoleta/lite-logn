@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -191,6 +191,27 @@ export const TREAP_GET_SLOPE_HI = 5.95;            // median 4.25 * 1.4
 export const SCAPEGOAT_GET_SLOPE_LO = 2.41;        // median 4.02 * 0.6
 export const SCAPEGOAT_GET_SLOPE_HI = 5.63;        // median 4.02 * 1.4
 
+// --- MinMaxHeap (v0.7.0): shared R^2 floor, OWN popMin slope band (D-M5 / 0009) ------
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide;
+// MinMaxHeap's gated op is popMin (delete-min -- the full-height level-aware trickle-down,
+// the min-max heap's tallest honest walk, the exact analogue of BinaryHeap's gated POP). It
+// is a DEPQ (double-ended PQ) whose push / popMin / popMax are all WORST-case O(log n), so
+// there is deliberately NO expected-op MAX-single-op disclosure line (unlike SkipList /
+// Treap). Gated over the same steady [1e4 .. 1e6] band BinaryHeap.pop uses (the L1 micro-
+// floor below and the memory wall above ~1e6 both flake the fit -- lite-o1 ADR-0004). A
+// min-max trickle-down compares against up to SIX descendants (2 children + 4 grandchildren)
+// per level -- more work per level than a plain binary heap's two-child sift -- so its
+// per-level slope (~10.30) sits a touch ABOVE BinaryHeap.pop's (~9.60) yet within the same
+// family shape; expected, which is why only the R^2 floor is shared and each op declares its
+// own band. Band = median-of-15 fit-runs * [0.6, 1.4] on this machine (recorded in
+// decisions/0009). The 15 popMin slope samples (ns/level) over sweep [1e4,3e4,1e5,3e5,1e6]:
+//   9.38 10.49 10.49 9.96 10.44 10.09 9.93 10.30 10.35 10.16 9.94 9.97 10.59 10.43 10.40
+// with R^2 0.9897..0.9991 (every run >= the 0.958 floor); MEDIAN slope = 10.30 ns/level.
+// Centered on the MEDIAN (never a high sample) so a legitimately faster future run is not
+// false-failed; the R^2 floor independently rejects any non-log shape.
+export const MINMAXHEAP_POPMIN_SLOPE_LO = 6.18;    // median 10.30 * 0.6
+export const MINMAXHEAP_POPMIN_SLOPE_HI = 14.42;   // median 10.30 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -242,6 +263,11 @@ const SG_AMORT_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 // LESS BST would degenerate to an O(n)-amortized chain and blow the ratio to ~2^(17-11) = 64x.
 // A fixed, meaningful teeth threshold well between the two -- not a widenable budget.
 const SG_AMORT_RATIO_MAX = 4;
+// MinMaxHeap's gated popMin sweep: the SAME steady [1e4 .. 1e6] band BinaryHeap.pop uses
+// (a full-height heap drain has the same dynamic-range need). Its O(n) foil (a linear
+// min-scan-and-splice extract-min over an unordered array) stays on the small O(n^2) sweep.
+const MMH_POP_SWEEP = [1e4, 3e4, 1e5, 3e5, 1e6];
+const MMH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -801,6 +827,53 @@ function measureScapegoatAmortized(n) {
     return best;
 }
 
+// --- MinMaxHeap measurement (popMin hot op + its O(n) foil) ------------------
+// The heap is built OUTSIDE timing (Floyd), then a FULL popMin drain is timed, accumulated
+// across rebuilds until ~4e6 pops are timed (a stable mean, height ~ log2(n)). The rebuild
+// is excluded from the timed window. Same discipline as BinaryHeap.measurePop -- popMin is
+// the min-max heap's tallest honest walk. WORST-case member: NO max-single-op disclosure.
+function measureMinMaxHeap(n) {
+    const reps = Math.max(4, Math.ceil(4e6 / n));
+    const ids = new Uint32Array(n);
+    const keys = new Float64Array(n);
+    const rnd = mulberry32(0x1234 ^ n);
+    for (let i = 0; i < n; i++) { ids[i] = i & 0xffff; keys[i] = rnd(); }
+    { const h = MinMaxHeap.build(ids, keys, n); while (h.size > 0) h.popMin(); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const h = MinMaxHeap.build(ids, keys, n);
+        const t0 = nowNs();
+        while (h.size > 0) sink += h.popMin();
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// The O(n) foil: a linear MIN-SCAN-AND-SPLICE extract-min over an unordered array (the
+// naive way to serve a min without a heap: scan for the smallest, remove it by swapping in
+// the tail). O(n) per extraction, O(n^2) total drain, so on the log2(n) axis its per-op cost
+// is EXPONENTIAL and a straight-line fit MUST MISS the R^2 floor. Sweep stays small.
+function measureMinMaxHeapFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const src = new Float64Array(n);
+    const rnd = mulberry32(0x9E37 ^ n);
+    for (let i = 0; i < n; i++) src[i] = rnd();
+    const arr = new Float64Array(n);
+    { arr.set(src); let len = n; while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; arr[mi] = arr[len - 1]; len--; } } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        arr.set(src); let len = n;
+        const t0 = nowNs();
+        while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; sink += arr[mi]; arr[mi] = arr[len - 1]; len--; }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -919,10 +992,22 @@ export const MEMBERS = [
         foil: measureScapegoatGetFoil,
         foilName: 'linear scan (O(n) per search)',
     },
+    {
+        name: 'MinMaxHeap',
+        op: 'popMin',
+        sweep: MMH_POP_SWEEP,
+        foilSweep: MMH_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0009 inherits D-08)
+        slopeLo: MINMAXHEAP_POPMIN_SLOPE_LO,   // own band
+        slopeHi: MINMAXHEAP_POPMIN_SLOPE_HI,
+        run: measureMinMaxHeap,
+        foil: measureMinMaxHeapFoil,
+        foilName: 'linear min-scan-and-splice (O(n) per extract-min)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.6.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.7.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

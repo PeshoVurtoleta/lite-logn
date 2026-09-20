@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -139,3 +139,36 @@ sg.get('x');
 
 // @ts-expect-error -- Scapegoat has no split (the documented asymmetry vs Treap).
 sg.split(5);
+
+// --- MinMaxHeap ------------------------------------------------------------
+const mmh = new MinMaxHeap(1024);
+mmh.push(3, 2.5);
+const mmhMin: number | undefined = mmh.popMin();
+const mmhMax: number | undefined = mmh.popMax();
+const mmhPeekMin: number | undefined = mmh.peekMin();
+const mmhPeekMax: number | undefined = mmh.peekMax();
+const mmhMinKey: number | undefined = mmh.peekMinKey();
+const mmhMaxKey: number | undefined = mmh.peekMaxKey();
+const mmhSize: number = mmh.size;
+const mmhCap: number = mmh.capacity;
+mmh.clear();
+mmh.forEach((id, key) => { void id; void key; });
+for (const id of mmh) { void id; }
+const mmhBuilt: MinMaxHeap = MinMaxHeap.build([0, 1], [4.0, 1.0], 16);
+void mmhMin; void mmhMax; void mmhPeekMin; void mmhPeekMax; void mmhMinKey; void mmhMaxKey;
+void mmhSize; void mmhCap; void mmhBuilt;
+
+// @ts-expect-error -- push key must be a number.
+mmh.push(1, 'x');
+
+// @ts-expect-error -- MinMaxHeap takes a single capacity argument (no kind).
+new MinMaxHeap(8, 'min');
+
+// @ts-expect-error -- MinMaxHeap has no changeKey (the asymmetry vs BinaryHeap).
+mmh.changeKey(3, 1.0);
+// @ts-expect-error -- MinMaxHeap has no remove (the asymmetry vs BinaryHeap).
+mmh.remove(3);
+// @ts-expect-error -- MinMaxHeap has no keyOf (the asymmetry vs BinaryHeap).
+mmh.keyOf(3);
+// @ts-expect-error -- MinMaxHeap has no has (the asymmetry vs BinaryHeap).
+mmh.has(3);

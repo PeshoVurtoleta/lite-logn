@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -549,6 +549,101 @@ const sgOrderMix = {
     statsOf(s) { return { grows: sgGrows(s) }; },
 };
 
+/** MinMaxHeap's zero-alloc counter: its two backing buffers' byte lengths, fixed at
+ *  construction, so the delta across the window must be 0. */
+function mmhGrows(s) {
+    const h = s.mmh;
+    return h._key.buffer.byteLength + h._id.buffer.byteLength;
+}
+
+/** A MinMaxHeap prefilled to capacity (ids 0..CAP-1 resident, integer keys). */
+function mmhFill() {
+    const h = new MinMaxHeap(CAP);
+    for (let i = 0; i < CAP; i++) h.push(i & 0xffff, (i * 2654435761) & 0xffff);
+    return h;
+}
+
+/**
+ * popMin churn at steady capacity: the heap starts FULL, each op pops the minimum
+ * (freeing one slot) then pushes a fresh id/key back. O(log n) trickle-down + sift-up,
+ * heap never overflows or empties; zero allocation.
+ */
+const mmhPopMinChurn = {
+    name: 'MinMaxHeap popMin churn',
+    setup() { return { mmh: mmhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.mmh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = h.popMin();
+            h.push(id, (t * 2654435761) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: mmhGrows(s) }; },
+};
+
+/**
+ * popMax churn: a full heap, each op pops the maximum then pushes a fresh id/key back --
+ * the other trickle-down path (max-of-{slot1,slot2} then sift-up), zero allocation.
+ */
+const mmhPopMaxChurn = {
+    name: 'MinMaxHeap popMax churn',
+    setup() { return { mmh: mmhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.mmh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = h.popMax();
+            h.push(id, (t * 40503) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: mmhGrows(s) }; },
+};
+
+/**
+ * push/pop-both mixed churn: pop BOTH ends then push both back -> steady full heap, both
+ * trickle-downs and both sift-up chains exercised together. Zero allocation.
+ */
+const mmhMixedChurn = {
+    name: 'MinMaxHeap push + popMin + popMax mixed churn',
+    setup() { return { mmh: mmhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.mmh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = h.popMin();
+            const hi = h.popMax();
+            h.push(lo, (t * 2246822519) & 0xffff);
+            h.push(hi, (t * 2654435761) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: mmhGrows(s) }; },
+};
+
+/**
+ * read mix: peekMin / peekMax / peekMinKey / peekMaxKey over a full heap, folded into an
+ * int32 accumulator. All O(1), no allocation.
+ */
+const mmhReadMix = {
+    name: 'MinMaxHeap peekMin/peekMax/peekMinKey/peekMaxKey',
+    setup() { return { mmh: mmhFill(), acc: 0 }; },
+    hot(s, n) {
+        const h = s.mmh;
+        let acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + h.peekMin() + h.peekMax() + (h.peekMinKey() | 0) + (h.peekMaxKey() | 0)) | 0;
+        }
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: mmhGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -583,6 +678,7 @@ zgcSuite({
         segUpdateChurn, segQueryChurn, segGrowsMix,
         slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn,
         trGetChurn, trSetChurn, trDeleteChurn, trOrderMix,
-        sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix],
+        sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix,
+        mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix],
     mustFail: [teethMustFailAlloc],
 });

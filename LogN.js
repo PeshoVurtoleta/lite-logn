@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.6.0';
+export const VERSION = '0.7.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -2494,5 +2494,381 @@ export class Scapegoat {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] Scapegoat full (capacity ' + this._cap + ')');
+    }
+}
+
+// MinMaxHeap (v0.7.0 session) -- a DEPQ (double-ended priority queue), array-embedded min-max heap (BELOW).
+
+/**
+ * Max MinMaxHeap capacity: slot indices 0..cap-1 index the two parallel, pointer-free
+ * typed-array columns (`_key` Float64Array, `_id` Uint32Array). Children of slot i are
+ * `2i+1` / `2i+2` and grandchildren `4i+3 .. 4i+6`, so the deepest index arithmetic a
+ * hot op performs is `4*i + 6`; capping capacity at 2^31-1 keeps every derived index a
+ * positive int32. The index arithmetic, not the byte count, is the hard ceiling -- the
+ * same "the arithmetic caps it" reasoning as BinaryHeap's BH_MAX_CAPACITY.
+ */
+const MMH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A MIN-MAX HEAP: a DOUBLE-ENDED priority queue (DEPQ) held in ONE array-embedded binary
+ * heap whose levels ALTERNATE min / max (Atkinson, Sack, Santoro & Strothotte 1986). Even
+ * depth (the root is depth 0) is a MIN level, odd depth is a MAX level, so the global
+ * minimum sits at the root and the global maximum is the LARGER of the root's up-to-two
+ * children. That single alternating heap answers BOTH ends: `peekMin` / `peekMax` are
+ * O(1); `push` / `popMin` / `popMax` are O(log n) WORST-case. It is the family's DEPQ --
+ * where BinaryHeap fixes one extreme at construction, a min-max heap serves both from one
+ * structure without a second heap or a paired-heap correspondence to maintain.
+ *
+ * Storage (allocated once, sized to capacity), the BinaryHeap id+key idiom:
+ *   - `_key` Float64Array -- the priority key at each heap SLOT (min-max-ordered).
+ *   - `_id`  Uint32Array  -- the opaque payload id at each heap SLOT (moves with its key).
+ * There is NO reverse-index map (`_pos`) and so NO addressable `changeKey` / `remove`: the
+ * id is an OPAQUE Uint32 payload, NOT a unique handle -- duplicate ids are allowed, and the
+ * id domain is the full Uint32 range [0, 2^32) (a wider domain than BinaryHeap's [0,
+ * capacity), which only that member's `_pos` map constrains). See decisions/0009.
+ *
+ * Level parity is computed zero-alloc: slot i (0-based) is a MIN level iff
+ * `((31 - Math.clz32(i + 1)) & 1) === 0` (the depth `31 - clz32(i+1)` is even). The sift
+ * is HOLE-PUNCHING (not a 3-write swap chain): the moving element is cached in locals once
+ * and the hole walks writing ONE slot per level.
+ *   - push: append at the tail, compare the new element to its PARENT to pick the own-level
+ *     vs other-level chain, then bubble by GRANDPARENT comparisons up the min-or-max chain.
+ *   - popMin / popMax: open a hole at the root (min) or at the max-of-{slot1,slot2} (max),
+ *     move the last element into it, and trickle DOWN over CHILDREN + GRANDCHILDREN (a min
+ *     level sinks toward the smallest of the up-to-six descendants, a max level toward the
+ *     largest); a GRANDCHILD move does the extra parent re-check that keeps the alternating
+ *     order intact. Every one of the four grandchild indices is bound-checked against the
+ *     live size (the classic min-max off-by-one). Zero bytes allocated after construction.
+ *
+ * Keys are FINITE numbers (typeof-guarded BEFORE coercion -- Symbol / BigInt / NaN /
+ * +-Infinity fail closed with a `[lite-logn]` throw); ids are integers in [0, 2^32). A key
+ * guard fires FIRST, then the id guard, then the full-heap guard -- any throw leaves `size`
+ * unchanged. Every peek / pop on an EMPTY heap returns `undefined` and NEVER throws. Fixed
+ * capacity: overflow throws, never silently drops.
+ *
+ * This is the classic ONE-element-per-node min-max heap ONLY; the interval-heap DEPQ (two
+ * elements per node) is a deliberately deferred alternative -- see decisions/0009 + NOT FOR.
+ */
+export class MinMaxHeap {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^31-1].
+     */
+    constructor(capacity) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > MMH_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] MinMaxHeap capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        this._key = new Float64Array(capacity); // key at each heap slot
+        this._id = new Uint32Array(capacity);   // opaque payload id at each heap slot
+        this._cap = capacity;                    // exact fixed capacity
+        this._n = 0;                             // live entries (heap size)
+    }
+
+    /** Live entry count. O(1). */
+    get size() { return this._n; }
+
+    /** The fixed capacity this heap was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /**
+     * Insert entity `id` with priority `key`. O(log n). Fails closed: a non-finite /
+     * non-number key (checked FIRST), a non-integer / out-of-range id, or a full heap each
+     * throw `[lite-logn]` as a no-op (size unchanged).
+     * @param {number} id   integer in [0, 2^32), an OPAQUE payload (not required unique)
+     * @param {number} key  a finite number
+     */
+    push(id, key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id > 0xFFFFFFFF) {
+            return this._badId(id);
+        }
+        const n = this._n;
+        if (n === this._cap) return this._full();
+        this._n = n + 1;
+        this._siftUp(n, key, id);
+    }
+
+    /**
+     * Remove and return the id at the MINIMUM key (the root), or `undefined` if empty
+     * (never throws on empty). O(log n).
+     * @returns {number|undefined}
+     */
+    popMin() {
+        const n = this._n;
+        if (n === 0) return undefined;
+        const top = this._id[0];
+        const last = n - 1;
+        this._n = last;
+        if (last > 0) this._siftDownMin(0, this._key[last], this._id[last]);
+        return top;
+    }
+
+    /**
+     * Remove and return the id at the MAXIMUM key (the larger of the root's up-to-two
+     * children, or the root itself when the heap holds one element), or `undefined` if
+     * empty (never throws on empty). O(log n).
+     * @returns {number|undefined}
+     */
+    popMax() {
+        const n = this._n;
+        if (n === 0) return undefined;
+        if (n === 1) { this._n = 0; return this._id[0]; }
+        const K = this._key;
+        // Max is at slot 1, unless slot 2 exists (n > 2) and holds a larger key.
+        let mi = 1;
+        if (n > 2 && K[2] > K[1]) mi = 2;
+        const top = this._id[mi];
+        const last = n - 1;
+        this._n = last;
+        // If the max WAS the last element, dropping the tail already removed it.
+        if (mi !== last) this._siftDownMax(mi, K[last], this._id[last]);
+        return top;
+    }
+
+    /** The id at the minimum key (root), or `undefined` if empty. Read-only. O(1). */
+    peekMin() { return this._n === 0 ? undefined : this._id[0]; }
+
+    /** The minimum key (root), or `undefined` if empty. O(1). */
+    peekMinKey() { return this._n === 0 ? undefined : this._key[0]; }
+
+    /** The id at the maximum key, or `undefined` if empty. Read-only. O(1). */
+    peekMax() {
+        const n = this._n;
+        if (n === 0) return undefined;
+        if (n === 1) return this._id[0];
+        const K = this._key;
+        return (n > 2 && K[2] > K[1]) ? this._id[2] : this._id[1];
+    }
+
+    /** The maximum key, or `undefined` if empty. O(1). */
+    peekMaxKey() {
+        const n = this._n;
+        if (n === 0) return undefined;
+        if (n === 1) return this._key[0];
+        const K = this._key;
+        return (n > 2 && K[2] > K[1]) ? K[2] : K[1];
+    }
+
+    /** Empty the heap. O(1) (resets size; the columns are kept). */
+    clear() { this._n = 0; }
+
+    /**
+     * Visit every live (id, key) pair in UNSPECIFIED (heap-array) order -- NOT sorted /
+     * not pop order. O(n) cold scan, allocation-free (pass a hoisted callback).
+     * @param {(id:number, key:number, heap:MinMaxHeap)=>void} fn
+     */
+    forEach(fn) {
+        const id = this._id, key = this._key, n = this._n;
+        for (let i = 0; i < n; i++) fn(id[i], key[i], this);
+    }
+
+    /**
+     * Iterate live entity ids in UNSPECIFIED (heap-array) order -- NOT sorted. The one
+     * documented per-protocol allocator (a {value, done} per step); use forEach for the
+     * alloc-free scan.
+     */
+    *[Symbol.iterator]() {
+        const id = this._id, n = this._n;
+        for (let i = 0; i < n; i++) yield id[i];
+    }
+
+    /**
+     * Floyd O(n) bulk build: load every (ids[i], keys[i]) pair then heapify bottom-up in
+     * O(n) (deepest-first, level-aware sift-down), rather than n individual O(log n)
+     * pushes. COLD path; fails closed on any violation (non-array-like / length mismatch,
+     * count > capacity, non-integer / out-of-range id, non-finite key) before use.
+     * @param {ArrayLike<number>} ids   integers in [0, 2^32) (not required unique)
+     * @param {ArrayLike<number>} keys  finite numbers, keys.length === ids.length
+     * @param {number} capacity
+     * @returns {MinMaxHeap}
+     */
+    static build(ids, keys, capacity) {
+        const heap = new MinMaxHeap(capacity);
+        if (ids == null || keys == null ||
+            typeof ids.length !== 'number' || typeof keys.length !== 'number') {
+            throw new TypeError('[lite-logn] MinMaxHeap.build needs array-like ids and keys');
+        }
+        const count = ids.length;
+        if (keys.length !== count) {
+            throw new RangeError(
+                '[lite-logn] MinMaxHeap.build ids/keys length mismatch (' +
+                count + ' vs ' + keys.length + ')');
+        }
+        if (count > capacity) {
+            throw new RangeError(
+                '[lite-logn] MinMaxHeap.build count ' + count + ' exceeds capacity ' + capacity);
+        }
+        const K = heap._key, I = heap._id;
+        for (let i = 0; i < count; i++) {
+            const id = ids[i];
+            if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id > 0xFFFFFFFF) {
+                throw new RangeError(
+                    '[lite-logn] MinMaxHeap.build id must be an integer in [0, 2^32), got ' +
+                    String(id));
+            }
+            const key = keys[i];
+            if (typeof key !== 'number' || !Number.isFinite(key)) {
+                throw new TypeError(
+                    '[lite-logn] MinMaxHeap.build key must be a finite number, got ' + String(key));
+            }
+            K[i] = key;
+            I[i] = id;
+        }
+        heap._n = count;
+        // Floyd: sift down every internal node, deepest-first, level-aware. O(n).
+        for (let i = (count >> 1) - 1; i >= 0; i--) {
+            if (((31 - Math.clz32(i + 1)) & 1) === 0) heap._siftDownMin(i, K[i], I[i]);
+            else heap._siftDownMax(i, K[i], I[i]);
+        }
+        return heap;
+    }
+
+    // ---- private hole-punching sifts (hot bodies) --------------------------
+
+    /**
+     * Sift UP from `hole` after an append: compare to the PARENT to decide whether the new
+     * element belongs on its own level's chain or the other level's, then bubble it up by
+     * GRANDPARENT comparisons. One write per level; zero temporaries.
+     * @private
+     */
+    _siftUp(hole, key, id) {
+        const K = this._key, I = this._id;
+        if (hole === 0) { K[0] = key; I[0] = id; return; }
+        const parent = (hole - 1) >> 1;
+        // Depth parity of `hole`: MIN level iff (31 - clz32(hole+1)) is even.
+        if (((31 - Math.clz32(hole + 1)) & 1) === 0) { // hole is on a MIN level
+            if (key > K[parent]) {                     // parent is a MAX node: element belongs above it
+                K[hole] = K[parent]; I[hole] = I[parent];
+                this._bubbleUpMax(parent, key, id);
+            } else {
+                this._bubbleUpMin(hole, key, id);
+            }
+        } else {                                       // hole is on a MAX level
+            if (key < K[parent]) {                     // parent is a MIN node: element belongs above it
+                K[hole] = K[parent]; I[hole] = I[parent];
+                this._bubbleUpMin(parent, key, id);
+            } else {
+                this._bubbleUpMax(hole, key, id);
+            }
+        }
+    }
+
+    /** Bubble a MIN-level hole up by grandparents while the element is smaller. @private */
+    _bubbleUpMin(hole, key, id) {
+        const K = this._key, I = this._id;
+        while (hole > 2) {                    // has a grandparent (hole >= 3)
+            const gp = (hole - 3) >> 2;       // (((hole-1)>>1)-1)>>1
+            if (key < K[gp]) { K[hole] = K[gp]; I[hole] = I[gp]; hole = gp; }
+            else break;
+        }
+        K[hole] = key; I[hole] = id;
+    }
+
+    /** Bubble a MAX-level hole up by grandparents while the element is larger. @private */
+    _bubbleUpMax(hole, key, id) {
+        const K = this._key, I = this._id;
+        while (hole > 2) {                    // has a grandparent (hole >= 3)
+            const gp = (hole - 3) >> 2;       // (((hole-1)>>1)-1)>>1
+            if (key > K[gp]) { K[hole] = K[gp]; I[hole] = I[gp]; hole = gp; }
+            else break;
+        }
+        K[hole] = key; I[hole] = id;
+    }
+
+    /**
+     * Trickle a MIN-level hole DOWN toward the SMALLEST of its up-to-six descendants
+     * (children `2h+1`/`2h+2`, grandchildren `4h+3..4h+6`). A grandchild move does the
+     * extra max-parent re-check that keeps the alternating order. Every grandchild index
+     * is bound-checked against the live size. One write per level; zero temporaries.
+     * @private
+     */
+    _siftDownMin(hole, key, id) {
+        const K = this._key, I = this._id, n = this._n;
+        for (;;) {
+            const c1 = (hole << 1) + 1;
+            if (c1 >= n) break;                       // leaf: no children -> settle here
+            const c2 = c1 + 1;
+            let m = c1, mGrand = false;               // smallest descendant so far
+            if (c2 < n && K[c2] < K[m]) m = c2;
+            const gEnd = (c2 << 1) + 2;               // 4h+6, the last grandchild index
+            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) { // grandchildren 4h+3..4h+6
+                if (K[g] < K[m]) { m = g; mGrand = true; }
+            }
+            if (K[m] >= key) break;                   // element is <= every descendant -> settle
+            if (!mGrand) {                            // smallest is a direct child (a leaf) -> place, done
+                K[hole] = K[m]; I[hole] = I[m];
+                hole = m;
+                break;
+            }
+            // smallest is a grandchild: pull it up, then reconcile with its MAX-level parent.
+            K[hole] = K[m]; I[hole] = I[m];
+            const p = (m - 1) >> 1;
+            if (key > K[p]) {                         // element too big under max parent p: settle it at p,
+                const pk = K[p], pid = I[p];          // carry p's (smaller) value on down from m.
+                K[p] = key; I[p] = id;
+                key = pk; id = pid;
+            }
+            hole = m;
+        }
+        K[hole] = key; I[hole] = id;
+    }
+
+    /**
+     * Trickle a MAX-level hole DOWN toward the LARGEST of its up-to-six descendants. Mirror
+     * of `_siftDownMin`: a grandchild move re-checks the MIN-level parent. Every grandchild
+     * index is bound-checked. One write per level; zero temporaries.
+     * @private
+     */
+    _siftDownMax(hole, key, id) {
+        const K = this._key, I = this._id, n = this._n;
+        for (;;) {
+            const c1 = (hole << 1) + 1;
+            if (c1 >= n) break;                       // leaf: no children -> settle here
+            const c2 = c1 + 1;
+            let m = c1, mGrand = false;               // largest descendant so far
+            if (c2 < n && K[c2] > K[m]) m = c2;
+            const gEnd = (c2 << 1) + 2;               // 4h+6, the last grandchild index
+            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) { // grandchildren 4h+3..4h+6
+                if (K[g] > K[m]) { m = g; mGrand = true; }
+            }
+            if (K[m] <= key) break;                   // element is >= every descendant -> settle
+            if (!mGrand) {                            // largest is a direct child (a leaf) -> place, done
+                K[hole] = K[m]; I[hole] = I[m];
+                hole = m;
+                break;
+            }
+            // largest is a grandchild: pull it up, then reconcile with its MIN-level parent.
+            K[hole] = K[m]; I[hole] = I[m];
+            const p = (m - 1) >> 1;
+            if (key < K[p]) {                         // element too small under min parent p: settle it at p,
+                const pk = K[p], pid = I[p];          // carry p's (larger) value on down from m.
+                K[p] = key; I[p] = id;
+                key = pk; id = pid;
+            }
+            hole = m;
+        }
+        K[hole] = key; I[hole] = id;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ---
+
+    /** @private */
+    _badId(id) {
+        throw new RangeError(
+            '[lite-logn] MinMaxHeap id must be an integer in [0, 2^32), got ' + String(id));
+    }
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] MinMaxHeap key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] MinMaxHeap full (capacity ' + this._cap + ')');
     }
 }

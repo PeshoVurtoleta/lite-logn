@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-20
+
+### Added
+
+- **MinMaxHeap** -- the seventh member and the family's DOUBLE-ENDED priority queue
+  (DEPQ): a single array-embedded binary heap whose levels ALTERNATE min / max (Atkinson,
+  Sack, Santoro & Strothotte 1986). Even depth (the root is depth 0) is a MIN level, odd
+  depth a MAX level, so the global minimum sits at the root and the global maximum is the
+  LARGER of the root's up-to-two children. `peekMin` / `peekMax` / `peekMinKey` /
+  `peekMaxKey` are O(1); `push` / `popMin` / `popMax` are all WORST-case O(log n) from that
+  ONE heap (no second heap, no paired-heap correspondence). Surface: `push(id, key)` /
+  `popMin` / `popMax` / `peekMin` / `peekMax` / `peekMinKey` / `peekMaxKey` / `clear` /
+  `forEach` / `[Symbol.iterator]`, and `size` / `capacity` getters, plus a Floyd O(n)
+  `MinMaxHeap.build(ids, keys, capacity)` (deepest-first, level-aware sift-down). Keys are
+  finite numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN / +-Infinity fail
+  closed with a `[lite-logn]` throw, key checked FIRST, then the id, then a full heap).
+- **id + key payload, NON-addressable (the asymmetry vs BinaryHeap).** Two parallel
+  pointer-free typed-array columns (`_id` Uint32Array + `_key` Float64Array), the BinaryHeap
+  id+key idiom -- but with NO `_pos` reverse map, and therefore deliberately NO `changeKey` /
+  `remove`. The id is an OPAQUE Uint32 payload (NOT unique; the full [0, 2^32) domain, wider
+  than BinaryHeap's [0, capacity)). A DEPQ's job is the two extremes; addressability is the
+  separable concern BinaryHeap already carries. There is also NO `kind` argument / getter (a
+  DEPQ has both ends; a kind getter would be a lie).
+- **Classic one-element-per-node min-max heap only.** The interval-heap DEPQ (two elements
+  per node) is a deliberately deferred alternative -- named, never silently omitted (see
+  `decisions/0009-minmaxheap.md` and "What this is not").
+- **Level parity, computed zero-alloc.** Slot i is a MIN level iff
+  `((31 - Math.clz32(i + 1)) & 1) === 0`. The sifts are hole-punching (one write per level,
+  only local scalar temporaries): `push` compares to the parent to pick the own-level vs
+  other-level chain then bubbles by grandparents; `popMin` / `popMax` trickle down over the
+  up-to-six descendants (children + grandchildren), bound-checking every grandchild index
+  against the live size (the classic min-max off-by-one, verified at n = 1, 2, 3, 4).
+
+### Verified
+
+- **Witness (D-M5).** `MinMaxHeap.popMin` is the gated O(log n) witness op (the full-height
+  level-aware trickle-down). It inherits the FROZEN family R^2 floor 0.958 and calibrates its
+  OWN slope band by the shared ADR-0004 method: median-of-15 popMin fit-runs = 10.30 ns/level
+  (runs spanned 9.38..10.59, R^2 0.9897..0.9991), band = median x `[0.6, 1.4]` = `[6.18, 14.42]`.
+  A DEPQ whose push / popMin / popMax are ALL worst-case, so there is NO max-single-op line.
+  The O(n) foil is a linear min-scan-and-splice extract-min (R^2 ~ 0.77, OFF the line).
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the popMin / popMax / mixed
+  push+popMin+popMax churn and the peek read lanes, gc major = 0, the deliberately-allocating
+  control lane still non-zero (teeth), arrayBuffers do not grow across fill/clear soak cycles.
+  `npm run test:perf` -- 0 scavenges + `grows === 0` on every MinMaxHeap scenario.
+
+### Notes
+
+- `LogN.js` gains `MMH_MAX_CAPACITY` (`0x7FFFFFFF`) + the `MinMaxHeap` class, appended after
+  Scapegoat; the prior six classes stay BYTE-IDENTICAL (only the `VERSION` const changes above
+  the append point). Version bumped to 0.7.0 across `package.json`, `LogN.js`, and `llms.txt`.
+
 ## [0.6.0] - 2026-09-20
 
 ### Added
@@ -312,7 +364,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [`decisions/0003-pack.md`](./decisions/0003-pack.md) (D-07: `files[]` ships the
   six files only; `test/`, `benchmark/`, `decisions/`, `demo/` are repo-only).
 
-[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.6.0...v0.7.0
 [0.4.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/PeshoVurtoleta/lite-logn/compare/v0.1.0...v0.2.0

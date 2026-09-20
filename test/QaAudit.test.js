@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.6.0 at the Scapegoat release', () => {
-    assert.equal(VERSION, '0.6.0');
+test('VERSION is exactly 0.7.0 at the MinMaxHeap release', () => {
+    assert.equal(VERSION, '0.7.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (6 members) --------
+// --- frozen export surface: VERSION + the shipped members (7 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap and Scapegoat at v0.6.0 (6 members)', () => {
+test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat and MinMaxHeap at v0.7.0 (7 members)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'Scapegoat', 'SegmentTree', 'SkipList', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -50,6 +50,7 @@ test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipLis
     assert.equal(typeof LogNModule.SkipList, 'function');
     assert.equal(typeof LogNModule.Treap, 'function');
     assert.equal(typeof LogNModule.Scapegoat, 'function');
+    assert.equal(typeof LogNModule.MinMaxHeap, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -309,4 +310,38 @@ test('Scapegoat fails closed with a [lite-logn]-tagged throw on every coercion d
     // there is deliberately NO split / merge on Scapegoat (the asymmetry vs Treap)
     assert.equal(typeof sg.split, 'undefined', 'Scapegoat has no split');
     assert.equal(typeof Scapegoat.merge, 'undefined', 'Scapegoat has no static merge');
+});
+
+// --- MinMaxHeap (v0.7.0): coercion + [lite-logn] fail-closed tag --------------
+
+test('MinMaxHeap fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { MinMaxHeap } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 10n, 2 ** 31]) {
+        assert.throws(() => new MinMaxHeap(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    const h = new MinMaxHeap(8);
+    // non-finite / non-number key, typeof-first (checked BEFORE the id); size unchanged
+    for (const bad of [NaN, Infinity, -Infinity, '3', null, undefined, {}, Symbol('k'), 1n]) {
+        assert.throws(() => h.push(0, bad), /\[lite-logn\]/, 'push key ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // non-integer / out-of-range id (the id domain is [0, 2^32))
+    for (const bad of [-1, 1.5, NaN, Infinity, 2 ** 32, '0', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => h.push(bad, 1), /\[lite-logn\]/, 'push id ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // full heap fails closed (never a silent drop); size unchanged
+    const full = new MinMaxHeap(2);
+    full.push(0, 1); full.push(1, 2);
+    assert.throws(() => full.push(2, 3), /\[lite-logn\]/);
+    assert.equal(full.size, 2);
+    // build fails closed on bad input
+    assert.throws(() => MinMaxHeap.build(null, [1], 8), /\[lite-logn\]/);
+    assert.throws(() => MinMaxHeap.build([0, 1], [1], 8), /\[lite-logn\]/);      // length mismatch
+    assert.throws(() => MinMaxHeap.build([0, 1], [1, NaN], 8), /\[lite-logn\]/); // non-finite key
+    assert.throws(() => MinMaxHeap.build([0, -1], [1, 2], 8), /\[lite-logn\]/);  // id < 0
+    // there is deliberately NO changeKey / remove on MinMaxHeap (non-addressable DEPQ)
+    assert.equal(typeof h.changeKey, 'undefined', 'MinMaxHeap has no changeKey');
+    assert.equal(typeof h.remove, 'undefined', 'MinMaxHeap has no remove');
 });

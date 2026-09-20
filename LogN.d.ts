@@ -280,3 +280,52 @@ export class Scapegoat {
     /** Empty the tree, keeping capacity. */
     clear(): this;
 }
+
+/**
+ * A min-max heap: a DOUBLE-ENDED priority queue (DEPQ) in ONE array-embedded binary heap
+ * whose levels ALTERNATE min / max (Atkinson et al. 1986). The minimum is the root; the
+ * maximum is the larger of the root's up-to-two children. peekMin / peekMax are O(1);
+ * push / popMin / popMax are O(log n) WORST-case. Two parallel typed-array columns (_key
+ * Float64, _id Uint32); the id is an OPAQUE Uint32 payload in [0, 2^32) (not unique, no
+ * reverse map), so there is deliberately NO changeKey / remove (the asymmetry vs
+ * BinaryHeap). Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt /
+ * NaN / +-Infinity fail closed). Fixed capacity: a full heap throws. Every hot op
+ * allocates zero bytes.
+ */
+export class MinMaxHeap {
+    /** @param capacity exact max live entries; integer in [1, 2^31-1]. */
+    constructor(capacity: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this heap was sized for. */
+    readonly capacity: number;
+
+    /** Insert id with priority key. Throws on non-finite key, out-of-range id, or a full heap. */
+    push(id: number, key: number): void;
+    /** Remove and return the id at the minimum key, or undefined if empty. */
+    popMin(): number | undefined;
+    /** Remove and return the id at the maximum key, or undefined if empty. */
+    popMax(): number | undefined;
+    /** The id at the minimum key, or undefined if empty. */
+    peekMin(): number | undefined;
+    /** The id at the maximum key, or undefined if empty. */
+    peekMax(): number | undefined;
+    /** The minimum key, or undefined if empty. */
+    peekMinKey(): number | undefined;
+    /** The maximum key, or undefined if empty. */
+    peekMaxKey(): number | undefined;
+    /** Empty the heap, keeping capacity. */
+    clear(): void;
+    /** Visit every live (id, key) pair in unspecified (heap-array) order. */
+    forEach(fn: (id: number, key: number, heap: MinMaxHeap) => void): void;
+    /** Iterate live entity ids in unspecified (heap-array) order (NOT sorted). */
+    [Symbol.iterator](): IterableIterator<number>;
+
+    /** Floyd O(n) bulk build from parallel ids/keys arrays (level-aware sift-down). */
+    static build(
+        ids: ArrayLike<number>,
+        keys: ArrayLike<number>,
+        capacity: number,
+    ): MinMaxHeap;
+}

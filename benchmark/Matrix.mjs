@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The six shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat'];
+/** The seven shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap'];
 
-/** The nine gated D1 witness op-rows (member.op), in build order. */
+/** The ten gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -34,6 +34,7 @@ export const OP_ROWS = [
     'SkipList.get', 'SkipList.set',
     'Treap.get',
     'Scapegoat.get',
+    'MinMaxHeap.popMin',
 ];
 
 /** The eight measurement dimensions. */
@@ -59,6 +60,7 @@ export const BASELINE = {
     SkipList: 'sorted-array-insert/linear-scan',
     Treap: 'linear-scan',
     Scapegoat: 'linear-scan',
+    MinMaxHeap: 'linear-min-scan-and-splice',
 };
 
 /**
@@ -80,6 +82,10 @@ export const COUNTER_FOIL = {
     // Scapegoat is the family's DETERMINISTIC ordered map with the same Map order-tax, but the
     // counter-foil is the one-time family illustration carried by SkipList; Scapegoat reads NA.
     Scapegoat: NA,
+    // MinMaxHeap is a DEPQ (double-ended priority queue), not an ordered map; there is no
+    // "faster but order-blind" O(1) rival to a min-max heap (a Map cannot serve either extreme),
+    // so it has no counter-foil -- NA (the string, never 0).
+    MinMaxHeap: NA,
 };
 
 /**
@@ -136,6 +142,12 @@ export const RATIONALE = {
         why: 'a linear scan over a plain array (O(n) per lookup) is the honest default before the balanced ' +
             'BST; the scapegoat buys WORST-case O(log n) get + amortized O(log n) set/delete + O(log n) ' +
             'rank/select. The Map order-tax counterpoint is carried once by SkipList, so Scapegoat does not repeat it.',
+    },
+    MinMaxHeap: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear min-scan-and-splice extract over an unordered array (O(n) per extract-min) is the ' +
+            'honest DEPQ default before the min-max heap; the min-max heap buys WORST-case O(log n) push / ' +
+            'popMin / popMax from ONE array-embedded heap. No Map order-tax counterpoint (a Map serves neither extreme).',
     },
 };
 
@@ -258,6 +270,9 @@ export const OP_CLASS = Object.freeze({
     'Scapegoat.get': OLOGN_WORST,     // DETERMINISTIC weight-balanced height -> WORST-case (the gated row)
     'Scapegoat.set': OLOGN_AMORTIZED, // an occasional subtree rebuild absorbs the imbalance -> AMORTIZED
     'Scapegoat.delete': OLOGN_AMORTIZED, // ditto (a global rebuild fires when the tree shrinks)
+    'MinMaxHeap.push': OLOGN_WORST,   // sift-up the full height of the alternating heap array
+    'MinMaxHeap.popMin': OLOGN_WORST, // trickle-down the full height from the root (the gated row)
+    'MinMaxHeap.popMax': OLOGN_WORST, // trickle-down the full height from the max-of-{slot1,slot2}
 });
 
 // ===========================================================================
@@ -276,7 +291,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -190,6 +190,20 @@ function kScapegoatSet(n) {
     return { obj: sg, op: () => { sg.set(n, i); sg.delete(n); i = (i + 1) | 0; } };
 }
 
+function kMinMaxHeapPopMin(n) {
+    // A full min-max heap of n ids; each op pops the minimum id and re-pushes it with a
+    // fresh key -- the O(log n) trickle-down + sift-up pair, size steady at n. SINK is
+    // kept a 32-bit Smi (`| 0`) to avoid boxing a HeapNumber per op (D6 alloc hygiene).
+    const h = new MinMaxHeap(n);
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) h.push(k, rng());
+    let t = 1;
+    return {
+        obj: h,
+        op: () => { const id = h.popMin(); t = (t * 1103515245 + 12345) & 0x7fffffff; h.push(id, t); SINK = (SINK + id) | 0; },
+    };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -209,6 +223,7 @@ export function makeOpKernel(member, op, n) {
         case 'SkipList.set': return kSkipSet(n);
         case 'Treap.get': return kTreapGet(n);
         case 'Scapegoat.get': return kScapegoatGet(n);
+        case 'MinMaxHeap.popMin': return kMinMaxHeapPopMin(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -221,6 +236,7 @@ export function makeSubject(member, n) {
     if (member === 'SkipList') return kSkipSet(n);
     if (member === 'Treap') return kTreapSet(n);
     if (member === 'Scapegoat') return kScapegoatSet(n);
+    if (member === 'MinMaxHeap') return kMinMaxHeapPopMin(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -391,6 +407,7 @@ export function memberBytes(member, obj) {
             obj._size.buffer.byteLength + obj._pool._free.buffer.byteLength +
             obj._flat.buffer.byteLength + obj._stack.buffer.byteLength;
     }
+    if (member === 'MinMaxHeap') return obj._key.buffer.byteLength + obj._id.buffer.byteLength;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -402,6 +419,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'SkipList') return 16;    // key (Float64, 8) + val (Float64, 8) per live entry
     if (member === 'Treap') return 16;       // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'Scapegoat') return 16;   // key (Float64, 8) + value (Float64, 8) per live entry
+    if (member === 'MinMaxHeap') return 12;  // key (Float64, 8) + id (Uint32, 4) per live entry
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -418,6 +436,7 @@ function fillMember(member, obj, count) {
     if (member === 'SkipList') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'Treap') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'Scapegoat') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
+    if (member === 'MinMaxHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -440,7 +459,7 @@ function fillMember(member, obj, count) {
  * fixed length, so their "content" is the residual accumulated total (0 == cleared).
  */
 function clearContent(member, obj) {
-    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat') return obj.size;
+    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap') return obj.size;
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -452,6 +471,7 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'SkipList') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'Treap') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'Scapegoat') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
+    if (member === 'MinMaxHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -508,6 +528,7 @@ export function D3(member, opts = {}) {
     else if (member === 'SkipList') obj = new SkipList(n);
     else if (member === 'Treap') obj = new Treap(n);
     else if (member === 'Scapegoat') obj = new Scapegoat(n);
+    else if (member === 'MinMaxHeap') obj = new MinMaxHeap(n);
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -595,6 +616,9 @@ function randomLookupOp(member, obj, n, rng) {
     if (member === 'SkipList') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     if (member === 'Treap') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     if (member === 'Scapegoat') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
+    // MinMaxHeap is NOT addressable by key (a DEPQ, not a map); its only O(1) reads are the
+    // two extremes. rng parity picks an end so the read is not constant-folded. PROXY-only.
+    if (member === 'MinMaxHeap') return () => { const v = (rng() & 1) ? obj.peekMax() : obj.peekMin(); if (v !== undefined) SINK += v; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -606,6 +630,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'SkipList') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     if (member === 'Treap') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     if (member === 'Scapegoat') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    // MinMaxHeap has no per-key read; the O(1) minimum read is its sequential analogue. PROXY-only.
+    if (member === 'MinMaxHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -618,6 +644,7 @@ function buildFull(member, n) {
     else if (member === 'SkipList') { obj = new SkipList(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'Treap') { obj = new Treap(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'Scapegoat') { obj = new Scapegoat(n); for (let k = 0; k < n; k++) obj.set(k, k); }
+    else if (member === 'MinMaxHeap') { obj = new MinMaxHeap(n); for (let k = 0; k < n; k++) obj.push(k, k); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -824,6 +851,12 @@ function buildOrderNs(member, n, order) {
             for (let i = 0; i < n; i++) sg.set(keys[i], i);
             elapsed += performance.now() - t0;
             SINK += sg.size;
+        } else if (member === 'MinMaxHeap') {
+            const mmh = new MinMaxHeap(n);
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) mmh.push(i, keys[i]);
+            elapsed += performance.now() - t0;
+            SINK += mmh.size;
         } else { // SkipList
             const sl = new SkipList(n, 0x13 >>> 0);
             const t0 = performance.now();
@@ -859,7 +892,7 @@ export function D7(member, opts = {}) {
     const nearFullNs = loadOpNs(member, n, 0.99);
 
     // Insertion order: applicable only to the comparison/order-sensitive members.
-    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat');
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap');
     const on = opts.orderN ?? Math.min(n, 1 << 14);
     const insertionOrder = orderSensitive
         ? {
@@ -954,7 +987,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
     let mode;
     if (member === 'BinaryHeap' || member === 'Fenwick' ||
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
-        member === 'Scapegoat') mode = 0;
+        member === 'Scapegoat' || member === 'MinMaxHeap') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);
