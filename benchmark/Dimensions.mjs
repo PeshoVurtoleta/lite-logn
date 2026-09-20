@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -146,6 +146,28 @@ function kSkipSet(n) {
     };
 }
 
+function kTreapGet(n) {
+    // A full ordered map of n keys; each op searches a random resident key. The index
+    // is `rng() >>> 1` (drop the high bit) so it stays a 31-bit Smi (a raw uint32 >= 2^31
+    // is a HeapNumber, and boxing one per op would masquerade as per-op alloc in D6).
+    const tr = new Treap(n, (0x51ED ^ n) >>> 0);
+    for (let k = 0; k < n; k++) tr.set(k, k);
+    const rng = prng(0x33A5 ^ n);
+    return { obj: tr, op: () => { const v = tr.get((rng() >>> 1) % n); if (v !== undefined) SINK = (SINK + v) | 0; } };
+}
+
+function kTreapSet(n) {
+    // A resident map of n keys with one free slot; each op inserts the integer key `n`
+    // (the single free slot, just past the resident [0, n) range) then deletes it -- the
+    // O(log n) recursive insert + delete pair, size steady at n. An INTEGER (Smi) key is
+    // used, not a fractional one: a non-integer double is a HeapNumber that would
+    // masquerade as per-op allocation in D6.
+    const tr = new Treap(n + 1, (0x71ED ^ n) >>> 0);
+    for (let k = 0; k < n; k++) tr.set(k, k);
+    let i = 0;
+    return { obj: tr, op: () => { tr.set(n, i); tr.delete(n); i = (i + 1) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -163,6 +185,7 @@ export function makeOpKernel(member, op, n) {
         case 'SegmentTree.query': return kSegQuery(n);
         case 'SkipList.get': return kSkipGet(n);
         case 'SkipList.set': return kSkipSet(n);
+        case 'Treap.get': return kTreapGet(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -173,6 +196,7 @@ export function makeSubject(member, n) {
     if (member === 'Fenwick') return kFenwickUpdate(n);
     if (member === 'SegmentTree') return kSegUpdate(n);
     if (member === 'SkipList') return kSkipSet(n);
+    if (member === 'Treap') return kTreapSet(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -331,6 +355,12 @@ export function memberBytes(member, obj) {
             obj._next.buffer.byteLength + obj._update.buffer.byteLength +
             obj._pool._free.buffer.byteLength;
     }
+    if (member === 'Treap') {
+        return obj._key.buffer.byteLength + obj._value.buffer.byteLength +
+            obj._left.buffer.byteLength + obj._right.buffer.byteLength +
+            obj._prio.buffer.byteLength + obj._size.buffer.byteLength +
+            obj._pool._free.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -340,6 +370,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'Fenwick') return 8;     // one Float64 tree cell per element
     if (member === 'SegmentTree') return 16; // two Float64 cells (2n array) per element
     if (member === 'SkipList') return 16;    // key (Float64, 8) + val (Float64, 8) per live entry
+    if (member === 'Treap') return 16;       // key (Float64, 8) + value (Float64, 8) per live entry
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -354,6 +385,7 @@ function fillMember(member, obj, count) {
     if (member === 'Fenwick') { obj.clear(); for (let i = 0; i < count; i++) obj.update(i, 1); return; }
     if (member === 'SegmentTree') { obj.clear(); for (let i = 0; i < count; i++) obj.update(i, i & 0xffff); return; }
     if (member === 'SkipList') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
+    if (member === 'Treap') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -376,7 +408,7 @@ function fillMember(member, obj, count) {
  * fixed length, so their "content" is the residual accumulated total (0 == cleared).
  */
 function clearContent(member, obj) {
-    if (member === 'BinaryHeap' || member === 'SkipList') return obj.size;
+    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap') return obj.size;
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -386,6 +418,7 @@ function clearContent(member, obj) {
 function clearWitnessRefill(member, obj, n) {
     if (member === 'BinaryHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'SkipList') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
+    if (member === 'Treap') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -440,6 +473,7 @@ export function D3(member, opts = {}) {
     else if (member === 'Fenwick') obj = new Fenwick(n);
     else if (member === 'SegmentTree') obj = new SegmentTree(n, 'sum');
     else if (member === 'SkipList') obj = new SkipList(n);
+    else if (member === 'Treap') obj = new Treap(n);
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -525,6 +559,7 @@ function randomLookupOp(member, obj, n, rng) {
     if (member === 'Fenwick') return () => { SINK += obj.prefix(rng() % n); };
     if (member === 'SegmentTree') return () => { const i = rng() % n; SINK += obj.query(i, i); };
     if (member === 'SkipList') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
+    if (member === 'Treap') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -534,6 +569,7 @@ function seqLookupOp(member, obj, n) {
     if (member === 'Fenwick') return () => { SINK += obj.prefix(i); i++; if (i >= n) i = 0; };
     if (member === 'SegmentTree') return () => { SINK += obj.query(i, i); i++; if (i >= n) i = 0; };
     if (member === 'SkipList') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    if (member === 'Treap') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -544,6 +580,7 @@ function buildFull(member, n) {
     else if (member === 'Fenwick') { obj = new Fenwick(n); for (let i = 0; i < n; i++) obj.update(i, 1); }
     else if (member === 'SegmentTree') { obj = new SegmentTree(n, 'sum'); for (let i = 0; i < n; i++) obj.update(i, i & 0xffff); }
     else if (member === 'SkipList') { obj = new SkipList(n); for (let k = 0; k < n; k++) obj.set(k, k); }
+    else if (member === 'Treap') { obj = new Treap(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -738,6 +775,12 @@ function buildOrderNs(member, n, order) {
             for (let i = 0; i < n; i++) h.push(i, keys[i]);
             elapsed += performance.now() - t0;
             SINK += h.size;
+        } else if (member === 'Treap') {
+            const tr = new Treap(n, 0x13 >>> 0);
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) tr.set(keys[i], i);
+            elapsed += performance.now() - t0;
+            SINK += tr.size;
         } else { // SkipList
             const sl = new SkipList(n, 0x13 >>> 0);
             const t0 = performance.now();
@@ -773,7 +816,7 @@ export function D7(member, opts = {}) {
     const nearFullNs = loadOpNs(member, n, 0.99);
 
     // Insertion order: applicable only to the comparison/order-sensitive members.
-    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList');
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap');
     const on = opts.orderN ?? Math.min(n, 1 << 14);
     const insertionOrder = orderSensitive
         ? {
@@ -807,12 +850,14 @@ export function churnNs(member, n, seed) {
     return median(collect(makeSubject(member, n).op, 4000, 60));
 }
 
-/** SkipList ordered-scan workload: successor walk + a bounded rangeIter scan. */
-function orderedNs(n, seed) {
-    const sl = new SkipList(n, (seed ^ 0x1357) >>> 0);
-    for (let k = 0; k < n; k++) sl.set(k, k);
+/** Ordered-scan workload (SkipList or Treap): successor walk + a bounded rangeIter scan. */
+function orderedNs(member, n, seed) {
+    const obj = member === 'Treap'
+        ? new Treap(n, (seed ^ 0x1357) >>> 0)
+        : new SkipList(n, (seed ^ 0x1357) >>> 0);
+    for (let k = 0; k < n; k++) obj.set(k, k);
     let key = 0;
-    const succ = () => { const s = sl.successor(key); if (s !== undefined) SINK += s; key++; if (key >= n - 1) key = 0; };
+    const succ = () => { const s = obj.successor(key); if (s !== undefined) SINK += s; key++; if (key >= n - 1) key = 0; };
     const succNs = median(collect(succ, 4000, 60));
 
     // rangeIter: scan a bounded window; ns per YIELDED key (window keeps it O(window)).
@@ -822,7 +867,7 @@ function orderedNs(n, seed) {
     const reps = 20000;
     let seen = 0;
     for (let r = 0; r < reps; r++) {
-        for (const k of sl.rangeIter(lo, lo + W - 1)) { SINK += k; seen++; }
+        for (const k of obj.rangeIter(lo, lo + W - 1)) { SINK += k; seen++; }
         lo++; if (lo + W >= n) lo = 0;
     }
     const scanNs = seen > 0 ? ((performance.now() - t0) * 1e6) / seen : 1e-3;
@@ -837,7 +882,7 @@ export function D8(member, opts = {}) {
     const churn = { nsPerOp: churnNs(member, n, seed) };
 
     let ordered = NA;
-    if (supportsWorkload(member, 'ordered')) ordered = orderedNs(n, seed);
+    if (supportsWorkload(member, 'ordered')) ordered = orderedNs(member, n, seed);
 
     const check = [churn.nsPerOp];
     if (typeof ordered === 'object') check.push(ordered.successorNsPerOp, ordered.rangeScanNsPerKey);
@@ -863,7 +908,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
     // member cannot silently inherit a trace universe.
     let mode;
     if (member === 'BinaryHeap' || member === 'Fenwick' ||
-        member === 'SegmentTree' || member === 'SkipList') mode = 0;
+        member === 'SegmentTree' || member === 'SkipList' || member === 'Treap') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

@@ -6,6 +6,74 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+### Added
+
+- **Treap** -- the fifth member and the family's balanced BST: a randomized,
+  self-balancing binary search tree that is ALSO an order-statistic tree (an AUGMENTED
+  ordered map key -> value). A BST order on `_key` x a MAX-HEAP order on a per-node
+  random priority `_prio` gives EXPECTED O(log n) height, and a subtree-size column
+  `_size` (maintained in the SAME pass as every link rewrite) adds O(log n) order
+  statistics + set surgery. Surface: `get` / `has` / `set` (updates the value in place
+  on an existing key) / `delete` (idempotent) / `rank(x)` (count of keys STRICTLY less
+  than x) / `select(k)` (the k-th smallest key, 0-based) / `successor` (strictly
+  greater) / `predecessor` (strictly less) / `rangeIter(lo, hi)` (a VERSION-STAMPED
+  iterator over `[lo, hi]` inclusive, ascending; `+-Infinity` bounds allowed,
+  structural OR value mutation mid-iteration throws) / `forEach` / `clear` / `split`,
+  the static `Treap.merge(a, b)`, and `size` / `capacity` getters. Keys and values are
+  finite numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN / +-Infinity
+  fail closed with a `[lite-logn]` throw).
+- **Pointer-free, zero-GC, second bind of the shared NodePool.** Nodes are slot
+  INDICES in six flat columns (`_key` / `_value` Float64; `_left` / `_right` / `_prio`
+  / `_size` Uint32, `NIL = 0`) over the SAME private free-list (`NodePool`) SkipList
+  ships -- design-parity, not a fork or a runtime dep (decisions/0007-treap.md). The
+  conservation invariant `activeSlots + freeListLength === capacity` holds after every
+  op. `TR_MAX_CAPACITY = 0x7FFFFFFF` (2^31 - 1: slot indices + subtree counts fit a
+  `Uint32`). Rotations rewrite one child link pair + two `_size` cells; `set` / `delete`
+  / `split` / `merge` recurse over slot indices on the native CALL STACK (not the GC
+  heap), so every hot op is 0 B/op.
+- **Priority via the repo LCG.** One instance-local Numerical-Recipes LCG draw per
+  inserted node; a fixed seed replays an identical structure, ties break by key, so the
+  tree shape is a deterministic function of the (key, priority) set.
+- **split / merge are O(log n) EXPECTED (arena-sharing).** `split(key)` returns
+  `[left (keys < key), right (keys >= key)]` by rewiring in place, so the two treaps
+  SHARE the source's backing arena and the source is CONSUMED (left empty);
+  `Treap.merge(a, b)` requires `a` / `b` to share an arena (all keys of a < all of b)
+  and consumes both. Fails closed on non-Treap inputs, cross-arena treaps, or an
+  overlapping key range.
+- **EXPECTED, not worst-case.** A hot op is EXPECTED O(log n) (the randomized
+  priority heap); the MAX single insert (rotation chain) is DISCLOSED by the witness,
+  never gated -- the same honesty contract as SkipList.
+- **Witness: one more log line.** `test/witness.mjs` gains `Treap.get` (a BST descent)
+  against a linear-scan O(n) foil. Measured on this machine (shared, FROZEN R^2 floor
+  0.958, the four prior members' bands UNTOUCHED): `get` R^2 ~ 0.988, slope ~ 4.03
+  ns/level, in its OWN band `[2.55, 5.95]` = median-of-15 fit-runs (median 4.25) x
+  `[0.6, 1.4]`, centered on the median (ADR-0004). A treap descent touches one node per
+  level, so its per-level slope is lower than SkipList.get's (~8.78) -- expected, which
+  is why only the R^2 floor is shared. The linear-scan foil MISSES the floor
+  (R^2 ~ 0.79). All EIGHT gated op-rows are ON-LINE; MAX single insert disclosed
+  (~54 us on the cold shuffled build trace).
+- **Types + docs.** `LogN.d.ts` gains the `Treap` ambient block; `llms.txt` gains the
+  Treap roster entry + full export surface; `decisions/0007-treap.md` records D-06/D-07
+  (the balanced-BST pick, the augmentation, the NodePool reuse, the arena-sharing
+  split/merge, and the recursion-depth disclosure).
+
+### Verified
+
+- Torture: 0 B/op on every Treap hot lane (get / set / delete / rank / select /
+  successor / forEach / rangeIter) + the mixed steady-state churn; `gc major = 0`;
+  leak `size 0/0`; the private-pool conservation invariant after every soak cycle; a
+  32 B/op control lane proving the instrument has teeth. Prior four members still green.
+- `test/perf/PerfGate.test.mjs`: four Treap scenarios (get / set / delete / rank-select-
+  successor mix) at 0 scavenges, backing buffers fixed (the `grows` counter reads 0).
+- `test/Treap.test.mjs`: a >= 1e5 mixed-op differential fuzz vs a Map + sorted-array
+  oracle (0 divergences), the three treap invariants checked throughout (BST order,
+  heap order, subtree-size correctness), rank/select/split/merge correctness, the
+  fail-closed doors ([lite-logn] tag pinned), determinism, and conservation.
+- `LogN.js`: the prior four classes are BYTE-IDENTICAL; only the `VERSION` const and
+  the appended `Treap` section changed.
+
 ## [0.4.0] - 2026-09-17
 
 ### Added

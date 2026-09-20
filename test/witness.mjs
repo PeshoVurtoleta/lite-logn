@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -155,6 +155,23 @@ export const SKIPLIST_GET_SLOPE_HI = 12.30;        // median 8.78 * 1.4
 export const SKIPLIST_SET_SLOPE_LO = 8.36;         // median 13.93 * 0.6
 export const SKIPLIST_SET_SLOPE_HI = 19.50;        // median 13.93 * 1.4
 
+// --- Treap (v0.5.0): shared R^2 floor, OWN get slope band + sweep (D-06/D-07) ---
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide;
+// Treap's gated op is get, a pure BST descent -- one node touched per level, EXPECTED
+// O(log n) height (the randomized priority heap balances it). It is gated over the same
+// 2^11..2^17 window SkipList.get uses (a pointer-chasing search needs that dynamic range
+// above the timing floor; above it the working set leaves the steady cache band and the
+// fit flakes -- lite-o1 ADR-0004). A treap descent touches ONE node per level (vs a skip
+// list's tower of forward links), so its per-level slope is LOWER than SkipList.get's --
+// expected, which is exactly why only the R^2 floor is shared. Because the member is
+// EXPECTED (not worst-case) O(log n), the harness ALSO prints the MAX single insert (the
+// rotation-chain tail an unlucky priority draw spikes) as a DISCLOSURE, not a gate. Band
+// = median-of-15 fit-runs * [0.6, 1.4] on this machine: MEDIAN slope 4.25 ns/level (15
+// runs spanned 4.10..4.36, R^2 0.965..0.981), centered on the MEDIAN (never a high
+// sample) so a legitimately faster future run is not false-failed.
+export const TREAP_GET_SLOPE_LO = 2.55;            // median 4.25 * 0.6
+export const TREAP_GET_SLOPE_HI = 5.95;            // median 4.25 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -189,6 +206,11 @@ const SEG_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 const SL_GET_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 const SL_SET_SWEEP = [9, 10, 11, 12, 13, 14].map((k) => 2 ** k);
 const SL_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// Treap's gated get sweep: the same 2^11..2^17 window (a BST descent has the same
+// pointer-chasing dynamic-range need as SkipList.get). Its O(n) foil (a linear scan)
+// stays on the small O(n^2) sweep.
+const TR_GET_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const TR_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -596,6 +618,84 @@ function measureSkipSetFoil(n) {
     return elapsed / count;
 }
 
+// --- Treap measurement (get hot op, its O(n) foil, MAX single insert) --------
+// The tree is built OUTSIDE timing and held at steady size n; the timed window is the
+// get descent only, hammered over 1024 random resident targets so many BST paths are
+// averaged (a single hot path would understate the pointer-chasing cost). Same effort
+// as SkipList.get (min-over-batches rejects ambient interference).
+const TR_ITERS = 200000;   // hammered ops per timed batch
+const TR_BATCH = 25;       // min-over-batches
+const TR_TARGETS = 1024;   // distinct random targets cycled per batch (pow2 mask)
+
+// A module-level capture for the MAX single insert observed across the get sweep build --
+// the honesty hook the randomized member must not hide behind its mean.
+let TREAP_MAX_INSERT_NS = 0;
+
+// get: hammer a search for random resident keys over a dense 0..n-1 treap. Return the
+// MIN per-op time over TR_BATCH batches. Also samples the MAX single insert (disclosure).
+function measureTreapGet(n) {
+    const tr = new Treap(n, (0x51ED ^ n) >>> 0);
+    for (let i = 0; i < n; i++) tr.set(i, i);
+    const tg = new Float64Array(TR_TARGETS);
+    const rnd = mulberry32(0x33A5 ^ n);
+    for (let i = 0; i < TR_TARGETS; i++) tg[i] = (rnd() * n) | 0;
+    let sink = 0;
+    for (let w = 0; w < TR_ITERS; w++) sink += tr.get(tg[w & (TR_TARGETS - 1)]); // warm
+    let best = Infinity;
+    for (let b = 0; b < TR_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < TR_ITERS; i++) sink += tr.get(tg[i & (TR_TARGETS - 1)]);
+        const e = (nowNs() - t0) / TR_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    sampleTreapMaxInsert(n);
+    return best;
+}
+
+// Build a treap of n keys in RANDOM insertion order, timing each insert, and fold the
+// tallest rotation chain into the module capture -- the realistic unlucky-priority tail.
+function sampleTreapMaxInsert(n) {
+    const keys = new Float64Array(n);
+    for (let i = 0; i < n; i++) keys[i] = i;
+    const rnd = mulberry32(0xF00D ^ n);
+    for (let i = n - 1; i > 0; i--) {                            // Fisher-Yates shuffle
+        const j = (rnd() * (i + 1)) | 0;
+        const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+    }
+    const tr = new Treap(n, (0xC0DE ^ n) >>> 0);
+    for (let i = 0; i < n; i++) {
+        const t0 = nowNs();
+        tr.set(keys[i], i);
+        const e = nowNs() - t0;
+        if (e > TREAP_MAX_INSERT_NS) TREAP_MAX_INSERT_NS = e;
+    }
+}
+
+// get FOIL: a naive LINEAR SCAN for the max key over a plain Float64Array = O(n) per
+// search (the default before you know the balanced-BST trick). Exponential on the
+// log2(n) axis, so a straight-line fit MISSES the R^2 floor. O(n^2) total.
+function measureTreapGetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = i;
+    const target = n - 1;
+    { let idx = -1; for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } } if (idx < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let idx = -1;
+            for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } }
+            sink += idx;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -690,10 +790,22 @@ export const MEMBERS = [
         foil: measureSkipSetFoil,
         foilName: 'sorted-array insert (O(n) shift)',
     },
+    {
+        name: 'Treap',
+        op: 'get',
+        sweep: TR_GET_SWEEP,
+        foilSweep: TR_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-07 inherits D-08)
+        slopeLo: TREAP_GET_SLOPE_LO,           // own band
+        slopeHi: TREAP_GET_SLOPE_HI,
+        run: measureTreapGet,
+        foil: measureTreapGetFoil,
+        foilName: 'linear scan (O(n) per search)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.4.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.5.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -745,6 +857,13 @@ async function main() {
     if (SKIPLIST_MAX_INSERT_NS > 0) {
         process.stdout.write(
             'SkipList MAX single insert observed = ' + SKIPLIST_MAX_INSERT_NS.toFixed(0) +
+            ' ns (expected O(log n) -- disclosed, not gated)\n');
+    }
+    // Treap honesty print: the MAX single insert (rotation chain) observed across the
+    // get sweep build. Same EXPECTED-not-worst-case disclosure as SkipList; not a gate.
+    if (TREAP_MAX_INSERT_NS > 0) {
+        process.stdout.write(
+            'Treap MAX single insert observed = ' + TREAP_MAX_INSERT_NS.toFixed(0) +
             ' ns (expected O(log n) -- disclosed, not gated)\n');
     }
     process.stdout.write('WITNESS ' + (ok ? 'ok' : 'FAIL') + '\n');

@@ -135,7 +135,7 @@ function printHeader(seed) {
     const cpuModel = (cpus && cpus.length ? cpus[0].model : 'unknown');
     const cpuCount = (cpus ? cpus.length : 0);
     console.log('===========================================================================');
-    console.log('@zakkster/lite-logn -- benchmark suite (8 dimensions, 4 members vs O(n) foils)');
+    console.log('@zakkster/lite-logn -- benchmark suite (8 dimensions, 5 members vs O(n) foils)');
     console.log('===========================================================================');
     console.log('  seed:    0x' + (seed >>> 0).toString(16) + ' (' + (seed >>> 0) + ')');
     console.log('  node:    ' + process.version);

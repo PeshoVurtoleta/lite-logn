@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.4.0
+Version: 0.5.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -19,7 +19,8 @@ FLAT ops/ms line on a log-x axis), lite-logn holds the logarithm (a STRAIGHT
 line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
-adds SkipList. The roster (one member per session, each landing append-only):
+adds SkipList; v0.5.0 adds Treap. The roster (one member per session, each landing
+append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -47,6 +48,17 @@ adds SkipList. The roster (one member per session, each landing append-only):
   seed, deterministic. set updates an existing key's value in place. EXPECTED (not
   worst-case) O(log n): the witness fits the average line AND prints the MAX single
   insert. Zero allocation on every hot op.
+- Treap (v0.5.0) -- an AUGMENTED ordered map (key -> value) that is also an order-
+  statistic tree: a randomized, self-balancing BST (BST order on keys x max-heap order
+  on a per-node random priority -> EXPECTED O(log n) height) with a subtree-size column
+  that adds rank(x) (count of keys < x) / select(k) (the k-th smallest key) / split(key)
+  / merge(a, b), all EXPECTED O(log n). Nodes are slot INDICES in flat typed-array
+  columns (_key / _value / _left / _right / _prio / _size) over the SAME private free-
+  list (NodePool) SkipList uses. Priority is one instance-local NR-LCG draw per insert
+  (deterministic, seed-reproducible; ties break by key). set updates an existing key's
+  value in place. split / merge REWIRE in place (O(log n)) so the two treaps SHARE a
+  backing arena and CONSUME their inputs. EXPECTED, not worst-case: the MAX single
+  insert (rotation chain) is DISCLOSED, never gated. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -140,6 +152,42 @@ adds SkipList. The roster (one member per session, each landing append-only):
     NaN or lo > hi throws.
   - `size` / `capacity` getters; `clear()` -> this (empty, keep capacity, reset the
     PRNG to its initial seed); `forEach(fn)` visits (key, value, list) ascending.
+
+- `Treap` -- class. A randomized-balanced AUGMENTED ordered map (key -> value) that is
+  also an order-statistic tree. A BST on `_key` x a max-heap on a per-node random
+  `_prio` gives EXPECTED O(log n) height; a `_size` subtree-count column adds O(log n)
+  order statistics. Nodes are slot INDICES in flat typed-array columns (`_key` /
+  `_value` Float64, `_left` / `_right` / `_prio` / `_size` Uint32, `NIL = 0`) over a
+  PRIVATE free-list (NodePool) -- no heap object per op. Keys and values are finite
+  numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail
+  closed). EXPECTED, not worst-case (an unlucky priority draw can spike one op; the MAX
+  single insert is disclosed). set / delete / split / merge recurse to a depth = tree
+  height (O(log n) expected, O(n) worst-case on a pathological priority draw), on the
+  native call stack, so every hot op is still 0 B/op.
+  - `new Treap(capacity, seed?)` -- capacity an integer in [1, 2^31-1] (slot indices +
+    subtree counts are Uint32, `NIL = 0` reserves slot 0); seed an unsigned 32-bit
+    integer (default fixed). Allocates six columns + a free-list once.
+  - `get(key)` -> value | undefined. Absent -> undefined (no throw).
+  - `has(key)` -> boolean.
+  - `set(key, value)` -> this. Insert, or update the value in place if key exists (no
+    new node). Non-finite key/value throws; a full pool throws.
+  - `delete(key)` -> boolean. Idempotent: false if absent, true if removed.
+  - `rank(x)` -> number. Count of stored keys STRICTLY LESS than x, in [0, size].
+  - `select(k)` -> key | undefined. The k-th smallest key (0-based); undefined if k is
+    out of [0, size). Non-integer k throws.
+  - `successor(key)` -> key | undefined. Smallest key STRICTLY greater than key.
+  - `predecessor(key)` -> key | undefined. Largest key STRICTLY less than key.
+  - `rangeIter(lo, hi)` -> iterator of keys in [lo, hi] INCLUSIVE, ascending; VERSION-
+    STAMPED (structural OR value mutation mid-iteration throws). Bounds may be
+    +-Infinity; NaN or lo > hi throws.
+  - `size` / `capacity` getters; `clear()` -> this (empty, keep capacity, reset the
+    PRNG to its initial seed); `forEach(fn)` visits (key, value, treap) ascending.
+  - `split(key)` -> [left, right]. left holds keys < key, right holds keys >= key;
+    O(log n) EXPECTED (rewires in place), so the two treaps SHARE this treap's arena
+    and this is CONSUMED (left empty).
+  - `Treap.merge(a, b)` -> Treap. Merge two arena-sharing treaps where every key of a
+    < every key of b; O(log n) EXPECTED, CONSUMES both. Non-Treap inputs, treaps from
+    different arenas, or an overlapping key range each throw.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

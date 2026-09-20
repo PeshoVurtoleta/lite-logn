@@ -53,7 +53,7 @@ import { renderHtml } from '../benchmark/Report.mjs';
 import {
     MEMBERS as WITNESS_MEMBERS, BINARYHEAP_R2_FLOOR, BINARYHEAP_SLOPE_LO, BINARYHEAP_SLOPE_HI,
 } from './witness.mjs';
-import { BinaryHeap, Fenwick, SegmentTree, SkipList } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../LogN.js';
 import { readFileSync } from 'node:fs';
 
 const SEED = 0x9e3779b1 >>> 0;
@@ -75,7 +75,7 @@ const SYNC = { D1, D2, D3, D4, D7, D8 };
 const ASYNC = { D5, D6 };
 
 /** Op-row count per member (the gated D1 witness rows). */
-const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2 };
+const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2, Treap: 1 };
 
 for (const member of SUBJECTS) {
     test('anti-vacuity: ' + member + ' D1/D2/D3/D4/D7/D8 return positive numbers', () => {
@@ -134,7 +134,7 @@ for (const member of SUBJECTS) {
         assert.equal(r.keyTypes.string, NA, member + ' string key must be the NA string');
         assert.equal(r.keyTypes.object, NA, member + ' object key must be the NA string');
         assert.notEqual(r.keyTypes.string, 0, member + ' string key must never be 0');
-        if (member === 'BinaryHeap' || member === 'SkipList') {
+        if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap') {
             assert.equal(typeof r.insertionOrder, 'object', member + ' insertion order must be measured');
             assert.ok(r.insertionOrder.adversarial > 0, member + ' adversarial order must be positive');
         } else {
@@ -146,8 +146,8 @@ for (const member of SUBJECTS) {
     test('D8: ' + member + ' ordered workload is the NA string unless SkipList (never 0)', () => {
         const r = D8(member, OPTS.D8);
         assert.ok(r.churn.nsPerOp > 0, member + ' churn must be positive');
-        if (member === 'SkipList') {
-            assert.equal(typeof r.ordered, 'object', 'SkipList ordered workload must be measured');
+        if (member === 'SkipList' || member === 'Treap') {
+            assert.equal(typeof r.ordered, 'object', member + ' ordered workload must be measured');
             assert.ok(r.ordered.successorNsPerOp > 0 && r.ordered.rangeScanNsPerKey > 0);
         } else {
             assert.equal(r.ordered, NA, member + ' ordered workload must be the NA string');
@@ -178,7 +178,7 @@ for (const member of SUBJECTS) {
     });
 }
 
-test('structure: D1 emits exactly the 7 gated witness op-rows across the 4 members', () => {
+test('structure: D1 emits exactly the 8 gated witness op-rows across the 5 members', () => {
     let total = 0;
     const rowKeys = [];
     for (const m of SUBJECTS) {
@@ -186,18 +186,18 @@ test('structure: D1 emits exactly the 7 gated witness op-rows across the 4 membe
         total += r.ops.length;
         for (const o of r.ops) rowKeys.push(m + '.' + o.op);
     }
-    assert.equal(total, 7, 'D1 must emit exactly 7 gated op-rows');
+    assert.equal(total, 8, 'D1 must emit exactly 8 gated op-rows');
     assert.deepEqual(rowKeys, OP_ROWS, 'the emitted op-rows must equal Matrix.OP_ROWS');
 });
 
-test('structure: the FOILS registry is the 7 gated rows + the SkipList counter-foil; cells() is 4 x 8 = 32', () => {
+test('structure: the FOILS registry is the 8 gated rows + the SkipList counter-foil; cells() is 5 x 8 = 40', () => {
     assert.deepEqual(foilRowKeys(), OP_ROWS, 'FOILS gated rows must equal OP_ROWS');
     for (const k of OP_ROWS) assert.ok(FOILS[k] && typeof FOILS[k].run === 'function', k + ' must carry a kernel');
     assert.ok(FOILS['SkipList.counter'] && FOILS['SkipList.counter'].kind === 'counter-foil',
         'the SkipList counter-foil must be registered');
-    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 7 gated rows + 1 counter-foil');
-    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 4 x 8 = 32 cells');
-    assert.equal(cells().length, 32);
+    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 8 gated rows + 1 counter-foil');
+    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 5 x 8 = 40 cells');
+    assert.equal(cells().length, 40);
 });
 
 test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line', () => {
@@ -218,7 +218,7 @@ test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line'
 // only 2 or 3 points is nearly-always R^2 ~ 1 regardless of the underlying shape (a
 // line is trivially perfectly determined by too few points), which would make this
 // assertion vacuously pass on ANY foil, defeating the whole point of the check.
-test('D1 foil departure (all 7 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
+test('D1 foil departure (all 8 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
     let checked = 0;
     for (const member of SUBJECTS) {
         const r = D1(member, { seed: SEED, points: 5, foil: true });
@@ -230,7 +230,7 @@ test('D1 foil departure (all 7 gated op-rows): every foil genuinely MISSES the R
             checked++;
         }
     }
-    assert.equal(checked, 7, 'must have checked all 7 gated op-rows for foil departure');
+    assert.equal(checked, 8, 'must have checked all 8 gated op-rows for foil departure');
 });
 
 test('vacuityCheck has teeth: an impossible 0 in _check throws', () => {
@@ -264,7 +264,7 @@ test('fall-through THROWS: every per-member dispatch site rejects an unknown mem
     }
 });
 
-test('RATIONALE: all 4 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
+test('RATIONALE: all 5 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
     for (const m of SUBJECTS) {
         const r = RATIONALE[m];
         assert.ok(r, m + ' must have a rationale');
@@ -396,7 +396,7 @@ test('#1 witness gate UNCHANGED: R^2 floor 0.958, BinaryHeap band [5.76,13.44], 
     assert.equal(BINARYHEAP_R2_FLOOR, 0.958, 'the frozen R^2 floor');
     assert.equal(BINARYHEAP_SLOPE_LO, 5.76, 'the frozen BinaryHeap slope band low');
     assert.equal(BINARYHEAP_SLOPE_HI, 13.44, 'the frozen BinaryHeap slope band high');
-    assert.equal(WITNESS_MEMBERS.length, 7, 'the 7 gated witness op-rows are unchanged');
+    assert.equal(WITNESS_MEMBERS.length, 8, 'the 8 gated witness op-rows (7 prior + Treap.get)');
 });
 
 test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughput-invariant', () => {
@@ -428,8 +428,9 @@ test('#2 OP_CLASS: covers the 7 witness rows; SkipList get/set/delete are EXPECT
         assert.ok(!/O\(1\)/.test(cls), key + ' must NOT be painted O(1) (that is a different family): ' + cls);
         assert.ok(cls === OLOGN_WORST || cls === OLOGN_EXPECTED, key + ' unknown class ' + cls);
     }
-    // SkipList's randomized towers -> EXPECTED, never worst-case. Mislabelling any as worst-case BITES.
-    for (const op of ['SkipList.get', 'SkipList.set', 'SkipList.delete']) {
+    // SkipList's randomized towers + Treap's randomized priority heap -> EXPECTED, never
+    // worst-case. Mislabelling any as worst-case BITES.
+    for (const op of ['SkipList.get', 'SkipList.set', 'SkipList.delete', 'Treap.get', 'Treap.set', 'Treap.delete']) {
         assert.equal(OP_CLASS[op], OLOGN_EXPECTED, op + ' must be the EXPECTED class string');
         assert.ok(!/worst-case/.test(OP_CLASS[op]), op + ' must not be labelled worst-case (randomized)');
     }
@@ -443,14 +444,14 @@ test('#2 OP_CLASS: covers the 7 witness rows; SkipList get/set/delete are EXPECT
     // lists above (worst union expected == all keys, disjoint) -- a new/renamed op that is not
     // wired into either list here would otherwise pass unnoticed.
     const worstOps = ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query'];
-    const expectedOps = ['SkipList.get', 'SkipList.set', 'SkipList.delete'];
+    const expectedOps = ['SkipList.get', 'SkipList.set', 'SkipList.delete', 'Treap.get', 'Treap.set', 'Treap.delete'];
     assert.deepEqual([...worstOps, ...expectedOps].sort(), Object.keys(OP_CLASS).sort(),
         'every OP_CLASS key must be asserted as either WORST or EXPECTED above (no silent gap)');
 });
 
-test('#3 CLEAR_WITNESS is EXACTLY the four SUBJECTS; NodePool is EXCLUDED with a reason; each has a real clear()', () => {
-    assert.deepEqual(CLEAR_WITNESS, SUBJECTS, 'the clear() witness set must be exactly SUBJECTS (4)');
-    assert.equal(CLEAR_WITNESS.length, 4, 'exactly four members');
+test('#3 CLEAR_WITNESS is EXACTLY the five SUBJECTS; NodePool is EXCLUDED with a reason; each has a real clear()', () => {
+    assert.deepEqual(CLEAR_WITNESS, SUBJECTS, 'the clear() witness set must be exactly SUBJECTS (5)');
+    assert.equal(CLEAR_WITNESS.length, 5, 'exactly five members');
     // Adding NodePool (the private free-list) to the set would break the SUBJECTS equality above.
     assert.ok(!CLEAR_WITNESS.includes('NodePool'), 'the private NodePool is NOT a clear() witness');
     assert.ok(typeof CLEAR_WITNESS_EXCLUDED.NodePool === 'string' && CLEAR_WITNESS_EXCLUDED.NodePool.length > 0,
@@ -476,7 +477,7 @@ test('#3 clearWitness probe: the four members reach size/content 0 + zero-alloc 
 });
 
 test('#3 clearWitness is NON-VACUOUS: it calls each member\'s REAL prototype clear() exactly cycles+2 times', () => {
-    const CLASSES = { BinaryHeap, Fenwick, SegmentTree, SkipList };
+    const CLASSES = { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap };
     assert.deepEqual(Object.keys(CLASSES).sort(), [...CLEAR_WITNESS].sort(),
         'the spy table must cover exactly the CLEAR_WITNESS members');
     const counts = {}; const originals = {};
@@ -489,7 +490,7 @@ test('#3 clearWitness is NON-VACUOUS: it calls each member\'s REAL prototype cle
     try {
         const cycles = 37; // odd, non-default: a coincidental match is astronomically unlikely
         const cw = clearWitness({ n: 64, cycles });
-        assert.equal(cw.members.length, 4);
+        assert.equal(cw.members.length, 5);
         for (const m of CLEAR_WITNESS) {
             assert.equal(counts[m], cycles + 2,
                 m + ' clearWitness must invoke the REAL prototype clear() exactly cycles+2 times ' +
@@ -510,6 +511,7 @@ test('#3 retention: 1000 clear->refill cycles leave content 0 + free-list restor
             obj.clear();
             if (m === 'BinaryHeap') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.push(k, k); }
             else if (m === 'SkipList') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
+            else if (m === 'Treap') { assert.equal(obj.size, 0, m + ' size 0 after clear (cycle ' + c + ')'); for (let k = 0; k < 512; k++) obj.set(k, k); }
             else if (m === 'Fenwick') { assert.equal(obj.prefix(obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
             else { assert.equal(obj.query(0, obj.length - 1), 0, m + ' accumulator 0 after clear'); for (let i = 0; i < obj.length; i++) obj.update(i, 1); }
         }
@@ -618,9 +620,9 @@ test('#5 report: clear() witness cycle count in the prose is n/a (never 0) when 
         'the cycle count must never silently read 0 for an unverified/degenerate witness');
 });
 
-test('#6 shipping discipline: package.json.version is 0.4.0; benchmark/ stays repo-only', () => {
+test('#6 shipping discipline: package.json.version is 0.5.0; benchmark/ stays repo-only', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    assert.equal(pkg.version, '0.4.0', 'repo-only re-adopt: version stays 0.4.0');
+    assert.equal(pkg.version, '0.5.0', 'the Treap release: version is 0.5.0');
     assert.ok(!pkg.files.includes('benchmark'), 'benchmark/ must not appear in package.json files[]');
 });
 

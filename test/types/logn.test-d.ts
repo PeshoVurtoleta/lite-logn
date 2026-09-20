@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -81,3 +81,31 @@ new SegmentTree(8, 'product');
 
 // @ts-expect-error -- update value must be a number.
 seg.update(0, 'x');
+
+// --- Treap -----------------------------------------------------------------
+const tr = new Treap(1024, 7);
+const trDefault = new Treap(1024); // seed defaults
+void trDefault;
+const trSet: Treap = tr.set(3, 2.5);          // fluent -> this
+const trClear: Treap = tr.clear();            // fluent -> this
+const tg: number | undefined = tr.get(3);
+const thas: boolean = tr.has(3);
+const tdel: boolean = tr.delete(3);
+const trank: number = tr.rank(3);
+const tsel: number | undefined = tr.select(0);
+const tsucc: number | undefined = tr.successor(3);
+const tpred: number | undefined = tr.predecessor(3);
+const tsize: number = tr.size;
+const tcap: number = tr.capacity;
+tr.forEach((key, value, self) => { void key; void value; void self; });
+for (const k of tr.rangeIter(-Infinity, Infinity)) { void k; }
+const [tLeft, tRight]: [Treap, Treap] = tr.split(5);
+const tMerged: Treap = Treap.merge(tLeft, tRight);
+void trSet; void trClear; void tg; void thas; void tdel; void trank; void tsel;
+void tsucc; void tpred; void tsize; void tcap; void tMerged;
+
+// @ts-expect-error -- set value must be a number.
+tr.set(0, 'x');
+
+// @ts-expect-error -- Treap key must be a number.
+tr.get('x');

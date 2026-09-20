@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.4.0 four members have
-shipped -- BinaryHeap, Fenwick, SegmentTree and SkipList -- so this guide carries
-their per-member sections. It is NOT an API encyclopedia (that is the README +
-`LogN.d.ts`); it answers "which member, and is my logarithm real?"
+avoid, and how to measure the logarithm yourself. At v0.5.0 five members have
+shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList and Treap -- so this guide
+carries their per-member sections. It is NOT an API encyclopedia (that is the
+README + `LogN.d.ts`); it answers "which member, and is my logarithm real?"
 
 Scope discipline (mirrors lite-o1's GUIDE): a decision flowchart + a picker
 table up top, then reach-for / avoid + measure-it per member. No re-documenting
@@ -45,8 +45,18 @@ START -- what do you need?
 |   with point updates?                                         -> SegmentTree (wc)   [v0.3.0]
 |
 +-- An ORDERED map / set (get / set / delete / successor /
-    ordered iteration)?                                         -> SkipList (exp)     [v0.4.0]
+|   ordered iteration)?                                         -> SkipList (exp)     [v0.4.0]
+|
++-- ORDER STATISTICS (rank / select) or set SURGERY (split /
+    merge) on an ordered map?                                   -> Treap (exp)       [v0.5.0]
 ```
+
+Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
+/ range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
+many keys are `< x`), `select(k)` (the k-th smallest), or O(log n) `split` /
+`merge`. Both are expected O(log n); Treap's per-level cost is actually LOWER (a
+single BST descent vs a tower of links), and it adds the order-statistic column
+for free -- SkipList is the leaner store when you never call rank / select.
 
 ---
 
@@ -58,10 +68,11 @@ START -- what do you need?
 | Prefix sums under updates | Fenwick (BIT) | O(log n) update / prefix | 0.2.0 |
 | Associative range query + point update | SegmentTree | O(log n) query / update | 0.3.0 |
 | Ordered map / successor / range iterate | SkipList | expected O(log n) | 0.4.0 |
+| Ordered map + rank / select / split / merge | Treap | expected O(log n) | 0.5.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
-each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's
-and SkipList's are below).
+each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
+SkipList's and Treap's are below).
 
 ---
 
@@ -83,6 +94,7 @@ machine-specific, reproducible from seed `0x9e3779b1`.
 | `BinaryHeap.pop` | 8.4 | 0.996 | 16 | repeated extremum + addressable reprioritize |
 | `SkipList.get` | 8.0 | 0.988 | 88 | an ordered map: successor / predecessor / range |
 | `SkipList.set` | 12.1 | 0.985 | 88 | as above -- insert is a double descent + a random-height splice |
+| `Treap.get` | 4.0 | 0.988 | 16 | an ordered map WITH rank / select / split / merge -- lower per-level cost + leaner store than SkipList |
 
 Read it as a ladder: the index-addressed array members (Fenwick, SegmentTree)
 are the cheapest per level AND the tightest in memory; the comparison-ordered
@@ -221,6 +233,50 @@ cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRA
 latency. Both O(n) foils -- a linear scan per search, a sorted-array insert per write
 -- must MISS the floor. The witness ALSO prints the MAX single insert (the unlucky-
 tower tail): if your workload cares about the tail, not the mean, read that bar.
+
+---
+
+## Treap -- an ordered map with order statistics + set surgery
+
+**Reach for it when** you need everything SkipList offers (key-addressed get / set /
+delete, `successor` / `predecessor` / `rangeIter`) PLUS one of the augmented queries a
+plain ordered map cannot answer: `rank(x)` (how many stored keys are strictly `< x` --
+the position of a key), `select(k)` (the k-th smallest key -- the inverse of rank), or
+O(log n) `split(key)` / `Treap.merge(a, b)` (cut an ordered set in two at a key, or
+splice two disjoint ranges back together). Canonical uses: a live leaderboard (rank /
+select), an order-statistic index, percentile queries over a changing set, "the item
+at position k in sorted order", or an ordered set you repeatedly partition and rejoin.
+Keys are arbitrary finite numbers. Deterministic from an instance-local seed.
+
+**Avoid it when:**
+
+- You need a plain ordered map and will NEVER call rank / select / split / merge.
+  **SkipList** (v0.4.0) is the same expected-O(log n) ordered map without the subtree-
+  size column -- though note Treap's per-level cost is actually lower and its store is
+  leaner (16 B/live vs 88), so "avoid" here is really "either works; SkipList if you
+  want the narrower surface."
+- You only need MIN / MAX with insert. **BinaryHeap** (v0.1.0) is leaner and worst-case
+  O(log n); a treap carries child + priority + size columns a heap does not need.
+- Your keys are dense integer INDICES and you want prefix sums or range folds. Use
+  **Fenwick** (v0.2.0) or **SegmentTree** (v0.3.0) -- indexed, flat, worst-case O(log n).
+- You need a WORST-CASE bound. A treap is EXPECTED O(log n): an unlucky priority draw
+  can build a tall thin tree and spike a single op (the rotation chain -- the witness
+  prints that MAX single insert). set / delete / split / merge recurse to the tree
+  height (O(n) worst-case), though the instance-local priority PRNG makes that
+  unreachable via caller-chosen keys. If a hard worst-case matters, a deterministic
+  balanced BST (a later tier) is the fit.
+- You want `split` / `merge` to return INDEPENDENT copies. They rewire in place and
+  SHARE the source arena (consuming their inputs) -- that is what keeps them O(log n).
+
+**Measure it yourself:** `npm run witness` fits `get` against
+`nsPerOp = intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and
+sit inside its own band (`get [2.55, 5.95]` ns/level -- LOWER than SkipList's because a
+BST descent touches one node per level, not a tower of links; see
+[`decisions/0007-treap.md`](./decisions/0007-treap.md)), over the `[2^11, 2^17]` sweep.
+The O(n) linear-scan foil must MISS the floor. The witness ALSO prints the MAX single
+insert (the unlucky-priority rotation-chain tail): if your workload cares about the
+tail, not the mean, read that bar. `node --expose-gc test/torture.mjs` proves every hot
+op (get / set / delete / rank / select / successor / forEach / rangeIter) at 0 B/op.
 
 ---
 

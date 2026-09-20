@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -1408,5 +1408,578 @@ export class SkipList {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] SkipList full (capacity ' + this._cap + ')');
+    }
+}
+
+// Treap (v0.5.0 session) -- an AUGMENTED randomized-balanced ordered map (BELOW).
+
+/** Treap default PRNG seed when the caller does not supply one. */
+const TR_DEFAULT_SEED = 0x9E3779B9;
+
+/**
+ * Max Treap capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns (`_left` / `_right`), and each subtree
+ * count lives in a `Uint32Array` (`_size`); an index and a count must both fit an
+ * unsigned 32-bit word. `NIL = 0` reserves slot 0 as the empty-subtree sentinel, so
+ * live slots run [1, capacity]. The index / count arithmetic (Uint32 slot indices +
+ * `NIL = 0` + Uint32 subtree sizes), not the byte count, is the hard ceiling -- the
+ * same "the arithmetic caps it" reasoning as the array-embedded members.
+ */
+const TR_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A TREAP: a randomized, self-balancing BINARY SEARCH TREE that is ALSO an order-
+ * statistic tree (an AUGMENTED ordered map key -> value). It is the family's second
+ * randomized member and its second pointer-based one; where SkipList threads a
+ * probabilistic tower of forward links, a treap keeps a single BST whose SHAPE is
+ * randomized by a per-node priority, giving EXPECTED O(log n) height. The trick that
+ * keeps it zero-GC is the SkipList one: nodes are slot INDICES in flat typed-array
+ * columns over the same private free-list (NodePool), never heap objects.
+ *
+ * Two orders held at once (the treap invariant):
+ *   - BST order on `_key` (an in-order walk is ascending by key); and
+ *   - MAX-HEAP order on `_prio` (every parent's priority >= its children's), where
+ *     `_prio` is one instance-local NR-LCG draw per inserted node. A random priority
+ *     heap over a BST is provably balanced IN EXPECTATION.
+ * The augmentation is a third invariant: `_size[x]` is the number of nodes in x's
+ * subtree, maintained in the SAME pass as every link rewrite, so `rank` (how many
+ * keys are < x) and `select` (the k-th smallest key) are O(log n) via subtree counts.
+ *
+ * Storage (allocated once, sized to capacity + 1; slot 0 is the NIL sentinel whose
+ * `_size` is a permanent 0 -- null is not zero: slot 0 is "no subtree", never data):
+ *   - `_key` / `_value` `Float64Array` -- key and value at each slot.
+ *   - `_left` / `_right` `Uint32Array` -- child slot indices, `NIL = 0`.
+ *   - `_prio` `Uint32Array` -- the random heap priority at each slot.
+ *   - `_size` `Uint32Array` -- the subtree node count at each slot.
+ *   - `_pool` NodePool -- the free-list handing out slot indices [1, capacity].
+ *
+ * Honesty (randomized member): a hot op is EXPECTED O(log n), not worst-case -- the
+ * same contract as SkipList. An unlucky priority draw can build a tall thin tree and
+ * spike a single op; the MAX single insert (the rotation chain) is DISCLOSED, never
+ * gated (decisions/0007-treap.md, D-06). RECURSION DEPTH: `set` / `delete` / `split`
+ * / `merge` recurse over slot indices; the recursion depth equals the tree height,
+ * which is O(log n) EXPECTED and O(n) worst-case on a pathological priority draw.
+ * Because priorities come from the instance-local LCG (NOT caller-controlled), an
+ * adversary cannot force the worst case with chosen keys, so the expected bound holds
+ * for the fixed public surface -- this matches the EXPECTED contract and is DISCLOSED
+ * here + in the ADR, not silently shipped. The recursion uses the native call stack,
+ * not the GC heap, so every hot op is still 0 B/op.
+ *
+ * Keys and values are FINITE numbers (typeof-guarded BEFORE coercion -- Symbol /
+ * BigInt / NaN / +-Infinity fail closed with a `[lite-logn]` throw). `set` on an
+ * EXISTING key updates its value in place (no new node). A missing / empty query
+ * returns `undefined` (never throws). Fixed capacity: a full pool throws, never
+ * silently drops. `rangeIter` is a VERSION-STAMPED iterator -- any structural OR
+ * value mutation mid-iteration throws `[lite-logn]` rather than yield stale data.
+ *
+ * `split` / `merge` are O(log n) EXPECTED because they REWIRE nodes in place rather
+ * than copy: the two treaps a `split` returns (and the two a `merge` consumes) SHARE
+ * the source's backing arena (columns + free-list). `split` and `merge` therefore
+ * CONSUME their inputs (leaving them empty) and hand back views over the same store
+ * -- the only way to keep the structural ops sub-linear under a pooled allocator.
+ */
+export class Treap {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^31-1].
+     * @param {number} [seed]    PRNG seed; unsigned 32-bit integer (default fixed).
+     */
+    constructor(capacity, seed) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > TR_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] Treap capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        let s;
+        if (seed === undefined) {
+            s = TR_DEFAULT_SEED;
+        } else if (typeof seed !== 'number' || !Number.isInteger(seed) ||
+            seed < 0 || seed > 0xFFFFFFFF) {
+            throw new RangeError(
+                '[lite-logn] Treap seed must be an unsigned 32-bit integer, got ' +
+                String(seed));
+        } else {
+            s = seed >>> 0;
+        }
+        s = s | 0; // store the LCG state as a SIGNED int32 (an unboxed Smi) -- see _lcgNext
+        this._cap = capacity;                         // max live entries
+        this._key = new Float64Array(capacity + 1);   // key at each slot
+        this._value = new Float64Array(capacity + 1); // value at each slot
+        this._left = new Uint32Array(capacity + 1);   // left child slot; NIL = 0
+        this._right = new Uint32Array(capacity + 1);  // right child slot; NIL = 0
+        this._prio = new Uint32Array(capacity + 1);   // random heap priority
+        this._size = new Uint32Array(capacity + 1);   // subtree node count; _size[0] = 0
+        this._pool = new NodePool(capacity);          // free-list over slots [1, capacity]
+        this._root = 0;                               // NIL == empty tree
+        this._seed0 = s;                              // initial seed (clear resets to it)
+        this._seed = s;                               // live LCG state
+        this._version = 0;                            // iterator invalidation stamp
+        this._sr = 0;                                 // split scratch (the "right" root)
+    }
+
+    /** Live entry count. O(1) (the root subtree count). */
+    get size() { return this._root === 0 ? 0 : this._size[this._root]; }
+
+    /** The fixed capacity this treap was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /**
+     * The value stored under `key`, or `undefined` if absent (never throws on a
+     * missing / empty query). EXPECTED O(log n): a plain BST descent. Fails closed on
+     * a non-number / non-finite key (typeof-guarded first) with a `[lite-logn]` throw.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    get(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else return this._value[t];
+        }
+        return undefined;
+    }
+
+    /**
+     * True iff `key` is currently in the treap. EXPECTED O(log n). Fails closed on a
+     * non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    has(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else return true;
+        }
+        return false;
+    }
+
+    /**
+     * Insert `key -> value`, or UPDATE the value in place if `key` already exists (no
+     * new node). EXPECTED O(log n): a descent to check membership, then (on insert) a
+     * recursive splice that rotates the new node up until heap order is restored,
+     * fixing `_size` on the unwind. Fails closed: a non-finite key or value
+     * (typeof-guarded first), or a full pool, each throw `[lite-logn]` as a no-op.
+     * @param {number} key    a finite number
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(key, value) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root;
+        while (t !== 0) { // update in place if present -- no new node, no rebalance
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else { this._value[t] = value; this._version = (this._version + 1) | 0; return this; }
+        }
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        K[slot] = key;
+        this._value[slot] = value;
+        L[slot] = 0; R[slot] = 0;
+        this._size[slot] = 1;
+        this._seed = _lcgNext(this._seed);
+        this._prio[slot] = this._seed; // stored unsigned in the Uint32 column
+        this._root = this._insert(this._root, slot);
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove `key`. EXPECTED O(log n). Idempotent: returns `false` if `key` is absent
+     * (no throw), `true` if it was present and removed. Deletion MERGES the removed
+     * node's two subtrees (priority-ordered) then frees its slot, fixing `_size` on
+     * the unwind. Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    delete(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, found = false;
+        while (t !== 0) {
+            if (key < K[t]) t = L[t];
+            else if (key > K[t]) t = R[t];
+            else { found = true; break; }
+        }
+        if (!found) return false; // absent (no throw)
+        this._root = this._delete(this._root, key);
+        this._version = (this._version + 1) | 0;
+        return true;
+    }
+
+    /**
+     * The number of stored keys STRICTLY LESS than `x` (its rank / position). EXPECTED
+     * O(log n) via subtree counts: at each node, when the node's key is < `x`, its
+     * whole left subtree plus itself precede `x`. `x` need not be present; `rank` of
+     * the smallest key is 0, of a key past the max is `size`. Fails closed on a
+     * non-finite `x`.
+     * @param {number} x  a finite number
+     * @returns {number} count of keys < x, in [0, size]
+     */
+    rank(x) {
+        if (typeof x !== 'number' || !Number.isFinite(x)) return this._badKey(x);
+        const L = this._left, R = this._right, K = this._key, S = this._size;
+        let t = this._root, r = 0;
+        while (t !== 0) {
+            if (x <= K[t]) t = L[t];              // t (and its right) are >= x
+            else { r += S[L[t]] + 1; t = R[t]; }  // t's left subtree + t precede x
+        }
+        return r;
+    }
+
+    /**
+     * The k-th smallest KEY (0-based order statistic), or `undefined` if `k` is out of
+     * range [0, size). EXPECTED O(log n) via subtree counts. Fails closed on a
+     * non-integer `k` (typeof-guarded first); an in-type out-of-range `k` returns
+     * `undefined` (matching the soft-miss of `get`).
+     * @param {number} k  integer in [0, size)
+     * @returns {number|undefined} the k-th smallest key
+     */
+    select(k) {
+        if (typeof k !== 'number' || !Number.isInteger(k)) return this._badRank(k);
+        if (k < 0 || k >= this.size) return undefined;
+        const L = this._left, R = this._right, K = this._key, S = this._size;
+        let t = this._root;
+        for (;;) {
+            const ls = S[L[t]];
+            if (k < ls) t = L[t];
+            else if (k > ls) { k -= ls + 1; t = R[t]; }
+            else return K[t];
+        }
+    }
+
+    /**
+     * The smallest key STRICTLY greater than `key`, or `undefined` if none. EXPECTED
+     * O(log n). `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    successor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] > key) { best = K[t]; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    /**
+     * The largest key STRICTLY less than `key`, or `undefined` if none. EXPECTED
+     * O(log n). `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    predecessor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] < key) { best = K[t]; t = R[t]; }
+            else t = L[t];
+        }
+        return best;
+    }
+
+    /**
+     * A VERSION-STAMPED iterator over the keys in `[lo, hi]` INCLUSIVE, ascending.
+     * Bounds may be any number INCLUDING +-Infinity (an unbounded end); `NaN` fails
+     * closed, as does `lo > hi`. The generator captures the treap's version and throws
+     * `[lite-logn]` if any STRUCTURAL or VALUE mutation happens mid-iteration, rather
+     * than yield stale data. It walks by repeated `successor` (each step a fresh
+     * O(log n) descent, so NO scratch stack is allocated); the one documented per-
+     * protocol allocator is the {value, done} per step.
+     * @param {number} lo  lower bound (inclusive); may be -Infinity
+     * @param {number} hi  upper bound (inclusive); may be +Infinity
+     * @returns {IterableIterator<number>} the keys in [lo, hi], ascending
+     */
+    rangeIter(lo, hi) {
+        if (typeof lo !== 'number' || Number.isNaN(lo)) return this._badBound(lo);
+        if (typeof hi !== 'number' || Number.isNaN(hi)) return this._badBound(hi);
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._rangeGen(lo, hi);
+    }
+
+    /** @private version-stamped range generator (see rangeIter). */
+    *_rangeGen(lo, hi) {
+        const ver = this._version;
+        let cur = this._ceil(lo); // smallest key >= lo, or undefined
+        while (cur !== undefined && cur <= hi) {
+            if (this._version !== ver) {
+                throw new Error('[lite-logn] Treap mutated during iteration');
+            }
+            yield cur;
+            cur = this.successor(cur);
+        }
+    }
+
+    /**
+     * Visit every live `(key, value)` pair in ASCENDING key order. O(n) cold in-order
+     * walk (recursion depth = tree height), allocation-free in the loop body (pass a
+     * hoisted callback). Unlike rangeIter this is NOT version-stamped -- mutating from
+     * within the callback is the caller's responsibility (matching the other members).
+     * @param {(key:number, value:number, treap:Treap)=>void} fn
+     */
+    forEach(fn) {
+        this._forEach(this._root, fn);
+    }
+
+    /** @private recursive in-order walk. */
+    _forEach(t, fn) {
+        if (t === 0) return;
+        this._forEach(this._left[t], fn);
+        fn(this._key[t], this._value[t], this);
+        this._forEach(this._right[t], fn);
+    }
+
+    /**
+     * Empty the treap, keeping the fixed capacity. O(capacity) cold path: returns
+     * every node to the pool, points the root at NIL, and restores the PRNG to its
+     * initial seed (a cleared treap replays a fresh one). @returns {this}
+     */
+    clear() {
+        this._pool.clear();
+        this._root = 0;
+        this._seed = this._seed0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * SPLIT `this` at `key` into two treaps: `[left, right]` where `left` holds every
+     * key STRICTLY LESS than `key` and `right` holds every key >= `key`. EXPECTED
+     * O(log n) -- it REWIRES nodes in place (no copy), so the returned treaps SHARE
+     * this treap's backing arena, and `this` is CONSUMED (left empty). Fails closed on
+     * a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {[Treap, Treap]}  [keys < key, keys >= key]
+     */
+    split(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const l = this._split(this._root, key);
+        const r = this._sr;
+        const left = Treap._view(this, l);
+        const right = Treap._view(this, r);
+        this._root = 0; // consumed: its nodes now belong to left / right
+        this._version = (this._version + 1) | 0;
+        return [left, right];
+    }
+
+    /**
+     * MERGE two treaps `a` and `b` -- where EVERY key of `a` is STRICTLY LESS than
+     * every key of `b` -- into one, returning it. EXPECTED O(log n): it rewires nodes
+     * in place, so `a` and `b` MUST share a backing arena (i.e. both came from a prior
+     * `split`), and BOTH are CONSUMED. Fails closed: non-Treap inputs, treaps from
+     * different arenas, or an overlapping key range each throw `[lite-logn]`.
+     * @param {Treap} a  all keys strictly less than every key of b
+     * @param {Treap} b  all keys strictly greater than every key of a
+     * @returns {Treap}
+     */
+    static merge(a, b) {
+        if (!(a instanceof Treap) || !(b instanceof Treap)) {
+            throw new TypeError('[lite-logn] Treap.merge needs two Treap instances');
+        }
+        if (a._key !== b._key) {
+            throw new Error(
+                '[lite-logn] Treap.merge requires two treaps sharing an arena (from the same split)');
+        }
+        if (a._root !== 0 && b._root !== 0) {
+            let m = a._root; while (a._right[m] !== 0) m = a._right[m]; // max key of a
+            let n = b._root; while (b._left[n] !== 0) n = b._left[n];   // min key of b
+            if (a._key[m] >= b._key[n]) {
+                throw new Error(
+                    '[lite-logn] Treap.merge requires all keys of a < all keys of b');
+            }
+        }
+        const root = a._merge(a._root, b._root);
+        const out = Treap._view(a, root);
+        a._root = 0; b._root = 0; // both consumed
+        a._version = (a._version + 1) | 0;
+        b._version = (b._version + 1) | 0;
+        return out;
+    }
+
+    // ---- private rotations + recursive structure (hot bodies) ---------------
+
+    /**
+     * @private true iff node `a` outranks node `b` in the priority MAX-heap. Priority
+     * ties (astronomically rare across 32-bit LCG draws) break by key, so the tree
+     * shape is a deterministic function of the (key, priority) set -- never ambiguous.
+     */
+    _higher(a, b) {
+        const pa = this._prio[a], pb = this._prio[b];
+        return pa > pb || (pa === pb && this._key[a] < this._key[b]);
+    }
+
+    /**
+     * @private right rotation: `y`'s left child `x` becomes the subtree root. Rewrites
+     * two child links and recomputes the two affected `_size` cells. Returns `x`.
+     */
+    _rotR(y) {
+        const L = this._left, R = this._right, S = this._size;
+        const x = L[y];
+        L[y] = R[x];
+        R[x] = y;
+        S[y] = S[L[y]] + S[R[y]] + 1;
+        S[x] = S[L[x]] + S[R[x]] + 1;
+        return x;
+    }
+
+    /**
+     * @private left rotation: `y`'s right child `x` becomes the subtree root. Rewrites
+     * two child links and recomputes the two affected `_size` cells. Returns `x`.
+     */
+    _rotL(y) {
+        const L = this._left, R = this._right, S = this._size;
+        const x = R[y];
+        R[y] = L[x];
+        L[x] = y;
+        S[y] = S[L[y]] + S[R[y]] + 1;
+        S[x] = S[L[x]] + S[R[x]] + 1;
+        return x;
+    }
+
+    /** @private recursive BST insert of leaf slot `s`, rotating up to fix heap order. */
+    _insert(t, s) {
+        if (t === 0) return s; // s already has size 1, NIL children, its priority set
+        const L = this._left, R = this._right, S = this._size, K = this._key;
+        if (K[s] < K[t]) {
+            L[t] = this._insert(L[t], s);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            if (this._higher(L[t], t)) return this._rotR(t);
+        } else {
+            R[t] = this._insert(R[t], s);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            if (this._higher(R[t], t)) return this._rotL(t);
+        }
+        return t;
+    }
+
+    /** @private recursive delete of `key` from subtree `t`; frees the removed slot. */
+    _delete(t, key) {
+        const L = this._left, R = this._right, S = this._size, K = this._key;
+        if (key < K[t]) {
+            L[t] = this._delete(L[t], key);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            return t;
+        }
+        if (key > K[t]) {
+            R[t] = this._delete(R[t], key);
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            return t;
+        }
+        const merged = this._merge(L[t], R[t]); // t removed: fuse its two subtrees
+        this._pool.free(t);
+        return merged;
+    }
+
+    /** @private recursive priority merge of two subtrees (all keys in a < all in b). */
+    _merge(a, b) {
+        if (a === 0) return b;
+        if (b === 0) return a;
+        const L = this._left, R = this._right, S = this._size;
+        if (this._higher(a, b)) {
+            R[a] = this._merge(R[a], b);
+            S[a] = S[L[a]] + S[R[a]] + 1;
+            return a;
+        }
+        L[b] = this._merge(a, L[b]);
+        S[b] = S[L[b]] + S[R[b]] + 1;
+        return b;
+    }
+
+    /**
+     * @private recursive split of subtree `t` by `key`. Returns the LEFT root (keys <
+     * key); the RIGHT root (keys >= key) is left in `this._sr` (read by the caller
+     * immediately, before any sibling recursion, so a single scratch field suffices).
+     */
+    _split(t, key) {
+        if (t === 0) { this._sr = 0; return 0; }
+        const L = this._left, R = this._right, K = this._key, S = this._size;
+        if (K[t] < key) {
+            const l1 = this._split(R[t], key); // this._sr := the right part
+            R[t] = l1;
+            S[t] = S[L[t]] + S[R[t]] + 1;
+            return t;                          // pair (t, this._sr)
+        }
+        const l1 = this._split(L[t], key);     // this._sr := R1 ; l1 := L1
+        L[t] = this._sr;
+        S[t] = S[L[t]] + S[R[t]] + 1;
+        this._sr = t;
+        return l1;                             // pair (l1, t)
+    }
+
+    /** @private smallest key >= `lo`, or undefined (the range-iter start). */
+    _ceil(lo) {
+        const L = this._left, R = this._right, K = this._key;
+        let t = this._root, best;
+        while (t !== 0) {
+            if (K[t] >= lo) { best = K[t]; t = L[t]; }
+            else t = R[t];
+        }
+        return best;
+    }
+
+    /** @private build a Treap VIEW sharing `src`'s arena with a given root (split/merge). */
+    static _view(src, root) {
+        const t = Object.create(Treap.prototype);
+        t._cap = src._cap;
+        t._key = src._key; t._value = src._value;
+        t._left = src._left; t._right = src._right;
+        t._prio = src._prio; t._size = src._size;
+        t._pool = src._pool;
+        t._root = root;
+        t._seed0 = src._seed0; t._seed = src._seed;
+        t._version = 0; t._sr = 0;
+        return t;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] Treap key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] Treap value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badRank(k) {
+        throw new TypeError(
+            '[lite-logn] Treap select index must be an integer, got ' + String(k));
+    }
+
+    /** @private */
+    _badBound(b) {
+        throw new TypeError(
+            '[lite-logn] Treap rangeIter bound must be a number (not NaN), got ' + String(b));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] Treap rangeIter needs lo <= hi, got lo=' + String(lo) +
+            ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] Treap full (capacity ' + this._cap + ')');
     }
 }

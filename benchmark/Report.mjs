@@ -328,7 +328,7 @@ export function renderHtml(payload) {
                 lf, num(r.nearFullNs), io];
         });
         sections.push(section('D7 -- Scalability across key types + load factors + insertion order',
-            'lite-logn members are numeric substrates: string + object keys read n/a (never 0). Load factors 0.3/0.5/0.7/0.9. Insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList; the index-addressed Fenwick + SegmentTree read n/a (positional, order-invariant).',
+            'lite-logn members are numeric substrates: string + object keys read n/a (never 0). Load factors 0.3/0.5/0.7/0.9. Insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList + Treap; the index-addressed Fenwick + SegmentTree read n/a (positional, order-invariant).',
             null, tableRows(['member', 'int ns/op', 'string', 'object', 'load 0.3/0.5/0.7/0.9', '99% full', 'insert sorted/random/adv (ns/op)'], rows)));
     }
 
@@ -341,7 +341,7 @@ export function renderHtml(payload) {
             return [m, num(r.churn.nsPerOp), ordered];
         });
         sections.push(section('D8 -- Workload micro-benchmarks',
-            'Churn (insert/delete or update the same keys -- all members) + ordered scan (successor + rangeIter -- SkipList only). Inapplicable workloads read n/a.',
+            'Churn (insert/delete or update the same keys -- all members) + ordered scan (successor + rangeIter -- SkipList + Treap). Inapplicable workloads read n/a.',
             null, tableRows(['member', 'churn ns/op', 'ordered (successor / range-scan)'], rows)));
     }
 
@@ -361,11 +361,11 @@ export function renderHtml(payload) {
                     r.zeroAlloc ? 'yes' : 'NO'];
             });
             const exclRows = Object.keys(excl).map((m) => [m, String(excl[m])]);
-            sections.push(section('clear() invariance witness (4 members)',
+            sections.push(section('clear() invariance witness (5 members)',
                 'clear() returns each structure to its pristine EMPTY invariant (heap/list size 0; the ' +
                 'index-addressed Fenwick/SegmentTree accumulators zeroed), retains the fixed backing ' +
                 'store (bytes delta 0 across ' + firstCycles + ' fill/clear cycles -- zero-alloc), and ' +
-                'leaves it reusable (a refill after clear brings the content back up). All four SUBJECTS ' +
+                'leaves it reusable (a refill after clear brings the content back up). All five SUBJECTS ' +
                 'carry a real clear(); the EXCLUDED table names what is out of scope and why (the private ' +
                 'NodePool free-list, and the read/traverse surface -- named with a reason, never dropped).',
                 null,
@@ -384,8 +384,9 @@ export function renderHtml(payload) {
                 'Each (member.op) carries its OWN honesty class -- painting any hot op O(1) is the ' +
                 'overclaim this table prevents (O(1) is the SIBLING lite-o1 family\'s contract, not ' +
                 'lite-logn\'s). The deterministic structures (BinaryHeap/Fenwick/SegmentTree) climb a ' +
-                'full-height walk -> O(log n) WORST-case; SkipList\'s randomized towers make its bound ' +
-                'O(log n) EXPECTED (never worst-case) with a DISCLOSED max-single-insert tail. peek/topKey ' +
+                'full-height walk -> O(log n) WORST-case; the randomized SkipList (towers) and Treap ' +
+                '(priority heap) make their bound O(log n) EXPECTED (never worst-case) with a DISCLOSED ' +
+                'max-single-insert tail. peek/topKey ' +
                 'are O(1) getters, deliberately NOT witness ops, so they are not in this table.',
                 null, tableRows(['op-row', 'honesty class'], rows)));
         }

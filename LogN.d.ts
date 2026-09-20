@@ -171,3 +171,58 @@ export class SkipList {
     /** Empty the list, keeping capacity (resets the PRNG to its initial seed). */
     clear(): this;
 }
+
+/**
+ * A treap: a randomized, self-balancing BST that is also an order-statistic tree (an
+ * AUGMENTED ordered map key -> value). BST order on keys x max-heap order on a per-node
+ * random priority gives EXPECTED O(log n) height; a subtree-size column adds O(log n)
+ * rank / select / split / merge. Nodes are slot INDICES in flat typed-array columns
+ * over a private free-list (no heap object per op). Keys and values are finite numbers
+ * (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed). set
+ * on an existing key updates the value in place. EXPECTED, not worst-case (an unlucky
+ * priority draw can spike one op; the MAX single insert is disclosed, not gated). Fixed
+ * capacity: a full pool throws. Every hot op allocates zero bytes.
+ */
+export class Treap {
+    /** @param capacity exact max live entries; integer in [1, 2^31-1].
+     *  @param seed PRNG seed; unsigned 32-bit integer (default fixed). */
+    constructor(capacity: number, seed?: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this treap was sized for. */
+    readonly capacity: number;
+
+    /** The value under key, or undefined if absent (no throw). Non-finite key throws. */
+    get(key: number): number | undefined;
+    /** True iff key is currently stored. Non-finite key throws. */
+    has(key: number): boolean;
+    /** Insert key -> value, or update the value in place if key exists. Non-finite
+     *  key/value throws; a full pool throws. */
+    set(key: number, value: number): this;
+    /** Remove key; true if it was present, false if absent (idempotent). Non-finite key throws. */
+    delete(key: number): boolean;
+    /** Count of stored keys strictly less than x (its rank), in [0, size]. Non-finite x throws. */
+    rank(x: number): number;
+    /** The k-th smallest key (0-based), or undefined if k is out of [0, size). Non-integer k throws. */
+    select(k: number): number | undefined;
+    /** The smallest key strictly greater than key, or undefined. Non-finite key throws. */
+    successor(key: number): number | undefined;
+    /** The largest key strictly less than key, or undefined. Non-finite key throws. */
+    predecessor(key: number): number | undefined;
+    /** A version-stamped iterator over keys in [lo, hi] inclusive, ascending. Bounds
+     *  may be +-Infinity (unbounded ends); NaN or lo > hi throws; mutation during
+     *  iteration throws. */
+    rangeIter(lo: number, hi: number): IterableIterator<number>;
+    /** Visit every (key, value) pair in ascending key order. */
+    forEach(fn: (key: number, value: number, treap: Treap) => void): void;
+    /** Empty the treap, keeping capacity (resets the PRNG to its initial seed). */
+    clear(): this;
+
+    /** Split at key into [left (keys < key), right (keys >= key)]; CONSUMES this and
+     *  returns two treaps SHARING this treap's backing arena. Non-finite key throws. */
+    split(key: number): [Treap, Treap];
+    /** Merge two arena-sharing treaps where every key of a < every key of b, CONSUMING
+     *  both. Non-Treap inputs, different arenas, or an overlapping range throw. */
+    static merge(a: Treap, b: Treap): Treap;
+}

@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -112,6 +112,17 @@ async function main() {
             sl.successor(3);
             sl.delete(5);
             tracker.track(sl, noopRelease, 3 * CYCLES + i, { audit: true });
+            // A fresh Treap per cycle, exercised then dropped. Same held-value
+            // contract: a Treap owns only its six typed arrays + a private NodePool
+            // (no external resource), so the no-op cleanup never defeats finalization.
+            const tr = new Treap(64, (i & 0xffff) >>> 0);
+            for (let k = 0; k < 32; k++) tr.set((k * 2654435761) & 63, k);
+            tr.get(7);
+            tr.rank(20);
+            tr.select(3);
+            tr.successor(3);
+            tr.delete(5);
+            tracker.track(tr, noopRelease, 4 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -278,6 +289,58 @@ async function main() {
         lk = (lk + 1) | 0;
     };
 
+    // Treap: one out-of-loop tree prefilled to half capacity (a warmed, stable tree).
+    // Each lane is a real hot op that MUST allocate zero RETAINED bytes -- links are
+    // slot INDICES from a private free-list, never heap objects, the recursive
+    // set/delete/merge run on the native call stack, and the rangeIter generator's
+    // per-step {value, done} objects are TRANSIENT, so retained growth is 0.
+    const tr = new Treap(CAP, 0x9E3779B9);
+    for (let i = 0; i < HALF; i++) tr.set(i, (i * 2654435761) & 0xffff);
+
+    let trk = 0, tracc = 0;
+    // get: a hit on a resident cycling key, folded into an accumulator.
+    const stepTrGet = () => {
+        tracc = (tracc + (tr.get(trk & HMASK) | 0)) | 0;
+        trk = (trk + 1) | 0;
+    };
+    // set: an in-place value update of a resident key (no new node) -- zero allocation.
+    const stepTrSet = () => {
+        tr.set(trk & HMASK, trk & 0xffff);
+        trk = (trk + 1) | 0;
+    };
+    // delete + re-set: addressable delete then re-insert of the SAME key -> steady
+    // size, exercising the free-list free/alloc + recursive merge/insert (call stack).
+    const stepTrDelete = () => {
+        const key = trk & HMASK;
+        if (tr.delete(key)) tr.set(key, (trk * 2246822519) & 0xffff);
+        trk = (trk + 1) | 0;
+    };
+    // rank / select: order-statistic descents over subtree counts, folded in.
+    const stepTrRankSelect = () => {
+        tracc = (tracc + (tr.rank(trk & HMASK) | 0)) | 0;
+        const v = tr.select(trk & (HMASK >> 1));
+        tracc = (tracc + (v === undefined ? 0 : v | 0)) | 0;
+        trk = (trk + 1) | 0;
+    };
+    // successor: a strictly-greater lookup on a cycling key, folded in.
+    const stepTrSuccessor = () => {
+        const v = tr.successor(trk & HMASK);
+        tracc = (tracc + (v === undefined ? 0 : v | 0)) | 0;
+        trk = (trk + 1) | 0;
+    };
+    // forEach: the O(n) ascending in-order recursive walk through a HOISTED callback
+    // that closes over nothing but the shared accumulator -- no per-call closure alloc.
+    let trfeAcc = 0;
+    function trForEachCb(key, value) { trfeAcc = (trfeAcc + (key | 0) + (value | 0)) | 0; }
+    const stepTrForEach = () => { tr.forEach(trForEachCb); };
+    // rangeIter: fully consume a small fixed-width window; the generator is transient
+    // (dropped each call), so retained growth is 0.
+    const stepTrRangeIter = () => {
+        const lo = trk & (HMASK >> 1);
+        for (const key of tr.rangeIter(lo, lo + 8)) tracc = (tracc + (key | 0)) | 0;
+        trk = (trk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -294,7 +357,8 @@ async function main() {
     for (const step of [stepPushPop, stepChangeKey, stepRemove, stepRead,
         stepUpdate, stepPrefix, stepAt, stepRangeSum, stepSet,
         stepSegUpdate, stepSegQuery, stepSegAt,
-        stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor]) {
+        stepSlGet, stepSlSet, stepSlDelete, stepSlSuccessor,
+        stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -305,7 +369,7 @@ async function main() {
     // iteration budget. rangeIter walks a window and drives the generator protocol,
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
-    for (const step of [stepForEach, stepSegForEach, stepSlRangeIter]) {
+    for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -317,6 +381,8 @@ async function main() {
     if (sacc === 0x7fffffff) throw new Error('unreachable'); // keep sacc live
     if (sfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep sfeAcc live
     if (lacc === 0x7fffffff) throw new Error('unreachable'); // keep lacc live
+    if (tracc === 0x7fffffff) throw new Error('unreachable'); // keep tracc live
+    if (trfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep trfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -354,6 +420,17 @@ async function main() {
         sink = (sink + (sl.get(i & HMASK) | 0)) | 0;
         if ((i & 7) === 0) { const v = sl.successor(i & HMASK); sink = (sink + (v === undefined ? 0 : v | 0)) | 0; }
         if ((i & 63) === 0) { const key = i & HMASK; if (sl.delete(key)) sl.set(key, i & 0xffff); }
+        // Treap churn every op: an in-place value set, a get and a rank, plus a
+        // delete+re-set every 64th (pool free/alloc + recursive merge) and a
+        // select+successor every 8th. Steady tree, zero alloc.
+        tr.set(i & HMASK, i & 0xffff);
+        sink = (sink + (tr.get(i & HMASK) | 0) + (tr.rank(i & HMASK) | 0)) | 0;
+        if ((i & 7) === 0) {
+            const sv = tr.select(i & (HMASK >> 1));
+            const su = tr.successor(i & HMASK);
+            sink = (sink + (sv === undefined ? 0 : sv | 0) + (su === undefined ? 0 : su | 0)) | 0;
+        }
+        if ((i & 63) === 0) { const key = i & HMASK; if (tr.delete(key)) tr.set(key, i & 0xffff); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -371,6 +448,7 @@ async function main() {
     const abFen = new Fenwick(1024);
     const abSeg = new SegmentTree(1024, 'sum');
     const abSl = new SkipList(1024, 0x1234);
+    const abTr = new Treap(1024, 0x1234);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -398,6 +476,17 @@ async function main() {
         if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
         abSl.clear();
         if (abSl._pool.activeSlots + abSl._pool.freeListLength !== abSl._pool.capacity) conservationOk = false;
+        // Treap: same free-list conservation contract as SkipList. A fill, then a real
+        // delete() -> _merge -> _pool.free() round trip on half the slots, then a
+        // refill, then clear -- the invariant must hold after each phase.
+        for (let i = 0; i < 1024; i++) abTr.set((i * 2654435761) & 1023, i);
+        if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abTr.delete((i * 2654435761) & 1023);
+        if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
+        for (let i = 0; i < 512; i++) abTr.set((i * 2654435761) & 1023, i);
+        if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
+        abTr.clear();
+        if (abTr._pool.activeSlots + abTr._pool.freeListLength !== abTr._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -415,7 +504,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

@@ -1,8 +1,8 @@
 {
   "name": "@zakkster/lite-logn",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "0.4.0",
-  "description": "Zero-dependency, zero-GC family of O(log n) data structures that proves its logarithm: BinaryHeap (array-embedded O(log n) push/pop min-heap), Fenwick/BIT (O(log n) point-update AND prefix-sum via the i & -i walk), SegmentTree (O(log n) associative range-query + point-update), and SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool) with a log-linear O(log n) Witness harness that fits nsPerOp = intercept + slope*log2(n) and shows the straight log line while an O(n) foil leaves it. Tree-shakeable named exports.",
+  "version": "0.5.0",
+  "description": "Zero-dependency, zero-GC family of O(log n) data structures that proves its logarithm: BinaryHeap (array-embedded O(log n) push/pop min-heap), Fenwick/BIT (O(log n) point-update AND prefix-sum via the i & -i walk), SegmentTree (O(log n) associative range-query + point-update), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), and Treap (randomized-balanced augmented ordered map with O(log n) rank/select/split/merge) with a log-linear O(log n) Witness harness that fits nsPerOp = intercept + slope*log2(n) and shows the straight log line while an O(n) foil leaves it. Tree-shakeable named exports.",
   "type": "module",
   "main": "./LogN.js",
   "module": "./LogN.js",
@@ -24,7 +24,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js test/Bench.test.mjs",
+    "test": "node --test test/*.test.js test/*.test.mjs",
     "test:types": "tsc -p test/types/tsconfig.json",
     "torture": "node --expose-gc test/torture.mjs",
     "witness": "node test/witness.mjs",
@@ -48,7 +48,9 @@
     "range-query",
     "range-sum",
     "skip-list",
+    "treap",
     "ordered-set",
+    "ordered-map",
     "balanced-bst",
     "bst",
     "log-n",

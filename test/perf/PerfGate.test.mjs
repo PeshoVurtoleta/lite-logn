@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -333,6 +333,102 @@ const slSuccessorChurn = {
     statsOf(s) { return { grows: slGrows(s) }; },
 };
 
+/** Treap's zero-alloc counter: its six typed-array buffers plus the private pool's
+ *  free-stack, all fixed at construction, so the delta across the window must be 0. */
+function trGrows(s) {
+    const t = s.tr;
+    return t._key.buffer.byteLength + t._value.buffer.byteLength +
+        t._left.buffer.byteLength + t._right.buffer.byteLength +
+        t._prio.buffer.byteLength + t._size.buffer.byteLength +
+        t._pool._free.buffer.byteLength;
+}
+
+/** A Treap prefilled to half capacity (a warmed, stable tree). */
+function trFill() {
+    const tr = new Treap(CAP, 0x9E3779B9);
+    for (let i = 0; i < (CAP >> 1); i++) tr.set(i, (i * 2654435761) & 0xffff);
+    return tr;
+}
+
+const TRMASK = (CAP >> 1) - 1; // keys 0..CAP/2-1 resident
+
+/**
+ * get churn: a hit on a resident cycling key, folded into an int32 accumulator. The
+ * BST descent chases slot INDICES (no heap object); zero allocation.
+ */
+const trGetChurn = {
+    name: 'Treap get churn',
+    setup() { return { tr: trFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const tr = s.tr;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) { acc = (acc + (tr.get(t & TRMASK) | 0)) | 0; t = (t + 1) | 0; }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: trGrows(s) }; },
+};
+
+/**
+ * set churn: an in-place value update of a resident cycling key (no new node) -- the
+ * pure set hot path, zero allocation.
+ */
+const trSetChurn = {
+    name: 'Treap set churn (in-place update)',
+    setup() { return { tr: trFill(), tick: 0 }; },
+    hot(s, n) {
+        const tr = s.tr;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { tr.set(t & TRMASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: trGrows(s) }; },
+};
+
+/**
+ * delete + re-set churn: addressable delete then re-insert of the SAME key -> steady
+ * size, exercising the private free-list alloc/free + the recursive merge/insert
+ * (native call stack, no heap object). Zero allocation.
+ */
+const trDeleteChurn = {
+    name: 'Treap delete + re-set churn',
+    setup() { return { tr: trFill(), tick: 0 }; },
+    hot(s, n) {
+        const tr = s.tr;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & TRMASK;
+            if (tr.delete(key)) tr.set(key, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: trGrows(s) }; },
+};
+
+/**
+ * rank / select / successor mix: the order-statistic + ordered lookups over a resident
+ * cycling key, folded into an int32 accumulator. All O(log n) descents; zero allocation.
+ */
+const trOrderMix = {
+    name: 'Treap rank/select/successor mix',
+    setup() { return { tr: trFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const tr = s.tr;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & TRMASK;
+            acc = (acc + (tr.rank(key) | 0)) | 0;
+            const sv = tr.select(key & (TRMASK >> 1));
+            acc = (acc + (sv === undefined ? 0 : sv | 0)) | 0;
+            const su = tr.successor(key);
+            acc = (acc + (su === undefined ? 0 : su | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: trGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -365,6 +461,7 @@ zgcSuite({
     scenarios: [pushPopChurn, changeKeyChurn, readMix,
         fenUpdateChurn, fenPrefixChurn, fenAtRangeMix,
         segUpdateChurn, segQueryChurn, segGrowsMix,
-        slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn],
+        slGetChurn, slSetChurn, slDeleteChurn, slSuccessorChurn,
+        trGetChurn, trSetChurn, trDeleteChurn, trOrderMix],
     mustFail: [teethMustFailAlloc],
 });

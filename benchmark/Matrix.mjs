@@ -23,15 +23,16 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The four shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList'];
+/** The five shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap'];
 
-/** The seven gated D1 witness op-rows (member.op), in build order. */
+/** The eight gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
     'SegmentTree.update', 'SegmentTree.query',
     'SkipList.get', 'SkipList.set',
+    'Treap.get',
 ];
 
 /** The eight measurement dimensions. */
@@ -55,6 +56,7 @@ export const BASELINE = {
     Fenwick: 'prefix-array-rebuild/re-sum',
     SegmentTree: 'whole-tree-rebuild/scan-fold',
     SkipList: 'sorted-array-insert/linear-scan',
+    Treap: 'linear-scan',
 };
 
 /**
@@ -69,6 +71,10 @@ export const COUNTER_FOIL = {
     Fenwick: NA,
     SegmentTree: NA,
     SkipList: 'Map (O(1) get/set, but no successor/predecessor/range -- the order tax)',
+    // Treap is also an ordered map with the SAME order tax vs a Map, but the counter-foil
+    // is a one-time family illustration carried by SkipList (the family's ordered
+    // representative); Treap reads NA here to avoid a redundant second Map comparison.
+    Treap: NA,
 };
 
 /**
@@ -114,6 +120,12 @@ export const RATIONALE = {
             'is a native Map -- FASTER (O(1)) at get/set but ORDER-BLIND (no successor/predecessor/range), ' +
             'so the log tax buys exactly the ordered queries Map cannot answer.',
     },
+    Treap: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear scan over a plain array (O(n) per lookup) is the honest default before the balanced ' +
+            'BST; the treap buys O(log n) get/rank/select/successor. The Map order-tax counterpoint is ' +
+            'carried once by SkipList (the family\'s ordered representative), so Treap does not repeat it.',
+    },
 };
 
 /**
@@ -157,14 +169,14 @@ export function supportsKeyType(member, keyType) {
 export function supportsWorkload(member, workload) {
     if (!SUBJECTS.includes(member)) return false;
     if (workload === 'churn') return true;
-    if (workload === 'ordered') return member === 'SkipList';
+    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap';
     return false;
 }
 
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (4 x 8 = 32 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (5 x 8 = 40 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -206,10 +218,12 @@ export const OLOGN_WORST = 'O(log n) worst-case';
 export const OLOGN_EXPECTED = 'O(log n) expected';
 
 /**
- * The per-op honesty table, keyed `member.op`. Covers the 7 gated witness op-rows
- * (Matrix.OP_ROWS) PLUS the two non-gated-but-honest ops the family surface exposes
+ * The per-op honesty table, keyed `member.op`. Covers the 8 gated witness op-rows
+ * (Matrix.OP_ROWS) PLUS the four non-gated-but-honest ops the family surface exposes
  * (BinaryHeap.push climbs the same sift as pop; SkipList.delete descends the same
- * randomized tower as get/set). SkipList's three ops read EXPECTED, never worst-case.
+ * randomized tower as get/set; Treap.set/delete rotate/rewire the same randomized
+ * priority-heap height as get). SkipList's and Treap's ops all read EXPECTED, never
+ * worst-case.
  */
 export const OP_CLASS = Object.freeze({
     'BinaryHeap.push': OLOGN_WORST,   // sift-up the full height of the heap array
@@ -221,6 +235,9 @@ export const OP_CLASS = Object.freeze({
     'SkipList.get': OLOGN_EXPECTED,   // randomized tower height -> EXPECTED, not worst-case
     'SkipList.set': OLOGN_EXPECTED,   // ditto (+ a DISCLOSED max-single-insert tail)
     'SkipList.delete': OLOGN_EXPECTED, // ditto
+    'Treap.get': OLOGN_EXPECTED,      // randomized priority-heap height -> EXPECTED (the gated row)
+    'Treap.set': OLOGN_EXPECTED,      // ditto (+ a DISCLOSED max-single-insert rotation-chain tail)
+    'Treap.delete': OLOGN_EXPECTED,   // ditto
 });
 
 // ===========================================================================
@@ -239,7 +256,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The four members whose clear()+reuse cycle is an elevated first-class witness. */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are
