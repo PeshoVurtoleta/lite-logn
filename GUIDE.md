@@ -473,6 +473,12 @@ metadata at all.
 - You iterate while reading. A `get` / `has` SPLAYS (restructures + bumps the version),
   so a read taken inside a `rangeIter` fails closed. Reads are not iteration-safe here;
   finish the walk first (or use a read-only member).
+- You do a FULL `forEach` / `[Symbol.iterator]` / `rangeIter` walk over a tree built by pure
+  SORTED insertion with no intervening access. The non-splaying walks RE-DESCEND by key each
+  step (`O(n * depth)`), and a sorted-cold splay tree is a depth-n chain, so the walk degrades
+  to `O(n^2)`. A splay tree self-balances only through access -- splay a key (or insert in mixed
+  order) before a big walk, or reach for **SkipList** / **Treap** / **Scapegoat** if you build
+  sorted and iterate before ever reading.
 
 **Measure it yourself:** `npm run witness` fits `get` over a UNIFORM-RANDOM working set of
 size n (so the amortized line shows -- a skewed pattern would flatten it, which is the

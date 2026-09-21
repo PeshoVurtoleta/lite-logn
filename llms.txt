@@ -104,7 +104,10 @@ each landing append-only):
   A READ MUTATES: get / has / successor / predecessor SPLAY and bump the iteration version, so
   an in-flight rangeIter fails closed even on a read; rangeIter / forEach / [Symbol.iterator]
   are NON-splaying in-order walks (re-descend by key each step, leave _root + _version byte-
-  identical). delete splays the target up then JOINS its subtrees (splay the max of the left
+  identical) -- so they cost O(n * depth) (forEach / iterator) or O((k+1) * depth) (rangeIter):
+  O(n log n) on a balanced / used tree, but O(n^2) on a COLD tree built by pure sorted insertion
+  with no intervening access (splay a key, or insert in mixed order, to keep it shallow before a
+  full walk). delete splays the target up then JOINS its subtrees (splay the max of the left
   subtree, hang the right subtree off it). AMORTIZED + DETERMINISTIC (no RNG): a single cold
   deep access can splay an O(n) chain, DISCLOSED by the witness, never gated. This is the LEAN
   member: deliberately NO rank / select / split / merge (the documented asymmetry vs Treap /

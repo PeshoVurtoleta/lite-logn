@@ -860,7 +860,21 @@ function buildFull(member, n) {
     else if (member === 'Treap') { obj = new Treap(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'Scapegoat') { obj = new Scapegoat(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'MinMaxHeap') { obj = new MinMaxHeap(n); for (let k = 0; k < n; k++) obj.push(k, k); }
-    else if (member === 'SplayTree') { obj = new SplayTree(n); for (let k = 0; k < n; k++) obj.set(k, k); }
+    else if (member === 'SplayTree') {
+        // A splay tree's shape depends on its insert/access history. A SORTED-COLD build
+        // (ascending set, no intervening access) degenerates to a depth-n chain, and the
+        // non-splaying forEach re-descends from the root per element -> O(n^2) traversal that
+        // stalls the D4 dense-iter stride sweep at large n (~19 min at n=1e6). A real splay
+        // tree has been ACCESSED and is shallow, so build in a deterministic shuffled order
+        // (depth ~O(log n), forEach ~O(n log n)) -- representative of use, not the artificial
+        // sorted-cold worst case. Cold setup: the order[] alloc is off every timed body.
+        obj = new SplayTree(n);
+        const order = new Uint32Array(n);
+        for (let k = 0; k < n; k++) order[k] = k;
+        const rng = prng(DEFAULT_SEED ^ 0x53504c59); // 'SPLY'
+        for (let i = n - 1; i > 0; i--) { const j = rng() % (i + 1); const t = order[i]; order[i] = order[j]; order[j] = t; }
+        for (let k = 0; k < n; k++) obj.set(order[k], order[k]);
+    }
     else if (member === 'BinomialHeap') { obj = new BinomialHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'PairingHeap') { obj = new PairingHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'FibonacciHeap') { obj = new FibonacciHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
