@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -333,6 +333,28 @@ export const F2D_UPDATE_SLOPE_HI = 4.96;      // median 3.542 * 1.4
 export const F2D_RECTSUM_SLOPE_LO = 2.90;     // median 4.832 * 0.6
 export const F2D_RECTSUM_SLOPE_HI = 6.77;     // median 4.832 * 1.4
 
+// --- SegmentTree2D (v0.13.0): shared R^2 floor, OWN bands on the SQUARED-log axis (0015) --
+// The family's SECOND squared-log witness member (Fenwick2D was the first). A 2D segment-tree op
+// descends / climbs TWO nested iterative segment trees (a tree OF trees), so its cost is
+// O(log^2 n): for a SQUARE grid of side n the honest fit is nsPerOp = intercept + slope*(log2 n)^2
+// -- a STRAIGHT line on the SAME (log2 n)^2 x-axis (the `xOf` registry hook Fenwick2D introduced;
+// every 1D lane keeps the default xOf = log2). The shared R^2 floor (0.958, D-02) is UNCHANGED;
+// each op declares its OWN slope band (per-level^2 cost) = median-of-15 fit-runs * [0.6, 1.4] on
+// this machine. WORST-CASE member (a segment tree has no randomization / amortization), so there
+// is deliberately NO max-single-op disclosure line (the Fenwick2D / BinaryHeap precedent). The
+// O(n^2) foils (a per-update full grid rebuild / a naive rectangle scan per query) are EXPONENTIAL
+// on the (log2 n)^2 axis and MUST miss the floor. Calibration (this machine, median-of-15 fit runs
+// on the (log2 n)^2 axis over sides 2^5..2^11): update MEDIAN slope 5.638 ns/level^2 (15 runs
+// spanned 5.608..5.656, R^2 0.9949..0.9954, rock-steady); query MEDIAN slope 5.105 ns/level^2 (15
+// runs spanned 5.045..5.152, R^2 0.99993..0.99998, rock-steady). Both lanes' single-fit R^2 clears
+// the floor by a wide margin on EVERY run, so NEITHER needs the median-of-fits (fitRuns) hook the
+// noisier lanes use. Bands = median * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a
+// legitimately faster future run is not false-failed; the R^2 floor rejects non-square shapes.
+export const S2D_UPDATE_SLOPE_LO = 3.38;      // median 5.638 * 0.6
+export const S2D_UPDATE_SLOPE_HI = 7.89;      // median 5.638 * 1.4
+export const S2D_QUERY_SLOPE_LO = 3.06;       // median 5.105 * 0.6
+export const S2D_QUERY_SLOPE_HI = 7.15;       // median 5.105 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -435,6 +457,13 @@ const FH_FIT_RUNS = 7;
 // rebuild / naive rectangle scan) stay on a small O(n^2)-affordable side sweep.
 const F2D_SWEEP = [5, 6, 7, 8, 9, 10, 11].map((k) => 2 ** k);
 const F2D_FOIL_SWEEP = [3, 4, 5, 6, 7].map((k) => 2 ** k); // sides 8..128 (O(n^2) per op)
+// SegmentTree2D's gated sweeps: EXACT power-of-two SQUARE SIDES 2^5..2^11 (a grid of side n has
+// 4*n^2 cells; 2^11 = 2048 -> ~16.8M cells ~ 134 MB, the top the steady band affords). Exact
+// powers make the tree height an INTEGER log2 n in EACH dimension, so the (log2 n)^2 staircase
+// maps cleanly onto the continuous squared-log axis. Its O(n^2) foils (per-update grid rebuild /
+// naive rectangle scan) stay on a small O(n^2)-affordable side sweep.
+const S2D_SWEEP = [5, 6, 7, 8, 9, 10, 11].map((k) => 2 ** k);
+const S2D_FOIL_SWEEP = [3, 4, 5, 6, 7].map((k) => 2 ** k); // sides 8..128 (O(n^2) per op)
 // Fenwick2D.update gates on the MEDIAN of F2D_FIT_RUNS independent sweep-fits (the registry
 // `fitRuns` hook), exactly like PairingHeap / FibonacciHeap: the 2D update's full-height climb
 // has genuine run-to-run SHAPE variance at the fast low-side points, so a single fit's R^2
@@ -1455,6 +1484,102 @@ function measureF2DRectSumFoil(n) {
     return elapsed / reps;
 }
 
+// --- SegmentTree2D measurement (both hot ops + their O(n^2) foils) -----------
+// Same discipline as Fenwick2D: the tree is built OUTSIDE timing, and each op is hammered on ONE
+// fixed FULL-HEIGHT coordinate / rectangle so the touched cells stay hot and the number of
+// (log n)^2 node PAIRS is the only variable. Measurement QUALITY only -- the frozen R^2 floor and
+// per-op slope bands are untouched.
+const S2D_ITERS = 100000;  // hammered ops per timed batch
+const S2D_BATCH = 20;      // min-over-batches (rejects ambient interference)
+
+// update: set an ABSOLUTE bounded value at a full-height (idx, idx) coord (idx = 2^(m-1)),
+// climbing the leaf row's col-tree then the whole row-tree -- ~(log n)^2 `_t` touches, all hot.
+// Return the MIN per-op time over S2D_BATCH batches.
+function measureS2DUpdate(n) {
+    const st = new SegmentTree2D(n, n, 'sum');
+    const rnd = mulberry32(0x5959 ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (n - 1 - i), rnd() & 0xff); // seed the anti-diagonal
+    const idx = 2 ** (Math.floor(Math.log2(n)) - 1);                     // full-height climb start
+    for (let w = 0; w < S2D_ITERS; w++) st.update(idx, idx, (w & 1) ? 1 : -1); // warm
+    let best = Infinity;
+    for (let b = 0; b < S2D_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < S2D_ITERS; i++) st.update(idx, idx, (i & 1) ? 1 : -1);
+        const e = (nowNs() - t0) / S2D_ITERS;
+        if (e < best) best = e;
+    }
+    return best;
+}
+
+// query: hammer the full-grid-anchored fold query(0, 0, hi, hi) with hi = 2^m - 2 (a full-height
+// double descent in both dims) -- ~(log n)^2 `_t` reads, all hot. MIN over S2D_BATCH batches.
+function measureS2DQuery(n) {
+    const st = new SegmentTree2D(n, n, 'sum');
+    const rnd = mulberry32(0x7a7a ^ n);
+    for (let i = 0; i < n; i++) st.update(i, (n - 1 - i), rnd() & 0xff); // seed the anti-diagonal
+    const hi = (2 ** Math.floor(Math.log2(n))) - 2;                      // full-height descent
+    let sink = 0;
+    for (let w = 0; w < S2D_ITERS; w++) sink += st.query(0, 0, hi, hi);  // warm
+    let best = Infinity;
+    for (let b = 0; b < S2D_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < S2D_ITERS; i++) sink += st.query(0, 0, hi, hi);
+        const e = (nowNs() - t0) / S2D_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// update FOIL: an update that REBUILDS a full 2D prefix-sum array = O(n^2) per update (the naive
+// way to keep rectangle queries O(1): rebuild on every write). Exponential on the (log2 n)^2 axis,
+// so a straight-line fit MISSES the R^2 floor. Sweep stays small.
+function measureS2DUpdateFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e7 / (n * n)));
+    const w = n + 1;
+    const a = new Float64Array(n * n);
+    const pre = new Float64Array(w * w);
+    const rnd = mulberry32(0x3b4c ^ n);
+    for (let i = 0; i < n * n; i++) a[i] = rnd() & 0xff;
+    const rebuild = () => {
+        for (let r = 1; r <= n; r++) {
+            const rb = r * w, pb = (r - 1) * w, ab = (r - 1) * n;
+            for (let c = 1; c <= n; c++) {
+                pre[rb + c] = a[ab + (c - 1)] + pre[pb + c] + pre[rb + c - 1] - pre[pb + c - 1];
+            }
+        }
+    };
+    rebuild(); // warm
+    let elapsed = 0, idx = 0;
+    for (let rp = 0; rp < reps; rp++) {
+        const t0 = nowNs();
+        a[idx] += 1.0; rebuild();
+        elapsed += nowNs() - t0;
+        idx++; if (idx >= n * n) idx = 0;
+    }
+    if (pre[0] === Infinity) throw new Error('unreachable'); // keep pre live
+    return elapsed / reps;
+}
+
+// query FOIL: a naive full-rectangle scan-fold over a plain array = O(n^2) per query (the default
+// before the 2D segment-tree trick). Exponential on the (log2 n)^2 axis, so it misses the floor.
+function measureS2DQueryFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e7 / (n * n)));
+    const a = new Float64Array(n * n);
+    const rnd = mulberry32(0x4d5e ^ n);
+    for (let i = 0; i < n * n; i++) a[i] = rnd() & 0xff;
+    const scan = () => { let s = 0; for (let k = 0; k < n * n; k++) s += a[k]; return s; };
+    { const s = scan(); if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, sink = 0;
+    for (let rp = 0; rp < reps; rp++) {
+        const t0 = nowNs();
+        sink += scan();
+        elapsed += nowNs() - t0;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / reps;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -1692,11 +1817,42 @@ export const MEMBERS = [
         xOf: (x) => Math.log2(x) ** 2,         // the SQUARED-log axis (the family's first)
         unit: 'ns/level^2',
     },
+    {
+        name: 'SegmentTree2D',
+        op: 'update',
+        sweep: S2D_SWEEP,
+        foilSweep: S2D_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0015 inherits D-08)
+        slopeLo: S2D_UPDATE_SLOPE_LO,          // own band on the (log2 n)^2 axis
+        slopeHi: S2D_UPDATE_SLOPE_HI,
+        run: measureS2DUpdate,
+        foil: measureS2DUpdateFoil,
+        foilName: '2D grid rebuild (O(n^2) per update)',
+        xOf: (x) => Math.log2(x) ** 2,         // the SQUARED-log axis (Fenwick2D introduced it)
+        unit: 'ns/level^2',
+        // Single-fit: this lane's R^2 clears the 0.958 floor by a wide margin on every one of 15
+        // calibration runs (min 0.9949), so it needs NO median-of-fits hook.
+    },
+    {
+        name: 'SegmentTree2D',
+        op: 'query',
+        sweep: S2D_SWEEP,
+        foilSweep: S2D_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0015 inherits D-08)
+        slopeLo: S2D_QUERY_SLOPE_LO,           // own band on the (log2 n)^2 axis
+        slopeHi: S2D_QUERY_SLOPE_HI,
+        run: measureS2DQuery,
+        foil: measureS2DQueryFoil,
+        foilName: 'naive rectangle scan (O(n^2) per query)',
+        xOf: (x) => Math.log2(x) ** 2,         // the SQUARED-log axis (Fenwick2D introduced it)
+        unit: 'ns/level^2',
+        // Single-fit: R^2 min 0.99993 over 15 calibration runs -- rock-steady, no fitRuns needed.
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.12.0\n');
-    process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D: slope * (log2 n)^2)\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.13.0\n');
+    process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
     // which leaves scheduler / thermal residue that tilts the shallow, sub-4ns fast

@@ -1,9 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.12.0 twelve members have
+avoid, and how to measure the logarithm yourself. At v0.13.0 thirteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap and Fenwick2D -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D and
+SegmentTree2D -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -32,8 +33,8 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v0.3.0 BinaryHeap, Fenwick and
-SegmentTree have shipped; SkipList fills in per release.
+`(am)` = amortized, `(exp)` = expected. At v0.13.0 all thirteen members have
+shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
 START -- what do you need?
@@ -74,7 +75,11 @@ START -- what do you need?
 |   analysis reference) and accept slower real wall-clock?     -> FibonacciHeap (am) [v0.11.0]
 |
 +-- RECTANGLE SUMS over a 2D grid that stay correct under
-    point updates (2D prefix sums; SUM only, not min/max)?     -> Fenwick2D (wc)    [v0.12.0]
+|   point updates (2D prefix sums; SUM only, not min/max)?     -> Fenwick2D (wc)    [v0.12.0]
+|
++-- 2D rectangle MIN / MAX / GCD (or SUM) over a grid that
+    stay correct under point updates (a general 2D fold that
+    a sum-only 2D BIT cannot do; ~4x the space)?              -> SegmentTree2D (wc) [v0.13.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -147,10 +152,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | Priority queue with DECREASE-KEY / remove by id, and/or O(1) MELD (graph algorithms) | PairingHeap | O(1) push/meld, amortized O(log n) popMin/decreaseKey/remove | 0.10.0 |
 | Same addressable + mergeable surface, textbook-optimal bounds ON PAPER (teaching / analysis; slower wall-clock) | FibonacciHeap | O(1)-amortized push/meld/decreaseKey, O(log n)-amortized popMin/remove | 0.11.0 |
 | 2D grid RECTANGLE SUMS under point updates (2D prefix sums; SUM only) | Fenwick2D | O(log^2 n) update / prefix / rectSum | 0.12.0 |
+| 2D grid RECTANGLE MIN / MAX / GCD / SUM under point updates (a general 2D fold; ~4x the space of a 2D BIT) | SegmentTree2D | O(log^2 n) update / query | 0.13.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's and Fenwick2D's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's and SegmentTree2D's are below).
 
 ---
 
@@ -648,6 +654,51 @@ must clear the shared R^2 floor (0.958) and sit inside its own band (`update [2.
 over exact power-of-two square sides `[2^5, 2^11]`, while each O(n^2)-per-op dense-rescan foil leaves
 the line. WORST-case member: every op is worst-case O(log^2 n), so there is no MAX-single-op line.
 `node --expose-gc test/torture.mjs` proves update / prefix / rectSum / at / set at 0 B/op.
+
+---
+
+## SegmentTree2D -- the general 2D rectangle fold (min / max / sum / gcd) under point updates
+
+**Reach for it when** you need an axis-aligned RECTANGLE query that is NOT a plain sum -- a rectangle
+MIN, MAX, or GCD -- over a mutable 2D grid, and you cannot afford an O(rows*cols) scan per query.
+SegmentTree2D is the 2D generalization of the 1D SegmentTree: a tree OF trees (an outer row segment
+tree whose every node carries an inner column segment tree) that folds any associative + commutative
+operation over the inclusive rectangle `[r1, c1]..[r2, c2]` in O(log^2 n) = O(log rows * log cols),
+with point `update(r, c, value)` (an ABSOLUTE set, not a delta) also O(log^2 n) and `at(r, c)` O(1).
+`kind` ('min' | 'max' | 'sum' | 'gcd') is frozen at construction. Canonical uses: a "cheapest / hottest
+cell in this sub-region right now" heatmap under edits, sliding 2D-window minima, rectangle-GCD queries,
+or a rectangle-SUM when you also want the SAME grid to serve a min/max query. Bulk-load a dense matrix
+with `SegmentTree2D.build(matrix, kind)`.
+
+**Avoid it when:**
+
+- You only ever need a rectangle SUM (no min / max / gcd). **Fenwick2D** (v0.12.0) is far leaner: one
+  `(rows+1)*(cols+1)` array (~1x the grid) vs SegmentTree2D's `4*rows*cols` (~4x the grid), and its
+  nested `i & -i` walk is a hair cheaper per level. The 4x space is the honest price SegmentTree2D pays
+  to fold the NON-invertible min / max / gcd a 2D BIT cannot. Reach for SegmentTree2D only when the fold
+  is non-invertible, or when one grid must serve several rectangle folds.
+- Your data is 1D. Use the 1D **SegmentTree** (a rectangle collapses to a segment; the tree-of-trees
+  machinery is wasted overhead) -- or **Fenwick** for a 1D sum.
+- The grid never changes (static). For a static 2D range-min / max a sparse-table variant gives O(1)
+  queries; SegmentTree2D's O(log^2 n) query buys you nothing when nothing updates.
+- You need a NON-commutative fold (matrix product, non-abelian monoid). Like the 1D SegmentTree, the
+  iterative flat 2R x 2C layout mixes left- and right-boundary contributions into one accumulator, so it
+  is correct ONLY for commutative + associative folds (see
+  [`decisions/0015-segmenttree2d.md`](./decisions/0015-segmenttree2d.md)).
+- You need RANGE updates (add x to every cell in a rectangle). v0.13.0 is point-update only; 2D lazy
+  propagation is deferred.
+- You key by value, not grid position, or you need `rank` / `select`. SegmentTree2D is index-addressed
+  by `(r, c)` -- use an ordered map (**Treap** / **Scapegoat** / **SkipList**).
+
+**Measure it yourself:** `npm run witness` fits BOTH `update` and `query` against the family's SECOND
+SQUARED-log axis, `nsPerOp = intercept + slope*(log2 n)^2` (its ops are O(log^2 n), not O(log n)); each
+must clear the shared R^2 floor (0.958) and sit inside its own band (`update [3.38, 7.89]`, `query
+[3.06, 7.15]` ns per (log2 n)^2 unit; medians 5.638 / 5.105, both single-fit R^2 well clear of the floor
+so NEITHER lane needs the median-of-fits hook; see
+[`decisions/0015-segmenttree2d.md`](./decisions/0015-segmenttree2d.md)), over exact power-of-two square
+sides `[2^5, 2^11]`, while each O(n^2)-per-op dense-rescan foil leaves the line. WORST-case member: every
+op is worst-case O(log^2 n), so there is no MAX-single-op line. `node --expose-gc test/torture.mjs`
+proves update / query / at / clear at 0 B/op.
 
 ---
 

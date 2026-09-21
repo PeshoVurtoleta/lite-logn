@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1170,6 +1170,74 @@ const f2PrefixAtSetMix = {
     statsOf(s) { return { grows: f2Grows(s) }; },
 };
 
+/** SegmentTree2D's zero-alloc counter: its single flat backing buffer's byte length, fixed at
+ *  construction, so the delta across the window must be 0 even under the nested tree-of-trees walks. */
+function st2Grows(s) { return s.st2._t.buffer.byteLength; }
+
+/** A SegmentTree2D prefilled to a full SIDE x SIDE grid with integer values (sum fold). */
+function st2Fill() {
+    const st = new SegmentTree2D(F2SIDE, F2SIDE, 'sum');
+    for (let r = 0; r < F2SIDE; r++) for (let c = 0; c < F2SIDE; c++) st.update(r, c, (r * F2SIDE + c) & 0xffff);
+    return st;
+}
+
+/**
+ * update churn: each op writes an absolute bounded leaf then climbs the leaf row's col-tree and
+ * the whole row-tree at a walking (r, c). Zero allocation.
+ */
+const st2UpdateChurn = {
+    name: 'SegmentTree2D update churn',
+    setup() { return { st2: st2Fill(), tick: 0 }; },
+    hot(s, n) {
+        const st = s.st2;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { st.update(t & F2MASK, (t >> 7) & F2MASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: st2Grows(s) }; },
+};
+
+/**
+ * query churn: each op folds a fixed-width rectangle (outer row descent x inner col descent),
+ * folded into an int32 accumulator. Zero allocation.
+ */
+const st2QueryChurn = {
+    name: 'SegmentTree2D query churn',
+    setup() { return { st2: st2Fill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const st = s.st2;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const r = t & (F2MASK >> 1), c = (t >> 3) & (F2MASK >> 1);
+            acc = (acc + (st.query(r, c, r + 20, c + 20) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: st2Grows(s) }; },
+};
+
+/**
+ * at / query mix: a single-cell `at` and a windowed rectangle `query`, folded into an int32
+ * accumulator, proving the flat backing buffer never grows. Zero allocation.
+ */
+const st2AtQueryMix = {
+    name: 'SegmentTree2D at/query mix (buffer never grows)',
+    setup() { return { st2: st2Fill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const st = s.st2;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const r = t & F2MASK, c = (t >> 7) & F2MASK;
+            const qr = t & (F2MASK >> 1), qc = (t >> 3) & (F2MASK >> 1);
+            acc = (acc + (st.at(r, c) | 0) + (st.query(qr, qc, qr + 12, qc + 12) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: st2Grows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1210,6 +1278,7 @@ zgcSuite({
         binhPopMinChurn, binhReadMix, binhMeldChurn,
         phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn,
         fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn,
-        f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix],
+        f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix,
+        st2UpdateChurn, st2QueryChurn, st2AtQueryMix],
     mustFail: [teethMustFailAlloc],
 });

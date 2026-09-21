@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.12.0
+Version: 0.13.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -22,8 +22,9 @@ v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
 adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
 v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap; v0.11.0
 adds FibonacciHeap (the mergeable-heap arc's FINALE); v0.12.0 adds Fenwick2D (the
-family's FIRST 2D structure). The roster (one member per session, each landing
-append-only):
+family's FIRST 2D structure); v0.13.0 adds SegmentTree2D (the general 2D rectangle
+fold -- min/max/sum/gcd -- a 2D BIT cannot do). The roster (one member per session,
+each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -205,6 +206,28 @@ append-only):
   no inverse for them -- a future 2D SegmentTree) and NO changeKey / rank / select. WORST-CASE (no
   max-single-op line). This member's witness is the family's FIRST on a SQUARED-log axis
   ((log2 n)^2). Zero allocation on every hot op.
+
+- SegmentTree2D (v0.13.0) -- the general 2D rectangle FOLD a 2D BIT cannot do: a segment tree OF
+  segment trees (a tree of trees) that folds min / max / sum / gcd over any axis-aligned rectangle,
+  BOTH point-update AND rectangle-query in O(log^2 n) = O(log rows * log cols) over a SINGLE flat
+  `Float64Array(4 * rows * cols)`. SegmentTree2D : Fenwick2D :: SegmentTree (1D) : Fenwick (1D) --
+  it lifts the exact rectangle MIN / MAX / GCD Fenwick2D lists as its documented not-for. The fold
+  is chosen ONCE at ctor (small-int `_k`, inline switch, no closure). update writes the leaf, climbs
+  the leaf ROW's col-tree at column c, THEN climbs the ROW-tree -- at each row-ancestor it recomputes
+  the changed leaf column from its two row-children FIRST, then fixes that row-node's col-tree up
+  column c's path (the inner-then-outer order is the correctness site). query descends the OUTER row
+  dim half-open collecting O(log rows) boundary row-nodes and does an INNER col-range fold over each
+  (double `l&1`/`r&1` picks in both dims), all into one identity-seeded accumulator. Correct ONLY for
+  COMMUTATIVE + associative folds (the iterative 2n layout is order-agnostic). Identity fills cleared
+  / unused cells and is a legal RESULT (a cleared min grid queries +Infinity) but never a legal INPUT
+  (NaN / +-Infinity fail closed typeof-first; the gcd kind also rejects negatives / non-integers).
+  Dims frozen at ctor; `S2D_MAX_CELLS = 0x7FFFFFFF` caps 4*rows*cols, guarded by a FLOAT multiply
+  (never `| 0`, which would wrap a large product to a small int and fail OPEN -> OOB). SegmentTree2D
+  .build(matrix, kind) is O(rows*cols) two-phase (fold each row's col-tree, THEN fold the row-tree
+  position-wise) -- NOT rows*cols updates. SPACE co-headline: 4*rows*cols cells, ~4x a 2D BIT's
+  (rows+1)*(cols+1) -- the honest price for the general (non-invertible) folds. WORST-CASE (no
+  max-single-op line); its witness is the family's SECOND on the SQUARED-log axis ((log2 n)^2). Zero
+  allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -518,6 +541,30 @@ append-only):
   - `Fenwick2D.build(matrix)` -> Fenwick2D. O(rows*cols) LINEAR bulk build from a 2D array-like in
     TWO SEPARATE passes (cols within each row, then rows -- fusing them double-counts); fails closed
     on a non-2D-array-like, ragged rows, or any non-finite entry.
+- `SegmentTree2D` -- class. A 2D segment tree (a segment tree OF segment trees): BOTH point-update
+  AND a general rectangle FOLD (min / max / sum / gcd) in O(log^2 n) over a single flat
+  `Float64Array(4 * rows * cols)` -- the exact rectangle MIN / MAX / GCD Fenwick2D cannot do. The
+  fold is chosen ONCE at ctor. Public coords 0-based in [0, rows) x [0, cols). Values are finite
+  numbers (NaN / +-Infinity / non-number fail closed typeof-first; the gcd kind also rejects
+  negatives / non-integers). Correct ONLY for commutative + associative folds (order-agnostic 2n
+  layout). SPACE co-headline: 4*rows*cols cells (~4x a 2D BIT).
+  - `new SegmentTree2D(rows, cols, kind)` -- rows, cols integers >= 1, kind 'min'|'max'|'sum'|'gcd',
+    frozen at ctor. Allocates one `Float64Array(4*rows*cols)` (filled with the fold identity for
+    min/max). Throws when 4*rows*cols exceeds `S2D_MAX_CELLS` (2^31-1), guarded by a float multiply
+    (never `| 0`, which would fail OPEN).
+  - `rows` / `cols` / `kind` getters. O(1).
+  - `query(r1, c1, r2, c2)` -> number. The fold over [r1..r2] x [c1..c2] INCLUSIVE on all four
+    edges; throws on out-of-range or r1 > r2 / c1 > c2.
+  - `update(r, c, value)` -> this. Set cell (r, c) to value (absolute), fixing every affected fold
+    (inner col-tree then outer row-tree); value must be finite (nonnegative integer for gcd);
+    out-of-range coord throws.
+  - `at(r, c)` -> number. The single cell (the stored leaf value). O(1).
+  - `clear()` -> this (reset to identity, keep dims/kind); `forEach(fn)` visits (value, r, c, tree)
+    in row-major ascending order (r outer, c inner).
+  - `SegmentTree2D.build(matrix, kind)` -> SegmentTree2D. O(rows*cols) two-phase bottom-up build
+    from a 2D array-like (fold each row's col-tree, then fold the row-tree position-wise -- NOT
+    rows*cols updates); fails closed on a non-2D-array-like, ragged rows, or any non-finite (or
+    out-of-domain gcd) entry.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -296,6 +296,32 @@ function kFenwick2DRectSum(n) {
     return { obj: f, op: () => { SINK = (SINK + (f.rectSum(0, 0, i, i) | 0)) | 0; i++; if (i >= side) i = 0; } };
 }
 
+function kSegTree2DUpdate(n) {
+    // A seeded side x side grid (sum fold); each op writes an absolute bounded leaf at a walking
+    // (r, c) and fixes the leaf row's col-tree then the whole row-tree -- the O(log^2 n) point
+    // update, zero allocation after construction.
+    const side = f2dSide(n);
+    const st = new SegmentTree2D(side, side, 'sum');
+    const rng = prng(0x5959 ^ n);
+    for (let i = 0; i < side; i++) st.update(i, i, rng() & 0xff);
+    let r = 0, c = 0, v = 0;
+    return {
+        obj: st,
+        op: () => { st.update(r, c, v & 0xffff); v++; c++; if (c >= side) { c = 0; r++; if (r >= side) r = 0; } },
+    };
+}
+
+function kSegTree2DQuery(n) {
+    // A seeded side x side grid (sum fold); each op folds a walking rectangle [0,0]..[i,i] (the
+    // O(log^2 n) outer-row x inner-col descent). SINK stays a 32-bit Smi (`| 0`), no HeapNumber.
+    const side = f2dSide(n);
+    const st = new SegmentTree2D(side, side, 'sum');
+    const rng = prng(0x7a7a ^ n);
+    for (let i = 0; i < side; i++) st.update(i, i, rng() & 0xff);
+    let i = 0;
+    return { obj: st, op: () => { SINK = (SINK + (st.query(0, 0, i, i) | 0)) | 0; i++; if (i >= side) i = 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -322,6 +348,8 @@ export function makeOpKernel(member, op, n) {
         case 'FibonacciHeap.popMin': return kFibonacciHeapPopMin(n);
         case 'Fenwick2D.update': return kFenwick2DUpdate(n);
         case 'Fenwick2D.rectSum': return kFenwick2DRectSum(n);
+        case 'SegmentTree2D.update': return kSegTree2DUpdate(n);
+        case 'SegmentTree2D.query': return kSegTree2DQuery(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -340,6 +368,7 @@ export function makeSubject(member, n) {
     if (member === 'PairingHeap') return kPairingHeapPopMin(n);
     if (member === 'FibonacciHeap') return kFibonacciHeapPopMin(n);
     if (member === 'Fenwick2D') return kFenwick2DUpdate(n);
+    if (member === 'SegmentTree2D') return kSegTree2DUpdate(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -541,6 +570,7 @@ export function memberBytes(member, obj) {
             obj._bucket.buffer.byteLength + obj._pool._free.buffer.byteLength;
     }
     if (member === 'Fenwick2D') return obj._t.buffer.byteLength;
+    if (member === 'SegmentTree2D') return obj._t.buffer.byteLength;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -558,6 +588,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'PairingHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
     if (member === 'FibonacciHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
     if (member === 'Fenwick2D') return 8;    // one Float64 tree cell per grid cell
+    if (member === 'SegmentTree2D') return 32; // four Float64 tree cells (4RC array) per grid cell
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -565,6 +596,7 @@ export function theoreticalMinPerLive(member) {
 function liveCount(member, obj) {
     if (member === 'Fenwick' || member === 'SegmentTree') return obj.length; // all cells always live
     if (member === 'Fenwick2D') return obj.rows * obj.cols;                  // every grid cell is live
+    if (member === 'SegmentTree2D') return obj.rows * obj.cols;              // every grid cell is live
     return obj.size;
 }
 
@@ -581,6 +613,7 @@ function fillMember(member, obj, count) {
     if (member === 'PairingHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     if (member === 'FibonacciHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     if (member === 'Fenwick2D') { obj.clear(); const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return; }
+    if (member === 'SegmentTree2D') { obj.clear(); const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -607,6 +640,7 @@ function clearContent(member, obj) {
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     if (member === 'Fenwick2D') return obj.prefix(obj.rows - 1, obj.cols - 1); // sum of the whole grid
+    if (member === 'SegmentTree2D') return obj.query(0, 0, obj.rows - 1, obj.cols - 1); // fold of the whole grid
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -624,6 +658,7 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     if (member === 'Fenwick2D') { const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return R * C; }
+    if (member === 'SegmentTree2D') { const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, (r * C + c) & 0xffff); return R * C; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -684,6 +719,7 @@ export function D3(member, opts = {}) {
     else if (member === 'PairingHeap') obj = new PairingHeap(n, 'min');
     else if (member === 'FibonacciHeap') obj = new FibonacciHeap(n, 'min');
     else if (member === 'Fenwick2D') { const side = f2dSide(n); obj = new Fenwick2D(side, side); }
+    else if (member === 'SegmentTree2D') { const side = f2dSide(n); obj = new SegmentTree2D(side, side, 'sum'); }
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -715,7 +751,7 @@ export function D3(member, opts = {}) {
     // + SkipList shrink their live set (bytes-per-live RISES ~1/loadFactor over the
     // fixed backing store); Fenwick + SegmentTree are INDEX-ADDRESSED (every cell is
     // always live), so their curve is FLAT by design -- stated, not hidden.
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D');
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -785,6 +821,8 @@ function randomLookupOp(member, obj, n, rng) {
     if (member === 'FibonacciHeap') return () => { if (obj.has(rng() % n)) SINK++; };
     // Fenwick2D is index-addressed by (r, c): a random 2D prefix read is its addressable analogue.
     if (member === 'Fenwick2D') return () => { SINK += obj.prefix(rng() % obj.rows, rng() % obj.cols); };
+    // SegmentTree2D is index-addressed by (r, c): a random 1x1 rectangle fold is its analogue.
+    if (member === 'SegmentTree2D') return () => { const r = rng() % obj.rows, c = rng() % obj.cols; SINK += obj.query(r, c, r, c); };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -807,6 +845,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'FibonacciHeap') return () => { if (obj.has(i)) SINK++; i++; if (i >= n) i = 0; };
     // Fenwick2D is index-addressed by (r, c): a sequential 2D prefix read (row-major) is its analogue.
     if (member === 'Fenwick2D') return () => { SINK += obj.prefix(i % obj.rows, i % obj.cols); i++; if (i >= n) i = 0; };
+    // SegmentTree2D is index-addressed by (r, c): a sequential 1x1 rectangle fold (row-major) analogue.
+    if (member === 'SegmentTree2D') return () => { const r = i % obj.rows, c = i % obj.cols; SINK += obj.query(r, c, r, c); i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -825,6 +865,7 @@ function buildFull(member, n) {
     else if (member === 'PairingHeap') { obj = new PairingHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'FibonacciHeap') { obj = new FibonacciHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'Fenwick2D') { const side = f2dSide(n); obj = new Fenwick2D(side, side); for (let r = 0; r < side; r++) for (let c = 0; c < side; c++) obj.update(r, c, 1); }
+    else if (member === 'SegmentTree2D') { const side = f2dSide(n); obj = new SegmentTree2D(side, side, 'sum'); for (let r = 0; r < side; r++) for (let c = 0; c < side; c++) obj.update(r, c, 1); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1195,7 +1236,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
         member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' ||
-        member === 'Fenwick2D') mode = 0;
+        member === 'Fenwick2D' || member === 'SegmentTree2D') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

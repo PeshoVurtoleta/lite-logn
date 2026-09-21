@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.12.0';
+export const VERSION = '0.13.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -5279,5 +5279,349 @@ export class Fenwick2D {
     _badValue(value) {
         throw new TypeError(
             '[lite-logn] Fenwick2D value must be a finite number, got ' + String(value));
+    }
+}
+
+/**
+ * The largest allowed backing-cell count for a SegmentTree2D: `4 * rows * cols`
+ * (= `(2*rows) * (2*cols)`) must fit a positive int32 so every flat index stays a
+ * valid `Float64Array` offset. See the ctor's FLOAT-product overflow door.
+ */
+const S2D_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A 2D SEGMENT TREE (a segment tree OF segment trees): a point-update AND a
+ * rectangle-fold, BOTH O(log^2 n), over a SINGLE flat `Float64Array(4 * rows *
+ * cols)` -- the iterative "2n" segment-tree idiom NESTED over two dimensions. It
+ * completes the 2D range story Fenwick2D opened: Fenwick2D is a SUM machine (a BIT
+ * folds only an invertible group), while SegmentTree2D folds ANY associative +
+ * commutative operation over a rectangle -- min / max / sum / gcd -- exactly the
+ * rectangle MIN / MAX / GCD a 2D BIT CANNOT do (Fenwick2D's documented not-for).
+ * SegmentTree2D : Fenwick2D :: SegmentTree (1D) : Fenwick (1D). The fold is chosen
+ * ONCE at construction and cached as a small-int `_k` combined by an INLINE switch
+ * in the hot body (no function ref, no closure, no megamorphic call site).
+ *
+ * Layout (the iterative "2n" trick in BOTH dims):
+ *   - `_t` is a `Float64Array(2*rows * 2*cols)`; row stride `_w = 2*cols`. The cell
+ *     of ROW-node `i` (in `[1, 2*rows)`) at COL-node `j` (in `[1, 2*cols)`) is
+ *     `_t[i * _w + j]`; index 0 in each dim is UNUSED (null is not zero).
+ *   - LEAF rows are `i` in `[rows, 2*rows)` (public row `r` -> `rows + r`); LEAF
+ *     cols are `j` in `[cols, 2*cols)` (public col `c` -> `cols + c`).
+ *   - ROW-node `i` holds, at each col-node `j`, the fold over its row subtree x that
+ *     col subtree; `_t[1*_w + 1]` is the fold of the whole grid.
+ *
+ * The two hot walks (both O(log rows * log cols) = O(log^2 n)):
+ *   - `update(r, c, value)` sets the leaf cell, climbs the leaf ROW's col-tree at
+ *     column `c`, THEN climbs the ROW-tree -- for each row-ancestor `i` it first
+ *     recomputes the changed leaf column `_t[i*_w + (cols+c)] = fold(_t[2i*_w +
+ *     (cols+c)], _t[(2i+1)*_w + (cols+c)])` from its two row-children, THEN fixes
+ *     that row-node's col-tree up the column path of `c`. (The order matters: the
+ *     inner col-tree must be fixed from the row-children BEFORE the next row level.)
+ *   - `query(r1, c1, r2, c2)` descends the OUTER row dim half-open (`l = rows+r1`,
+ *     `r = rows+r2+1`, `l < r`, `l&1` / `r&1` boundary picks) collecting O(log rows)
+ *     row-nodes, and for EACH row-node does an INNER col-range fold over `[c1, c2]`
+ *     (the same `l&1` / `r&1` descent) into one accumulator seeded with the fold
+ *     identity. Both boundaries in both dims are handled -- the double `&1` picks.
+ *
+ * RISK (recorded in decisions/0015-segmenttree2d.md): the iterative 2n layout is
+ * ORDER-AGNOSTIC in BOTH dims -- `query` mixes left/right row and col contributions
+ * into ONE accumulator, so it is correct ONLY because min / max / sum / gcd are all
+ * COMMUTATIVE as well as associative. A future NON-commutative fold must NOT reuse
+ * this layout; it needs a pow2 fixed-order layout with ordered accumulators.
+ *
+ * Identity (the trap): the fold's identity fills query accumulators and cleared /
+ * fresh cells -- sum -> 0, min -> +Infinity, max -> -Infinity, gcd -> 0. Identity
+ * is a legal RESULT (a cleared min grid queries to +Infinity) but NEVER a legal
+ * INPUT: the value door rejects user NaN / +-Infinity (and, for the `gcd` kind, any
+ * negative or non-integer value), typeof-guarded BEFORE coercion.
+ *
+ * SPACE (the honest co-headline vs Fenwick2D): `4 * rows * cols` cells -- roughly
+ * 4x a 2D BIT's `(rows+1)*(cols+1)` -- the price paid to fold the general (non-
+ * invertible) operations a BIT cannot. WORST-CASE member (no randomization /
+ * amortization); every hot op allocates zero bytes. Fixed dimensions: `rows` and
+ * `cols` are frozen at construction; there is no grow. Every out-of-range
+ * coordinate and every non-finite (or out-of-domain gcd) value is a hard
+ * `[lite-logn]` throw.
+ */
+export class SegmentTree2D {
+    /**
+     * @param {number} rows  row count; integer >= 1.
+     * @param {number} cols  column count; integer >= 1.
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold.
+     */
+    constructor(rows, cols, kind) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof rows !== 'number' || !Number.isInteger(rows) || rows < 1) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree2D rows must be an integer >= 1, got ' + String(rows));
+        }
+        if (typeof cols !== 'number' || !Number.isInteger(cols) || cols < 1) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree2D cols must be an integer >= 1, got ' + String(cols));
+        }
+        const k = kind === 'min' ? 0 : kind === 'max' ? 1 : kind === 'sum' ? 2 :
+            kind === 'gcd' ? 3 : -1;
+        if (k === -1) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree2D kind must be "min", "max", "sum" or "gcd", got ' +
+                String(kind));
+        }
+        // FLOAT product (never `| 0`): `| 0` would wrap a large product to a small /
+        // negative int and pass the door (fail OPEN -> under-allocation -> OOB). The
+        // float product is exact to 2^53, so a genuine overflow of the 2^31-1 cell
+        // ceiling fails CLOSED (the Fenwick2D lesson).
+        const cells = 4 * rows * cols;            // = (2*rows) * (2*cols)
+        if (cells > S2D_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] SegmentTree2D grid too large: 4*rows*cols = ' + cells +
+                ' exceeds ' + S2D_MAX_CELLS);
+        }
+        this._r = rows;                           // row count (fixed)
+        this._c = cols;                           // column count (fixed)
+        this._w = 2 * cols;                       // row stride (2*cols; col 0 unused)
+        this._k = k;                              // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
+        this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
+        this._t = new Float64Array(cells);        // flat 2R x 2C; row 0 / col 0 unused
+        if (this._idv !== 0) this._t.fill(this._idv); // sum/gcd identity is 0 already
+    }
+
+    /** Row count this tree was sized for. O(1). */
+    get rows() { return this._r; }
+
+    /** Column count this tree was sized for. O(1). */
+    get cols() { return this._c; }
+
+    /** The frozen associative fold, 'min' | 'max' | 'sum' | 'gcd'. O(1). */
+    get kind() {
+        const k = this._k;
+        return k === 0 ? 'min' : k === 1 ? 'max' : k === 2 ? 'sum' : 'gcd';
+    }
+
+    /**
+     * The folded value over the rectangle `[r1..r2] x [c1..c2]` INCLUSIVE on all
+     * four edges. O(log^2 n): descend the OUTER row dim collecting the boundary
+     * row-nodes, and for each do an INNER col-range fold, all into one accumulator
+     * (started at the fold identity). Order-agnostic (correct because the fold is
+     * commutative -- see the class RISK note). Fails closed: any out-of-range
+     * coordinate, or `r1 > r2` / `c1 > c2`, throws `[lite-logn]`.
+     * @param {number} r1  integer in [0, rows)
+     * @param {number} c1  integer in [0, cols)
+     * @param {number} r2  integer in [r1, rows)
+     * @param {number} c2  integer in [c1, cols)
+     * @returns {number} the fold over the rectangle (always folds at least one cell)
+     */
+    query(r1, c1, r2, c2) {
+        const R = this._r, C = this._c;
+        if (typeof r1 !== 'number' || !Number.isInteger(r1) || r1 < 0 || r1 >= R) return this._badRect(r1, c1, r2, c2);
+        if (typeof c1 !== 'number' || !Number.isInteger(c1) || c1 < 0 || c1 >= C) return this._badRect(r1, c1, r2, c2);
+        if (typeof r2 !== 'number' || !Number.isInteger(r2) || r2 < 0 || r2 >= R) return this._badRect(r1, c1, r2, c2);
+        if (typeof c2 !== 'number' || !Number.isInteger(c2) || c2 < 0 || c2 >= C) return this._badRect(r1, c1, r2, c2);
+        if (r1 > r2 || c1 > c2) return this._badRect(r1, c1, r2, c2);
+        const t = this._t, k = this._k, w = this._w;
+        const cl0 = C + c1, cr0 = C + c2 + 1;
+        let res = this._idv;
+        // Outer row descent (half-open). For each collected row-node, an inner col
+        // descent folds [c1, c2] into `res`. Both boundaries picked in both dims.
+        for (let l = R + r1, r = R + r2 + 1; l < r; l >>= 1, r >>= 1) {
+            if (l & 1) {
+                const b = l * w;
+                for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) {
+                    if (cl & 1) { const v = t[b + cl++]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
+                    if (cr & 1) { const v = t[b + --cr]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
+                }
+                l++;
+            }
+            if (r & 1) {
+                const b = (--r) * w;
+                for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) {
+                    if (cl & 1) { const v = t[b + cl++]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
+                    if (cr & 1) { const v = t[b + --cr]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
+                }
+            }
+        }
+        return res;
+    }
+
+    /**
+     * Set the cell at 0-based `(r, c)` to `value` (ABSOLUTE), then fix every affected
+     * fold. O(log^2 n): write the leaf, climb the leaf ROW's col-tree at column `c`,
+     * then climb the ROW-tree -- at each row-ancestor recompute the changed leaf
+     * column from its two row-children FIRST, then fix that row-node's col-tree up
+     * the column path of `c`. Fails closed: a non-finite value (typeof-guarded
+     * first), a gcd-kind value that is negative or non-integer, or an out-of-range
+     * coordinate each throw `[lite-logn]` as a no-op.
+     * @param {number} r      integer in [0, rows)
+     * @param {number} c      integer in [0, cols)
+     * @param {number} value  a finite number (nonnegative integer for the gcd kind)
+     * @returns {this}
+     */
+    update(r, c, value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        const t = this._t, k = this._k, w = this._w, R = this._r, C = this._c;
+        const cLeaf = C + c;
+        // Leaf row: write the leaf cell, then climb THIS row's col-tree on c's path.
+        const lb = (R + r) * w;
+        t[lb + cLeaf] = value;
+        for (let jj = cLeaf >> 1; jj >= 1; jj >>= 1) {
+            const j2 = jj << 1;
+            const a = t[lb + j2], b = t[lb + j2 + 1];
+            t[lb + jj] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+        }
+        // Climb the ROW-tree. At each ancestor: recompute the changed leaf column
+        // from the two row-children FIRST, THEN climb that row-node's col-tree.
+        for (let i = (R + r) >> 1; i >= 1; i >>= 1) {
+            const bi = i * w, c0 = (i << 1) * w, c1 = c0 + w;
+            const a = t[c0 + cLeaf], b = t[c1 + cLeaf];
+            t[bi + cLeaf] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+            for (let jj = cLeaf >> 1; jj >= 1; jj >>= 1) {
+                const j2 = jj << 1;
+                const x = t[bi + j2], y = t[bi + j2 + 1];
+                t[bi + jj] = k === 0 ? (x < y ? x : y) : k === 1 ? (x > y ? x : y) : k === 2 ? x + y : segGcd(x, y);
+            }
+        }
+        return this;
+    }
+
+    /**
+     * The single cell at 0-based `(r, c)` (the stored leaf value). O(1). An
+     * out-of-range coordinate throws `[lite-logn]`.
+     * @param {number} r  integer in [0, rows)
+     * @param {number} c  integer in [0, cols)
+     * @returns {number}
+     */
+    at(r, c) {
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        return this._t[(this._r + r) * this._w + (this._c + c)];
+    }
+
+    /**
+     * Reset every cell to the fold identity in place, keeping the fixed dimensions.
+     * O(rows*cols) cold path. Because `fold(identity, identity) === identity`,
+     * filling the WHOLE backing array leaves a fully-consistent tree.
+     * @returns {this}
+     */
+    clear() {
+        this._t.fill(this._idv);
+        return this;
+    }
+
+    /**
+     * Visit every cell as `(value, r, c, tree)` in ROW-MAJOR ascending order (`r`
+     * outer, `c` inner) for `r` in `[0, rows)`, `c` in `[0, cols)`. O(rows*cols)
+     * COLD scan reading each leaf directly, allocation-free in the loop body (pass a
+     * hoisted callback).
+     * @param {(value:number, r:number, c:number, tree:SegmentTree2D)=>void} fn
+     */
+    forEach(fn) {
+        const t = this._t, w = this._w, R = this._r, C = this._c;
+        for (let r = 0; r < R; r++) {
+            const b = (R + r) * w + C;
+            for (let c = 0; c < C; c++) fn(t[b + c], r, c, this);
+        }
+    }
+
+    /**
+     * O(rows*cols) bottom-up bulk build from a 2D `matrix` (rows of equal-length
+     * finite-number array-likes) -- NOT rows*cols individual O(log^2 n) updates.
+     * TWO-PHASE fold: (1) seed every leaf cell, then fold each LEAF ROW's col-tree
+     * deepest-first; (2) fold the ROW-tree -- for each internal row-node, combine its
+     * two row-children POSITION-WISE across all column nodes (the 2D fold is
+     * separable). COLD path; fails closed on a non-2D-array-like, any non-finite
+     * entry, or (gcd kind) any negative / non-integer entry before the tree is usable.
+     * @param {ArrayLike<ArrayLike<number>>} matrix  rows of finite numbers
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold
+     * @returns {SegmentTree2D}
+     */
+    static build(matrix, kind) {
+        if (matrix == null || typeof matrix.length !== 'number') {
+            throw new TypeError('[lite-logn] SegmentTree2D.build needs a 2D array-like (rows of finite numbers)');
+        }
+        const rows = matrix.length;
+        const row0 = matrix[0];
+        if (row0 == null || typeof row0.length !== 'number') {
+            throw new TypeError('[lite-logn] SegmentTree2D.build needs a 2D array-like (rows of finite numbers)');
+        }
+        const cols = row0.length;
+        const st = new SegmentTree2D(rows, cols, kind); // validates dims + kind + ceiling
+        const t = st._t, w = st._w, k = st._k, R = st._r, C = st._c;
+        const gcdKind = k === 3;
+        // Seed every leaf cell with its own value.
+        for (let r = 0; r < rows; r++) {
+            const row = matrix[r];
+            if (row == null || typeof row.length !== 'number' || row.length !== cols) {
+                throw new TypeError('[lite-logn] SegmentTree2D.build rows must be equal-length array-likes');
+            }
+            const b = (R + r) * w + C;
+            for (let c = 0; c < cols; c++) {
+                const v = row[c];
+                if (typeof v !== 'number' || !Number.isFinite(v)) {
+                    throw new TypeError(
+                        '[lite-logn] SegmentTree2D.build value must be a finite number, got ' + String(v));
+                }
+                if (gcdKind && (!Number.isInteger(v) || v < 0)) {
+                    throw new RangeError(
+                        '[lite-logn] SegmentTree2D.build gcd value must be a nonnegative integer, got ' +
+                        String(v));
+                }
+                t[b + c] = v;
+            }
+        }
+        // Phase 1: fold each LEAF ROW's col-tree, deepest-first (col nodes [1, C)).
+        for (let lr = R; lr < 2 * R; lr++) {
+            const b = lr * w;
+            for (let jj = C - 1; jj >= 1; jj--) {
+                const j2 = jj << 1;
+                const a = t[b + j2], bb = t[b + j2 + 1];
+                t[b + jj] = k === 0 ? (a < bb ? a : bb) : k === 1 ? (a > bb ? a : bb) : k === 2 ? a + bb : segGcd(a, bb);
+            }
+        }
+        // Phase 2: fold the ROW-tree position-wise (row nodes [1, R)), each row-node's
+        // whole col-tree = combine of its two row-children across all column nodes.
+        for (let i = R - 1; i >= 1; i--) {
+            const bi = i * w, c0 = (i << 1) * w, c1 = c0 + w;
+            for (let j = 1; j < w; j++) {
+                const a = t[c0 + j], b = t[c1 + j];
+                t[bi + j] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+            }
+        }
+        return st;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badRow(r) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree2D row must be an integer in [0, ' + this._r + '), got ' + String(r));
+    }
+
+    /** @private */
+    _badCol(c) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree2D col must be an integer in [0, ' + this._c + '), got ' + String(c));
+    }
+
+    /** @private */
+    _badRect(r1, c1, r2, c2) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree2D query needs integers 0 <= r1 <= r2 < ' + this._r +
+            ' and 0 <= c1 <= c2 < ' + this._c + ', got r1=' + String(r1) + ' c1=' + String(c1) +
+            ' r2=' + String(r2) + ' c2=' + String(c2));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] SegmentTree2D value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badGcdValue(value) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree2D gcd value must be a nonnegative integer, got ' + String(value));
     }
 }

@@ -577,3 +577,37 @@ export class Fenwick2D {
     /** O(rows*cols) linear bulk build from a 2D array-like of finite numbers (equal-length rows). */
     static build(matrix: ArrayLike<ArrayLike<number>>): Fenwick2D;
 }
+
+/**
+ * A 2D segment tree (a segment tree of segment trees): a point-update AND a
+ * rectangle-fold, BOTH O(log^2 n), over one flat Float64Array(4*rows*cols). The
+ * general associative + commutative rectangle fold (min / max / sum / gcd) a 2D BIT
+ * cannot do -- SegmentTree2D : Fenwick2D :: SegmentTree (1D) : Fenwick (1D). Fold is
+ * chosen once at construction. Space is 4*rows*cols cells (~4x a 2D BIT).
+ */
+export class SegmentTree2D {
+    /** @param rows row count; integer >= 1. @param cols column count; integer >= 1.
+     *  @param kind the frozen associative fold. 4*rows*cols must be <= 2^31-1 (checked with a float multiply). */
+    constructor(rows: number, cols: number, kind: 'min' | 'max' | 'sum' | 'gcd');
+
+    /** Row count this tree was sized for. */
+    readonly rows: number;
+    /** Column count this tree was sized for. */
+    readonly cols: number;
+    /** The frozen associative fold. */
+    readonly kind: 'min' | 'max' | 'sum' | 'gcd';
+
+    /** The fold over the rectangle [r1..r2] x [c1..c2] inclusive on all four edges. O(log^2 n). Out-of-range / r1 > r2 / c1 > c2 throws. */
+    query(r1: number, c1: number, r2: number, c2: number): number;
+    /** Set the cell at 0-based (r, c) to value (absolute), fixing every affected fold. O(log^2 n). Non-finite (or out-of-domain gcd) value / out-of-range coord throws. */
+    update(r: number, c: number, value: number): this;
+    /** The single cell at 0-based (r, c). O(1). Out-of-range throws. */
+    at(r: number, c: number): number;
+    /** Reset every cell to the fold identity in place, keeping dimensions. */
+    clear(): this;
+    /** Visit every cell as (value, r, c, tree) in row-major ascending order. */
+    forEach(fn: (value: number, r: number, c: number, tree: SegmentTree2D) => void): void;
+
+    /** O(rows*cols) bottom-up bulk build from a 2D array-like of finite numbers (equal-length rows). */
+    static build(matrix: ArrayLike<ArrayLike<number>>, kind: 'min' | 'max' | 'sum' | 'gcd'): SegmentTree2D;
+}

@@ -24,9 +24,9 @@
 export const NA = 'n/a';
 
 /** The twelve shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D'];
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D'];
 
-/** The sixteen gated D1 witness op-rows (member.op), in build order. */
+/** The eighteen gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -40,6 +40,7 @@ export const OP_ROWS = [
     'PairingHeap.popMin',
     'FibonacciHeap.popMin',
     'Fenwick2D.update', 'Fenwick2D.rectSum',
+    'SegmentTree2D.update', 'SegmentTree2D.query',
 ];
 
 /** The eight measurement dimensions. */
@@ -71,6 +72,7 @@ export const BASELINE = {
     PairingHeap: 'linear-min-scan-and-splice',
     FibonacciHeap: 'linear-min-scan-and-splice',
     Fenwick2D: '2d-prefix-rebuild/rect-scan',
+    SegmentTree2D: '2d-grid-rebuild/rect-scan',
 };
 
 /**
@@ -114,6 +116,9 @@ export const COUNTER_FOIL = {
     // Fenwick2D is an index-addressed 2D range structure, not an ordered map; a Map cannot answer
     // a rectangle sum at all, so there is no "faster but order-blind" O(1) rival -- NA (never 0).
     Fenwick2D: NA,
+    // SegmentTree2D is a 2D range-fold structure, not an ordered map; a Map cannot answer a
+    // rectangle min/max/sum/gcd at all, so there is no "faster but order-blind" O(1) rival -- NA.
+    SegmentTree2D: NA,
 };
 
 /**
@@ -213,6 +218,14 @@ export const RATIONALE = {
             'rectangle scan per query) is the honest default before the 2D BIT -- one of point-update ' +
             'OR rectangle-sum is always O(n^2) there. The 2D Fenwick buys BOTH at O(log^2 n). No Map ' +
             'order-tax counterpoint (a Map cannot answer a rectangle sum at all).',
+    },
+    SegmentTree2D: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a plain 2D array with an O(n^2) grid rebuild per update (or a naive O(n^2) rectangle ' +
+            'scan per query) is the honest default before the 2D segment tree -- one of point-update ' +
+            'OR rectangle-fold is always O(n^2) there. The 2D segment tree buys BOTH at O(log^2 n) for ' +
+            'the general min/max/sum/gcd folds a 2D BIT cannot do (at ~4x the space). No Map order-tax ' +
+            'counterpoint (a Map cannot answer a rectangle fold at all).',
     },
 };
 
@@ -371,6 +384,11 @@ export const OP_CLASS = Object.freeze({
     // dimension is not free, so these are OLOGN2_WORST, never the single-log OLOGN_WORST.
     'Fenwick2D.update': OLOGN2_WORST,   // climb both dims: for each i&-i row level, an i&-i col climb
     'Fenwick2D.rectSum': OLOGN2_WORST,  // 4 nested inclusion-exclusion descents (the gated query row)
+    // SegmentTree2D: a tree-of-trees iterative walk over TWO dimensions -> WORST-CASE O(log^2 n)
+    // (a deterministic segment tree has no randomization / amortization). Same squared-log honesty
+    // hook as Fenwick2D: the second dimension is not free, so OLOGN2_WORST, never single-log.
+    'SegmentTree2D.update': OLOGN2_WORST,  // climb the leaf row's col-tree, then the whole row-tree
+    'SegmentTree2D.query': OLOGN2_WORST,   // outer row descent x inner col descent (the gated row)
 });
 
 // ===========================================================================
@@ -389,7 +407,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

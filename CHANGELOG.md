@@ -6,6 +6,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-22
+
+### Added
+
+- **SegmentTree2D** -- the thirteenth member and the general 2D rectangle FOLD a 2D BIT cannot do: a
+  segment tree OF segment trees (a tree of trees) that folds min / max / sum / gcd over any
+  axis-aligned rectangle. BOTH point-`update` AND rectangle-`query` in O(log^2 n) = O(log rows *
+  log cols) over a SINGLE flat `Float64Array(4 * rows * cols)`. It completes the 2D range story
+  Fenwick2D opened -- SegmentTree2D : Fenwick2D :: SegmentTree (1D) : Fenwick (1D) -- lifting the
+  exact rectangle MIN / MAX / GCD Fenwick2D lists as its documented not-for. Surface: `query` /
+  `update` / `at` / `clear` / `forEach`, `rows` / `cols` / `kind` getters, and the static
+  `SegmentTree2D.build(matrix, kind)`. See `decisions/0015-segmenttree2d.md`.
+- **Flat 2R x 2C tree-of-trees layout (D-S2-1).** One `Float64Array(4*rows*cols)`, row stride
+  `_w = 2*cols`; leaf rows `[rows, 2*rows)`, leaf cols `[cols, 2*cols)`, index 0 unused. `query`
+  descends the OUTER row dim half-open collecting O(log rows) boundary row-nodes, and for each does
+  an INNER col-range fold (double `l&1` / `r&1` picks in both dims). No pointers, no per-op alloc.
+- **Inner-then-outer point-update order (D-S2-2, the correctness site).** `update` writes the leaf,
+  climbs the leaf ROW's col-tree at column c, THEN climbs the ROW-tree -- at each row-ancestor it
+  recomputes the changed leaf column from its two row-children FIRST, then fixes that row-node's
+  col-tree up column c's path. The differential fuzz queries AFTER interleaved updates (not only
+  after build) to bite this order.
+- **min / max / sum / gcd frozen at ctor, COMMUTATIVE-ONLY (D-S2-3).** The fold is a ctor-cached
+  small-int `_k` combined by an INLINE switch (no fn ref / closure / megamorphic site; `gcd` reuses
+  `segGcd`). The order-agnostic 2n layout is correct ONLY for commutative + associative folds.
+  Identity fills cleared / unused cells and is a legal RESULT (a cleared min grid queries
+  `+Infinity`) but never a legal INPUT: NaN / +-Infinity fail closed typeof-first, and the `gcd`
+  kind additionally rejects negatives / non-integers.
+- **The product-overflow door is a FLOAT multiply, never `| 0` (D-S2-4).** `S2D_MAX_CELLS`
+  (`0x7FFFFFFF`) caps `4 * rows * cols`. The guard computes the product as a JS float (exact to
+  2^53) and throws when it exceeds the ceiling -- `| 0` would wrap a large product to a small /
+  negative int and PASS (fail OPEN -> under-allocation -> OOB). Pinned in the boundary suite.
+- **O(rows*cols) two-phase build (D-S2-5).** `SegmentTree2D.build(matrix, kind)` seeds every leaf,
+  folds each leaf ROW's col-tree, THEN folds the ROW-tree POSITION-WISE (the 2D fold is separable)
+  -- NOT rows*cols individual updates. The behavioral suite proves `build` equals the same cells
+  inserted by repeated `update` (backing arrays byte-identical).
+- **SPACE co-headline: 4*rows*cols cells (~4x Fenwick2D).** The honest price for the general
+  (non-invertible) folds a BIT cannot do. WORST-CASE member: no max-single-op line.
+- **The witness's SECOND squared-log lane.** Two gated lanes on the `(log2 n)^2` axis Fenwick2D
+  introduced (shared R^2 floor 0.958): `SegmentTree2D.update` slope 5.638 ns/level^2 band
+  [3.38, 7.89]; `SegmentTree2D.query` slope 5.105 ns/level^2 band [3.06, 7.15] (median-of-15;
+  both rock-steady single-fit, R^2 >= 0.994 / 0.9999). Foils = O(n^2) grid rebuild / rectangle scan.
+
+### Changed
+
+- Version bumped to 0.13.0 across the trinity (`package.json`, `LogN.js` `VERSION`, `llms.txt`).
+- The benchmark grid grows to 13 subjects x 8 dimensions = 104 cells; D1 emits 18 gated witness
+  op-rows. `LogN.js`'s prior twelve classes are byte-identical (VERSION line + one appended class).
+
 ## [0.12.0] - 2026-09-21
 
 ### Added

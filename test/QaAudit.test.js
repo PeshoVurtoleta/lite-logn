@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.12.0 at the Fenwick2D release', () => {
-    assert.equal(VERSION, '0.12.0');
+test('VERSION is exactly 0.13.0 at the SegmentTree2D release', () => {
+    assert.equal(VERSION, '0.13.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (12 members) --------
+// --- frozen export surface: VERSION + the shipped members (13 members) --------
 
-test('LogN.js exports exactly VERSION + the twelve members at v0.12.0 (adds Fenwick2D)', () => {
+test('LogN.js exports exactly VERSION + the thirteen members at v0.13.0 (adds SegmentTree2D)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the twelve members incl Fenwick2D)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the thirteen members incl SegmentTree2D)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -56,6 +56,7 @@ test('LogN.js exports exactly VERSION + the twelve members at v0.12.0 (adds Fenw
     assert.equal(typeof LogNModule.PairingHeap, 'function');
     assert.equal(typeof LogNModule.FibonacciHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick2D, 'function');
+    assert.equal(typeof LogNModule.SegmentTree2D, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -760,4 +761,56 @@ test('Fenwick2D fails closed with a [lite-logn]-tagged throw on every coercion d
     // Fenwick2D is index-addressed SUM-ONLY: deliberately NO min/max/gcd, no changeKey/rank/select.
     assert.equal(typeof f.rank, 'undefined', 'Fenwick2D has no rank (sum-only range structure)');
     assert.equal(typeof f.select, 'undefined', 'Fenwick2D has no select (sum-only range structure)');
+});
+
+// --- SegmentTree2D (v0.13.0): coercion + [lite-logn] fail-closed tag ----------
+
+test('SegmentTree2D fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { SegmentTree2D } = LogNModule;
+    // constructor: bad rows / cols (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 3n]) {
+        assert.throws(() => new SegmentTree2D(bad, 4, 'sum'), /\[lite-logn\]/, 'ctor rows ' + String(bad));
+        assert.throws(() => new SegmentTree2D(4, bad, 'sum'), /\[lite-logn\]/, 'ctor cols ' + String(bad));
+    }
+    // bad kind fails closed
+    for (const bad of ['avg', '', 'MIN', null, undefined, 0, Symbol('k')]) {
+        assert.throws(() => new SegmentTree2D(4, 4, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    // INDEX CEILING: a dim pair whose 4*rows*cols overflows the 2^31-1 cell ceiling fails CLOSED
+    // (a float multiply, never | 0 which would wrap a large product to a small int -> OPEN -> OOB).
+    assert.throws(() => new SegmentTree2D(0x20000000, 0x20000000, 'sum'), /\[lite-logn\]/, 'cell-product overflow');
+    assert.throws(() => new SegmentTree2D(0x7FFFFFFF, 0x7FFFFFFF, 'min'), /\[lite-logn\]/, 'cell-product overflow (max dims)');
+    const st = new SegmentTree2D(8, 8, 'sum');
+    // non-finite / non-number value, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => st.update(0, 0, bad), /\[lite-logn\]/, 'update value ' + String(bad));
+    }
+    // gcd kind additionally rejects negatives + non-integers (typeof-first still applies)
+    const g = new SegmentTree2D(8, 8, 'gcd');
+    for (const bad of [-1, -100, 1.5, 0.1]) {
+        assert.throws(() => g.update(0, 0, bad), /\[lite-logn\]/, 'gcd update value ' + String(bad));
+    }
+    // out-of-range coords on every coord-taking op
+    for (const bad of [-1, 8, 100, 1.5, NaN, '0', null, Symbol('i')]) {
+        assert.throws(() => st.update(bad, 0, 1), /\[lite-logn\]/, 'update r ' + String(bad));
+        assert.throws(() => st.update(0, bad, 1), /\[lite-logn\]/, 'update c ' + String(bad));
+        assert.throws(() => st.at(bad, 0), /\[lite-logn\]/, 'at r ' + String(bad));
+        assert.throws(() => st.at(0, bad), /\[lite-logn\]/, 'at c ' + String(bad));
+        assert.throws(() => st.query(bad, 0, 7, 7), /\[lite-logn\]/, 'query r1 ' + String(bad));
+        assert.throws(() => st.query(0, bad, 7, 7), /\[lite-logn\]/, 'query c1 ' + String(bad));
+        assert.throws(() => st.query(0, 0, bad, 7), /\[lite-logn\]/, 'query r2 ' + String(bad));
+        assert.throws(() => st.query(0, 0, 7, bad), /\[lite-logn\]/, 'query c2 ' + String(bad));
+    }
+    // query r1 > r2 / c1 > c2 fail closed
+    assert.throws(() => st.query(5, 0, 2, 7), /\[lite-logn\]/);
+    assert.throws(() => st.query(0, 5, 7, 2), /\[lite-logn\]/);
+    // build fails closed on non-2D-array-like / ragged rows / non-finite entry / bad gcd entry
+    assert.throws(() => SegmentTree2D.build(null, 'sum'), /\[lite-logn\]/);
+    assert.throws(() => SegmentTree2D.build([1, 2, 3], 'sum'), /\[lite-logn\]/);          // rows not array-like
+    assert.throws(() => SegmentTree2D.build([[1, 2], [3]], 'sum'), /\[lite-logn\]/);      // ragged rows
+    assert.throws(() => SegmentTree2D.build([[1, NaN], [3, 4]], 'sum'), /\[lite-logn\]/); // non-finite entry
+    assert.throws(() => SegmentTree2D.build([[1, -1], [3, 4]], 'gcd'), /\[lite-logn\]/);  // negative gcd entry
+    // SegmentTree2D is a range FOLD structure: deliberately NO changeKey / rank / select.
+    assert.equal(typeof st.rank, 'undefined', 'SegmentTree2D has no rank (range-fold structure)');
+    assert.equal(typeof st.select, 'undefined', 'SegmentTree2D has no select (range-fold structure)');
 });

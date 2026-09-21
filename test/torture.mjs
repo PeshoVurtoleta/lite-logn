@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -206,6 +206,14 @@ async function main() {
             f2.rectSum(1, 1, 10, 10);
             f2.at(7, 7);
             tracker.track(f2, noopRelease, 11 * CYCLES + i, { audit: true });
+            // A fresh SegmentTree2D per cycle, exercised then dropped. Same held-value
+            // contract: a SegmentTree2D owns only its one Float64Array, no external
+            // resource, so the no-op cleanup never defeats finalization.
+            const st2 = new SegmentTree2D(16, 16, (i & 1) ? 'min' : 'sum');
+            for (let r = 0; r < 16; r++) for (let c = 0; c < 16; c++) st2.update(r, c, (r * 16 + c) & 0xff);
+            st2.query(1, 1, 10, 10);
+            st2.at(7, 7);
+            tracker.track(st2, noopRelease, 12 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -780,6 +788,34 @@ async function main() {
     function f2ForEachCb(value, r, c) { f2feAcc = (f2feAcc + (value | 0) + r + c) | 0; }
     const stepF2ForEach = () => { f2.forEach(f2ForEachCb); };
 
+    // SegmentTree2D: one out-of-loop SIDE x SIDE grid prefilled (sum fold). Each lane is a real hot
+    // op (or a size-preserving read) that MUST allocate zero bytes -- the one flat Float64Array is
+    // fixed at construction and the nested iterative descents/climbs use only local scalars.
+    const st2 = new SegmentTree2D(F2SIDE, F2SIDE, 'sum');
+    for (let r = 0; r < F2SIDE; r++) for (let c = 0; c < F2SIDE; c++) st2.update(r, c, (r * F2SIDE + c) & 0xffff);
+
+    let st2k = 0, st2acc = 0;
+    // update: write a leaf, climb the leaf row's col-tree then the whole row-tree. Bounded value.
+    const stepSt2Update = () => {
+        st2.update(st2k & F2MASK, (st2k >> 6) & F2MASK, st2k & 0xffff);
+        st2k = (st2k + 1) | 0;
+    };
+    // query: outer row descent x inner col descent over a fixed-width rectangle, folded in.
+    const stepSt2Query = () => {
+        const r = st2k & (F2MASK >> 1), c = (st2k >> 3) & (F2MASK >> 1);
+        st2acc = (st2acc + (st2.query(r, c, r + 20, c + 20) | 0)) | 0;
+        st2k = (st2k + 1) | 0;
+    };
+    // at: single-leaf O(1) read, folded in.
+    const stepSt2At = () => {
+        st2acc = (st2acc + (st2.at(st2k & F2MASK, (st2k >> 6) & F2MASK) | 0)) | 0;
+        st2k = (st2k + 1) | 0;
+    };
+    // forEach: the O(rows*cols) ascending cold scan through a HOISTED callback -- no per-call alloc.
+    let st2feAcc = 0;
+    function st2ForEachCb(value, r, c) { st2feAcc = (st2feAcc + (value | 0) + r + c) | 0; }
+    const stepSt2ForEach = () => { st2.forEach(st2ForEachCb); };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -804,7 +840,8 @@ async function main() {
         stepBinhPopMin, stepBinhRead, stepBinhMeld,
         stepPhPopMin, stepPhDecreaseKey, stepPhRemove, stepPhRead, stepPhMeld,
         stepFhPopMin, stepFhDecreaseKey, stepFhRemove, stepFhRead, stepFhMeld,
-        stepF2Update, stepF2RectSum, stepF2Prefix, stepF2At, stepF2Set]) {
+        stepF2Update, stepF2RectSum, stepF2Prefix, stepF2At, stepF2Set,
+        stepSt2Update, stepSt2Query, stepSt2At]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -817,7 +854,7 @@ async function main() {
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
         stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach, stepPhForEach, stepFhForEach,
-        stepF2ForEach]) {
+        stepF2ForEach, stepSt2ForEach]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -844,6 +881,8 @@ async function main() {
     if (fhfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep fhfeAcc live
     if (f2acc === 0x7fffffff) throw new Error('unreachable'); // keep f2acc live
     if (f2feAcc === 0x7fffffff) throw new Error('unreachable'); // keep f2feAcc live
+    if (st2acc === 0x7fffffff) throw new Error('unreachable'); // keep st2acc live
+    if (st2feAcc === 0x7fffffff) throw new Error('unreachable'); // keep st2feAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -973,6 +1012,10 @@ async function main() {
         sink = (sink + (f2.prefix(i & F2MASK, (i >> 6) & F2MASK) | 0)) | 0;
         if ((i & 7) === 0) { const r = i & (F2MASK >> 1), c = (i >> 3) & (F2MASK >> 1); sink = (sink + (f2.rectSum(r, c, r + 20, c + 20) | 0)) | 0; }
         if ((i & 63) === 0) f2.set(i & F2MASK, (i >> 6) & F2MASK, i & 0xffff);
+        // SegmentTree2D churn every op: an absolute bounded update and a windowed rectangle query.
+        // Nested iterative descents/climbs; steady grid, zero alloc.
+        st2.update(i & F2MASK, (i >> 6) & F2MASK, i & 0xffff);
+        { const r = i & (F2MASK >> 1), c = (i >> 3) & (F2MASK >> 1); sink = (sink + (st2.query(r, c, r + 20, c + 20) | 0)) | 0; }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -998,6 +1041,7 @@ async function main() {
     const abPh = new PairingHeap(1024, 'min');
     const abFh = new FibonacciHeap(1024, 'min');
     const abF2 = new Fenwick2D(32, 32); // 1024 cells; one flat Float64Array, reused across the soak
+    const abSt2 = new SegmentTree2D(32, 32, 'sum'); // 4096 cells; one flat Float64Array, reused
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1064,6 +1108,11 @@ async function main() {
         // climbs) then bulk clear reuses the SAME backing store, so arrayBuffers must not grow.
         for (let rr = 0; rr < 32; rr++) for (let cc = 0; cc < 32; cc++) abF2.update(rr, cc, (rr * 32 + cc) & 0xffff);
         abF2.clear();
+        // SegmentTree2D: one flat Float64Array, fixed at construction. A full grid fill (nested
+        // iterative col-tree + row-tree climbs) then bulk clear reuses the SAME backing store, so
+        // arrayBuffers must not grow across soak cycles.
+        for (let rr = 0; rr < 32; rr++) for (let cc = 0; cc < 32; cc++) abSt2.update(rr, cc, (rr * 32 + cc) & 0xffff);
+        abSt2.clear();
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
         // half the slots, then a refill (splaying), then clear -- the invariant must hold
@@ -1190,7 +1239,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {
