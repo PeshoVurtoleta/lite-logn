@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -736,6 +736,89 @@ const spSuccessorChurn = {
     statsOf(s) { return { grows: spGrows(s) }; },
 };
 
+/** BinomialHeap's zero-alloc counter: its six typed-array columns plus the private pool's
+ *  free-stack, all fixed at construction, so the delta across the window must be 0 (the
+ *  binary-carry union, the child-reverse popMin, and meld all rewrite slot links only). */
+function binhGrows(s) {
+    const h = s.binh;
+    return h._key.buffer.byteLength + h._id.buffer.byteLength +
+        h._parent.buffer.byteLength + h._child.buffer.byteLength +
+        h._sibling.buffer.byteLength + h._order.buffer.byteLength +
+        h._pool._free.buffer.byteLength;
+}
+
+/** A standalone BinomialHeap prefilled to capacity (ids 0..CAP-1 resident, integer keys). */
+function binhFill() {
+    const h = new BinomialHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) h.push(i & 0xffff, (i * 2654435761) & 0xffff);
+    return h;
+}
+
+/**
+ * push/popMin churn at steady capacity: the heap starts FULL, each op pops the extreme
+ * (child-reverse + remeld + root rescan, freeing one slot) then pushes a fresh id/key back
+ * (the binary-carry union). Heap never overflows or empties; zero allocation.
+ */
+const binhPopMinChurn = {
+    name: 'BinomialHeap push + popMin churn',
+    setup() { return { binh: binhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.binh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = h.popMin();
+            h.push(id, (t * 2654435761) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: binhGrows(s) }; },
+};
+
+/**
+ * peekMin / peekMinKey over a full heap, folded into an int32 accumulator. Both O(1) reads
+ * of the cached extreme root; no allocation.
+ */
+const binhReadMix = {
+    name: 'BinomialHeap peekMin/peekMinKey read mix',
+    setup() { return { binh: binhFill(), acc: 0 }; },
+    hot(s, n) {
+        const h = s.binh;
+        let acc = s.acc | 0;
+        for (let i = 0; i < n; i++) acc = (acc + h.peekMin() + (h.peekMinKey() | 0)) | 0;
+        s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: binhGrows(s) }; },
+};
+
+/**
+ * meld + arena-churn: a fixed two-heap arena. meld CONSUMES its donor (a dead-after-meld
+ * heap fails closed on reuse), so to drive the meld hot body REPEATEDLY the donor is
+ * refreshed in place (white-box scalar resets -- alloc-free) then reloaded; the melded
+ * result is drained back so the arena returns to empty. The measured body is the public
+ * meld() binary-carry (byte-identical to push's) + the drain, which allocates zero bytes.
+ */
+const binhMeldChurn = {
+    name: 'BinomialHeap meld + arena-churn',
+    setup() {
+        const [acc, donor] = BinomialHeap.arena(CAP, 'min', 2);
+        return { binh: acc, donor, tick: 0 };
+    },
+    hot(s, n) {
+        const acc = s.binh, donor = s.donor;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            donor._consumed = false; donor._head = 0; donor._min = 0; donor._n = 0; // alloc-free refresh
+            for (let k = 0; k < 8; k++) donor.push((t + k) & 0xffff, ((t + k) * 40503) & 0xffff);
+            acc.meld(donor);                       // consumes donor; 0-alloc carry
+            for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc
+            t = (t + 8) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: binhGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -772,6 +855,7 @@ zgcSuite({
         trGetChurn, trSetChurn, trDeleteChurn, trOrderMix,
         sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix,
         mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix,
-        spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn],
+        spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn,
+        binhPopMinChurn, binhReadMix, binhMeldChurn],
     mustFail: [teethMustFailAlloc],
 });

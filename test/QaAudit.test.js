@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.8.0 at the SplayTree release', () => {
-    assert.equal(VERSION, '0.8.0');
+test('VERSION is exactly 0.9.0 at the BinomialHeap release', () => {
+    assert.equal(VERSION, '0.9.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (8 members) --------
+// --- frozen export surface: VERSION + the shipped members (9 members) --------
 
-test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap and SplayTree at v0.8.0 (8 members)', () => {
+test('LogN.js exports exactly VERSION + the nine members at v0.9.0 (adds BinomialHeap)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the nine members incl BinomialHeap)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -52,6 +52,7 @@ test('LogN.js exports exactly VERSION, BinaryHeap, Fenwick, SegmentTree, SkipLis
     assert.equal(typeof LogNModule.Scapegoat, 'function');
     assert.equal(typeof LogNModule.MinMaxHeap, 'function');
     assert.equal(typeof LogNModule.SplayTree, 'function');
+    assert.equal(typeof LogNModule.BinomialHeap, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -387,4 +388,82 @@ test('SplayTree fails closed with a [lite-logn]-tagged throw on every coercion d
     assert.equal(typeof sp.select, 'undefined', 'SplayTree has no select (LEAN)');
     assert.equal(typeof sp.split, 'undefined', 'SplayTree has no split (LEAN)');
     assert.equal(typeof SplayTree.merge, 'undefined', 'SplayTree has no static merge (LEAN)');
+});
+
+// --- BinomialHeap (v0.9.0): coercion + [lite-logn] fail-closed tag ------------
+
+test('BinomialHeap fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { BinomialHeap } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 10n, 2 ** 31]) {
+        assert.throws(() => new BinomialHeap(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    // constructor: bad kind (only 'min' | 'max'; default 'min' when omitted)
+    for (const bad of ['biggest', 'MIN', '', null, 0, Symbol('k'), {}, 3n]) {
+        assert.throws(() => new BinomialHeap(8, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    assert.doesNotThrow(() => new BinomialHeap(8));         // kind omitted -> 'min'
+    assert.equal(new BinomialHeap(8).kind, 'min');
+    assert.equal(new BinomialHeap(8, 'max').kind, 'max');
+    const h = new BinomialHeap(8, 'min');
+    // non-finite / non-number key, typeof-first (checked BEFORE the id); size unchanged
+    for (const bad of [NaN, Infinity, -Infinity, '3', null, undefined, {}, Symbol('k'), 1n]) {
+        assert.throws(() => h.push(0, bad), /\[lite-logn\]/, 'push key ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // non-integer / out-of-range id (the id domain is [0, 2^32))
+    for (const bad of [-1, 1.5, NaN, Infinity, 2 ** 32, '0', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => h.push(bad, 1), /\[lite-logn\]/, 'push id ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // full arena fails closed (never a silent drop); size unchanged
+    const full = new BinomialHeap(2, 'min');
+    full.push(0, 1); full.push(1, 2);
+    assert.throws(() => full.push(2, 3), /\[lite-logn\]/);
+    assert.equal(full.size, 2);
+    // empty peek/pop never throw (they return undefined)
+    const empty = new BinomialHeap(4, 'min');
+    assert.equal(empty.peekMin(), undefined);
+    assert.equal(empty.peekMinKey(), undefined);
+    assert.equal(empty.popMin(), undefined);
+
+    // arena factory: bad count fails closed
+    for (const bad of [0, -1, 1.5, NaN, '2', null, undefined, {}, Symbol('c'), 2n]) {
+        assert.throws(() => BinomialHeap.arena(8, 'min', bad), /\[lite-logn\]/, 'arena count ' + String(bad));
+    }
+    // arena also validates capacity + kind through the constructor
+    assert.throws(() => BinomialHeap.arena(0, 'min', 2), /\[lite-logn\]/);
+    assert.throws(() => BinomialHeap.arena(8, 'bad', 2), /\[lite-logn\]/);
+
+    // meld fails closed: non-BinomialHeap arg, self, cross-arena, kind mismatch
+    assert.throws(() => h.meld({}), /\[lite-logn\]/, 'meld non-BinomialHeap');
+    assert.throws(() => h.meld(h), /\[lite-logn\]/, 'meld self');
+    assert.throws(() => new BinomialHeap(4, 'min').meld(new BinomialHeap(4, 'min')), /\[lite-logn\]/, 'meld cross-arena');
+    const [minA, minB] = BinomialHeap.arena(8, 'min', 2);
+    const [maxA] = BinomialHeap.arena(8, 'max', 1);
+    assert.throws(() => minA.meld(maxA), /\[lite-logn\]/, 'meld kind mismatch (also cross-arena)');
+
+    // meld CONSUMES the donor: it becomes empty (size 0) AND dead -- every later op fails closed,
+    // so a reused donor can never silently re-enter the now-shared roots (the top-risk contract).
+    for (let k = 0; k < 4; k++) minA.push(k, k);
+    for (let k = 0; k < 4; k++) minB.push(k + 4, k + 4);
+    minA.meld(minB);
+    assert.equal(minB.size, 0, 'consumed donor is empty');
+    assert.equal(minA.size, 8, 'melded heap holds every node');
+    assert.throws(() => minB.push(1, 1), /\[lite-logn\]/, 'consumed donor push fails closed');
+    assert.throws(() => minB.popMin(), /\[lite-logn\]/, 'consumed donor popMin fails closed');
+    assert.throws(() => minB.peekMin(), /\[lite-logn\]/, 'consumed donor peekMin fails closed');
+    assert.throws(() => minB.peekMinKey(), /\[lite-logn\]/, 'consumed donor peekMinKey fails closed');
+    assert.throws(() => minB.clear(), /\[lite-logn\]/, 'consumed donor clear fails closed');
+    assert.throws(() => minB.forEach(() => {}), /\[lite-logn\]/, 'consumed donor forEach fails closed');
+    assert.throws(() => [...minB], /\[lite-logn\]/, 'consumed donor iteration fails closed');
+    assert.throws(() => minA.meld(minB), /\[lite-logn\]/, 'melding a consumed operand fails closed');
+
+    // BinomialHeap is LEAN + NON-ADDRESSABLE: deliberately NO decreaseKey / remove / changeKey /
+    // rank / select (the opaque-id, no-reverse-map asymmetry vs Treap/Scapegoat and BinaryHeap).
+    assert.equal(typeof h.decreaseKey, 'undefined', 'BinomialHeap has no decreaseKey (LEAN)');
+    assert.equal(typeof h.remove, 'undefined', 'BinomialHeap has no remove (LEAN)');
+    assert.equal(typeof h.changeKey, 'undefined', 'BinomialHeap has no changeKey (LEAN)');
+    assert.equal(typeof h.rank, 'undefined', 'BinomialHeap has no rank (LEAN)');
+    assert.equal(typeof h.select, 'undefined', 'BinomialHeap has no select (LEAN)');
 });

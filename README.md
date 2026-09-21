@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.8.0 ships eight members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge), Scapegoat (a DETERMINISTIC weight-balanced augmented ordered map: worst-case-O(log n) get, amortized-O(log n) set / delete, zero-GC rebuild), MinMaxHeap (an array-embedded double-ended priority queue: O(1) peekMin / peekMax, O(log n) push / popMin / popMax), and SplayTree (a self-adjusting ordered map: amortized-O(log n) get / set / delete via top-down splay, hot keys ride near the root) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.9.0 ships nine members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge), Scapegoat (a DETERMINISTIC weight-balanced augmented ordered map: worst-case-O(log n) get, amortized-O(log n) set / delete, zero-GC rebuild), MinMaxHeap (an array-embedded double-ended priority queue: O(1) peekMin / peekMax, O(log n) push / popMin / popMax), SplayTree (a self-adjusting ordered map: amortized-O(log n) get / set / delete via top-down splay, hot keys ride near the root), and BinomialHeap (a mergeable priority queue: O(log n) meld of two heaps over a shared arena, O(1)-amortized push, O(log n) popMin) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,7 +19,7 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.8.0 ships eight members: BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap and SplayTree.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
+**v0.9.0 ships nine members: BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree and BinomialHeap.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
@@ -64,6 +64,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
   - [Scapegoat](#scapegoat)
   - [MinMaxHeap](#minmaxheap)
   - [SplayTree](#splaytree)
+  - [BinomialHeap](#binomialheap)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -88,7 +89,7 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 
 ## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.8.0, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap and SplayTree are shipped.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.9.0, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree and BinomialHeap are shipped.
 
 | Member | Version | Status | Shape | Hot ops |
 | --- | --- | --- | --- | --- |
@@ -100,6 +101,7 @@ One member per session, each landing append-only (prior members stay byte-identi
 | **Scapegoat** | 0.6.0 | shipped | DETERMINISTIC weight-balanced augmented BST over the same node pool; worst-case O(log n) get, amortized O(log n) set/delete (zero-GC rebuild) | `get` / `has` / `set` / `delete` / `rank` / `select` / `successor` / `predecessor` / `forEach` / `rangeIter` (NO split/merge) |
 | **MinMaxHeap** | 0.7.0 | shipped | array-embedded double-ended PQ (DEPQ): one binary heap whose levels alternate min/max, two flat columns (`_key`/`_id`) | `push` / `popMin` / `popMax` O(log n), `peekMin` / `peekMax` / `peekMinKey` / `peekMaxKey` O(1) (non-addressable: NO changeKey/remove) |
 | **SplayTree** | 0.8.0 | shipped | self-adjusting BST ordered map: iterative top-down splay, four flat columns (`_key`/`_value`/`_left`/`_right`) over the shared free-list, NO balance metadata | `get` / `has` / `set` / `delete` / `successor` / `predecessor` amortized O(log n) (a read SPLAYS); LEAN (NO rank/select/split/merge) |
+| **BinomialHeap** | 0.9.0 | shipped | mergeable priority queue: a forest of binomial trees, six flat columns (`_key`/`_id`/`_parent`/`_child`/`_sibling`/`_order`) over a shared-arena free-list | `push` O(1) amortized, `popMin` O(log n), `peekMin`/`peekMinKey` O(1), `meld` O(log n) (consumes the arg); LEAN + non-addressable (NO decreaseKey/remove/rank/select) |
 
 Later tiers (OrderStatTree, IndexedHeap, SortedArray, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
 
@@ -111,7 +113,7 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.8.0 the witness gates eleven ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`), Scapegoat `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.41, 5.63]`), MinMaxHeap `popMin` (R^2 ~ 0.99, slope ~ 10.3 ns/level, band `[6.18, 14.42]`), and SplayTree `get` (R^2 ~ 0.98, slope ~ 27 ns/level, band `[16.39, 38.24]`, sweep `[2^12, 2^17]`) all ON the line. SplayTree is DETERMINISTIC and SELF-ADJUSTING: its `get` is AMORTIZED O(log n) (a read SPLAYS the touched key to the root -- the slope sits well above a read-only BST descent because rotations rewrite links every op), measured over a uniform-random working set of size n so the amortized line shows (a skewed pattern would flatten it -- the member's speedup, not what a straight-log witness measures); because a single cold access can splay an O(n) chain, the witness also prints the MAX single get as a disclosure, never gated. Scapegoat is DETERMINISTIC, so its `get` is WORST-case (not expected) O(log n); its rebuild spike lives on the AMORTIZED `set` path and is proven not by a per-op line but by an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio ~1.5x over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would degenerate to an O(n)-amortized chain and blow the ratio to ~64x. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.9.0 the witness gates twelve ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`), Scapegoat `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.41, 5.63]`), MinMaxHeap `popMin` (R^2 ~ 0.99, slope ~ 10.3 ns/level, band `[6.18, 14.42]`), SplayTree `get` (R^2 ~ 0.98, slope ~ 27 ns/level, band `[16.39, 38.24]`, sweep `[2^12, 2^17]`), and BinomialHeap `popMin` (R^2 ~ 0.98, slope ~ 44.8 ns/level, band `[26.89, 62.75]`, sweep `[2^11, 2^17]`) all ON the line. BinomialHeap is the family's first MERGEABLE heap: its `popMin` is WORST-case O(log n) (unlink the extreme root, reverse its child list, union back, rescan the roots -- no max-single-op line), and its per-level slope sits well above the array-embedded heaps because it chases scattered forest slots (which is why it is gated over the cache-resident exact-power window, not the [1e4, 1e6] band). SplayTree is DETERMINISTIC and SELF-ADJUSTING: its `get` is AMORTIZED O(log n) (a read SPLAYS the touched key to the root -- the slope sits well above a read-only BST descent because rotations rewrite links every op), measured over a uniform-random working set of size n so the amortized line shows (a skewed pattern would flatten it -- the member's speedup, not what a straight-log witness measures); because a single cold access can splay an O(n) chain, the witness also prints the MAX single get as a disclosure, never gated. Scapegoat is DETERMINISTIC, so its `get` is WORST-case (not expected) O(log n); its rebuild spike lives on the AMORTIZED `set` path and is proven not by a per-op line but by an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio ~1.5x over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would degenerate to an O(n)-amortized chain and blow the ratio to ~64x. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
 
 ## Benchmarks
 
@@ -154,6 +156,7 @@ Each op fits `nsPerOp = intercept + slope*log2(n)`. ON-LINE = `R^2 >= 0.958` (th
 | `Scapegoat.get` | 0.988 | 3.8 | `[2.41, 5.63]` | ON | linear scan | 0.79 | off |
 | `MinMaxHeap.popMin` | 0.99 | 10.3 | `[6.18, 14.42]` | ON | linear min-scan-and-splice | 0.77 | off |
 | `SplayTree.get` | 0.98 | 27.3 | `[16.39, 38.24]` | ON | linear scan | 0.80 | off |
+| `BinomialHeap.popMin` | 0.98 | 44.8 | `[26.89, 62.75]` | ON | linear min-scan-and-splice | 0.77 | off |
 
 **Scapegoat amortized-trace (the rebuild honesty).** Scapegoat's `get` is WORST-case O(log n) (a deterministic weight-balance height bound), so it carries no expected-op MAX-single-op disclosure. The rebuild spike lives on the AMORTIZED `set` path; D1 proves the amortization not with a per-op line but with an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio `~1.5x` over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would blow to `~64x`.
 
@@ -189,8 +192,8 @@ All seven gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, with 
 
 - **D2 amortized cost** -- cumulative ns/op stays bounded over a `~1M`-op mixed trace (drift `< 1.0` here: the trace speeds up as the JIT warms, never degrades).
 - **D4 cache (PROXY, labelled)** -- dense `forEach` iteration vs random single-element lookup; the random/dense gap is `~1.9x` (SegmentTree) to `~2.9x` (SkipList). No native perf counters.
-- **D7 scalability** -- numeric substrates: string + object keys read `n/a`. Load factors `0.3/0.5/0.7/0.9`; insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree, `n/a` for the index-addressed Fenwick + SegmentTree.
-- **D8 workloads** -- churn (all members) + an ordered scan (`successor` + `rangeIter`, SkipList + Treap + Scapegoat + SplayTree; `n/a` elsewhere, including MinMaxHeap -- a DEPQ, not an ordered map).
+- **D7 scalability** -- numeric substrates: string + object keys read `n/a`. Load factors `0.3/0.5/0.7/0.9`; insertion order (sorted / random / adversarial-reverse) applies to the comparison-ordered BinaryHeap + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap, `n/a` for the index-addressed Fenwick + SegmentTree.
+- **D8 workloads** -- churn (all members) + an ordered scan (`successor` + `rangeIter`, SkipList + Treap + Scapegoat + SplayTree; `n/a` elsewhere, including MinMaxHeap and BinomialHeap -- priority queues, not ordered maps).
 
 ## API reference
 
@@ -198,7 +201,7 @@ All seven gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, with 
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.8.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.9.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -487,6 +490,46 @@ sp.delete(3);       // -> true (splay to root, then join the subtrees)
 | `clear` | `clear() -> this` | O(capacity) | Empties the tree, keeps capacity. |
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 
+### BinomialHeap
+
+A **binomial heap**: the family's first **mergeable** priority queue -- a **forest** of heap-ordered binomial trees whose defining op is **`meld`** (union two heaps) in **O(log n)** worst-case, via a **binary carry** over the two order-sorted root lists (the structural analogue of adding two binary numbers; Vuillemin 1978). `push` is **O(1) amortized** (O(log n) worst), `popMin` is **O(log n)** worst (unlink the extreme root, reverse its child list into a new root list, union back, rescan the O(log n) roots), and `peekMin` is **O(1)** via a cached extreme root maintained inline. Six parallel pointer-free columns (`_key` `Float64Array`, `_id` / `_parent` / `_child` / `_sibling` / `_order` `Uint32Array`) over a private free-list (NodePool); `NIL = 0`.
+
+**LEAN + non-addressable** (the MinMaxHeap idiom): the id is an **opaque `Uint32` payload** in `[0, 2^32)` (not unique, no reverse map), so there is deliberately **no `decreaseKey` / `remove` / `changeKey` / `rank` / `select`**. **`kind` ('min' | 'max') is frozen at construction.**
+
+**Shared-arena meld.** A meld rewires roots in place, so two heaps can meld only if they draw from the **same arena**. A standalone `new BinomialHeap(capacity, kind)` owns its own arena; **`BinomialHeap.arena(capacity, kind, count)`** hands out `count` arena-sharing heaps that can meld with one another. `a.meld(b)` **consumes `b`** -- `b` becomes empty (size 0) and **dead**: every later op on `b` throws `[lite-logn]` rather than silently re-enter the now-shared roots. Cross-arena detection is column identity (`a._key !== b._key`); a kind mismatch, a non-BinomialHeap arg, a self-meld, or a consumed operand each throw. See [`decisions/0011-binomialheap.md`](./decisions/0011-binomialheap.md).
+
+```js
+import { BinomialHeap } from '@zakkster/lite-logn';
+
+// standalone: owns its own arena
+const h = new BinomialHeap(1000, 'min');
+h.push(1, 50);
+h.push(2, 30);
+h.peekMinKey();   // -> 30    -- O(1)
+h.popMin();       // -> 2     -- O(log n)
+
+// mergeable: two heaps sharing ONE arena
+const [a, b] = BinomialHeap.arena(1000, 'min', 2);
+a.push(10, 5); a.push(11, 9);
+b.push(20, 3); b.push(21, 7);
+a.meld(b);        // -> a (now holds all four); b is consumed (size 0, dead)   -- O(log n)
+b.size;           // -> 0
+a.popMin();       // -> 20    (key 3, the global minimum)
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new BinomialHeap(capacity, kind = 'min')` | O(capacity) | `capacity` integer in `[1, 2^31-1]`; `kind` 'min' or 'max' (frozen). Owns its own arena (six columns + free-list). |
+| `BinomialHeap.arena` | `arena(capacity, kind, count) -> BinomialHeap[]` | O(capacity) | `count` empty heaps sharing ONE arena, so any two can meld. `count` integer >= 1. Fails closed on bad capacity / kind / count. |
+| `push` | `push(id, key) -> void` | O(1) amortized | Insert opaque id with priority key. Non-finite key (checked FIRST) / out-of-range id / full arena / consumed heap throw. |
+| `popMin` | `popMin() -> number \| undefined` | O(log n) | Removes + returns the id at the extreme key; `undefined` if empty (no throw). Consumed heap throws. |
+| `peekMin` / `peekMinKey` | `-> number \| undefined` | O(1) | The extreme id / key, or `undefined` if empty. Consumed heap throws. |
+| `meld` | `meld(other) -> this` | O(log n) | Folds `other` into this; CONSUMES `other` (empty, dead). Non-BinomialHeap / self / cross-arena / kind-mismatch / consumed operand throw. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(id, key, heap)` in UNSPECIFIED (forest) order -- NOT sorted / pop order. |
+| `[Symbol.iterator]` | `-> IterableIterator<number>` | O(n) | Yields live ids in UNSPECIFIED (forest) order. |
+| `clear` | `clear() -> this` | O(n) | Frees ONLY this heap's own nodes back to the shared pool (an arena sibling is untouched). |
+| `size` / `capacity` / `kind` | getters | O(1) | Live entry count / arena-wide capacity / frozen polarity. |
+
 Member signatures for later members are appended here as each ships.
 
 ## Zero-GC design notes
@@ -524,8 +567,11 @@ Member signatures for later members are appended here as each ships.
 | `SplayTree` get / has / set / delete / successor / predecessor | 0 B/op (the iterative top-down splay uses the slot-0 header + two scalar hands; rotations rewrite existing slot links only -- a read splays but allocates nothing) |
 | `SplayTree` constructor / `clear` | O(capacity) four typed arrays + free-list, once (cold) |
 | `SplayTree` forEach / rangeIter / `[Symbol.iterator]` | 0 B/op in the loop body (NON-splaying key re-descent, no scratch stack; the range/iterator generator's per-step `{value, done}` is transient) |
+| `BinomialHeap` push / popMin / peekMin / peekMinKey / meld | 0 B/op (six flat columns + a shared free-list; the binary-carry union, the child-reverse popMin, and the meld rewrite slot links only -- no heap object) |
+| `BinomialHeap` constructor / `arena` / `clear` | O(capacity) six typed arrays + free-list, once (cold); `clear` is an O(n) forest walk that frees only this heap's own nodes |
+| `BinomialHeap` forEach / `[Symbol.iterator]` | 0 B/op in the forEach loop body (hoisted callback); the iterator's per-step `{value, done}` + child-list sub-iterators are transient |
 
-Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`); Scapegoat `get` R^2 ~ 0.99, slope ~ 3.8-4.0 ns/level (band `[2.41, 5.63]`, sweep `[2^11, 2^17]`) -- WORST-case (deterministic), with the AMORTIZED `set` rebuild spike proven by the amortized-trace assertion (ratio `< 4x`), not a per-op line; MinMaxHeap `popMin` R^2 ~ 0.99, slope ~ 10.3 ns/level (band `[6.18, 14.42]`, sweep `[1e4, 1e6]`) -- WORST-case (a DEPQ whose push / popMin / popMax are all worst-case, so no MAX-single-op line), a touch ABOVE BinaryHeap.pop because a min-max trickle-down compares against up to six descendants per level; SplayTree `get` R^2 ~ 0.98, slope ~ 27.3 ns/level (band `[16.39, 38.24]`, sweep `[2^12, 2^17]`) -- AMORTIZED + DETERMINISTIC (a read SPLAYS -- rotations rewrite links every op, so the per-level slope sits well above a read-only descent), with the MAX single get (a cold deep splay) DISCLOSED, never gated. The allocation table is extended per member as each lands.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`); Scapegoat `get` R^2 ~ 0.99, slope ~ 3.8-4.0 ns/level (band `[2.41, 5.63]`, sweep `[2^11, 2^17]`) -- WORST-case (deterministic), with the AMORTIZED `set` rebuild spike proven by the amortized-trace assertion (ratio `< 4x`), not a per-op line; MinMaxHeap `popMin` R^2 ~ 0.99, slope ~ 10.3 ns/level (band `[6.18, 14.42]`, sweep `[1e4, 1e6]`) -- WORST-case (a DEPQ whose push / popMin / popMax are all worst-case, so no MAX-single-op line), a touch ABOVE BinaryHeap.pop because a min-max trickle-down compares against up to six descendants per level; SplayTree `get` R^2 ~ 0.98, slope ~ 27.3 ns/level (band `[16.39, 38.24]`, sweep `[2^12, 2^17]`) -- AMORTIZED + DETERMINISTIC (a read SPLAYS -- rotations rewrite links every op, so the per-level slope sits well above a read-only descent), with the MAX single get (a cold deep splay) DISCLOSED, never gated; BinomialHeap `popMin` R^2 ~ 0.98, slope ~ 44.8 ns/level (band `[26.89, 62.75]`, sweep `[2^11, 2^17]`) -- WORST-case (a mergeable heap whose push / popMin / meld are all worst-case, so no MAX-single-op line), well ABOVE the array-embedded heaps because a binomial popMin chases scattered forest slots (which is why it is gated over the cache-resident exact-power window). The allocation table is extended per member as each lands.
 
 ## Testing
 
@@ -545,6 +591,7 @@ Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R
 - **Not a cache.** `@zakkster/lite-lru` uses ordering internally for eviction but is a cache, not an ordered-collection library.
 - **Not an addressable double-ended queue.** MinMaxHeap is a DEPQ, but it is NON-addressable: its id is an opaque, non-unique payload (no reverse map), so it has no `changeKey` / `remove`. For an addressable single-ended priority queue (reprioritize / remove by entity id) use **BinaryHeap**. MinMaxHeap also ships the classic one-element-per-node min-max heap only -- the interval-heap DEPQ (two elements per node) is a deliberately deferred alternative (see [`decisions/0009-minmaxheap.md`](./decisions/0009-minmaxheap.md)).
 - **Not an order-statistic tree, and not read-only-safe under iteration -- for SplayTree.** SplayTree is the LEAN member: it has no `rank` / `select` / `split` / `merge` (use **Treap** or **Scapegoat** for order statistics), and because a `get` / `has` SPLAYS (restructures the tree and bumps the version), a read taken mid-`rangeIter` fails closed. If you need worst-case (not amortized) reads that never restructure, use **Scapegoat** (deterministic worst-case O(log n) `get`); reach for SplayTree when the access pattern is skewed / has temporal locality and you want hot keys to ride near the root (see [`decisions/0010-splaytree.md`](./decisions/0010-splaytree.md)).
+- **Not an addressable or decrease-key heap -- for BinomialHeap.** BinomialHeap is the family's MERGEABLE priority queue, but it is LEAN + non-addressable: its id is an opaque, non-unique payload (no reverse map), so it has no `decreaseKey` / `remove` / `changeKey` / `rank` / `select`. For an addressable single-ended PQ (reprioritize / remove by entity id) use **BinaryHeap**; for both extremes use **MinMaxHeap**. Reach for BinomialHeap when you need to **`meld` two priority queues in O(log n)** -- the op a single array-embedded heap cannot do without an O(n) rebuild. Meld requires both heaps to share one arena (`BinomialHeap.arena(...)`) and CONSUMES the argument (see [`decisions/0011-binomialheap.md`](./decisions/0011-binomialheap.md)).
 - **Not a grow-on-demand collection.** Capacity is fixed at construction and overflow fails closed.
 
 ## Ecosystem

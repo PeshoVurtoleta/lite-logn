@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.8.0';
+export const VERSION = '0.9.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -3320,5 +3320,440 @@ export class SplayTree {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] SplayTree full (capacity ' + this._cap + ')');
+    }
+}
+
+// BinomialHeap (v0.9.0 session) -- a MERGEABLE priority queue: O(log n) meld over a SHARED arena (BELOW).
+
+/**
+ * Max BinomialHeap capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX in the shared, pointer-free `Uint32Array` forest columns (`_parent` / `_child` /
+ * `_sibling` / `_order`) over a private free-list (NodePool); an index must fit an unsigned
+ * 32-bit word, and `NIL = 0` reserves slot 0 so live slots run [1, capacity]. The index
+ * arithmetic (Uint32 slot indices + `NIL = 0` + Uint32 orders), not the byte count, is the
+ * hard ceiling -- the same "the arithmetic caps it" reasoning as the array-embedded members.
+ * (This is the value the plan calls BH_MAX_CAPACITY; it is named distinctly to avoid a
+ * module-scope redeclaration of BinaryHeap's identically-valued constant.)
+ */
+const BINH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A BINOMIAL HEAP: the family's first MERGEABLE priority queue -- a forest of
+ * heap-ordered binomial trees whose defining op is `meld` (union two heaps) in
+ * O(log n) WORST-case. Where BinaryHeap / MinMaxHeap are single array-embedded heaps
+ * that cannot fuse two queues without an O(n) rebuild, a binomial heap melds by
+ * relinking O(log n) tree roots -- a binary carry over the two order-sorted root
+ * lists, the exact structural analogue of adding two binary numbers. push is O(1)
+ * amortized (O(log n) worst), popMin is O(log n) worst, peekMin is O(1) via a cached
+ * `_min` root maintained inline (never rescanned on the hot path).
+ *
+ * LEAN, NON-ADDRESSABLE (the MinMaxHeap idiom): the surface is push / popMin /
+ * peekMin / peekMinKey / meld only. The id is an OPAQUE Uint32 payload in [0, 2^32)
+ * -- NOT a unique handle, no reverse map -- so there is deliberately NO decreaseKey /
+ * remove / changeKey / rank / select (a decreaseKey binomial heap would need the
+ * addressable per-id handle this member declines to carry). See decisions/0011.
+ *
+ * SHARED-ARENA meld (the load-bearing design call, decisions/0011): a binomial meld
+ * REWIRES roots in place (no copy), so two heaps can only meld if they draw nodes
+ * from the SAME backing arena. A standalone `new BinomialHeap(capacity, kind)` owns
+ * its own arena (columns + pool); `BinomialHeap.arena(capacity, kind, count)` hands
+ * out `count` empty heaps that SHARE one pool + column set, so any two of them meld.
+ * `a.meld(b)` CONSUMES b -- b's roots move into a, then b is marked dead (size 0) and
+ * every later op on b throws `[lite-logn]` rather than silently re-enter the now-
+ * shared roots (the Treap.split/merge consume idiom, hardened with a consumed flag).
+ * Cross-arena detection is COLUMN IDENTITY (`a._key !== b._key`, the Treap.merge
+ * precedent); a kind mismatch (min vs max), a non-BinomialHeap arg, melding a heap
+ * with itself, or a consumed operand each throw.
+ *
+ * Storage (allocated once per arena, sized to capacity + 1; slot 0 reserved NIL):
+ *   - `_key` Float64Array  -- the priority key at each node slot.
+ *   - `_id`  Uint32Array   -- the opaque payload id at each node slot.
+ *   - `_parent` / `_child` / `_sibling` Uint32Array -- the forest links (NIL = 0):
+ *     `_child` points at a node's HIGHEST-order child, `_sibling` chains a child list
+ *     in DECREASING order (so reversing it on popMin yields an increasing root list)
+ *     and chains the root list in INCREASING order.
+ *   - `_order` Uint32Array -- the binomial order (degree) of the tree rooted at slot.
+ *   - `_pool` NodePool     -- the shared free-list handing out slot indices [1, cap].
+ * Per-heap scalars: `_head` (root-list head, NIL = 0), `_min` (cached extreme root,
+ * NIL = 0), `_n` (size), `_consumed` (dead-after-meld flag).
+ *
+ * kind 'min' | 'max' is FROZEN at construction (a ctor-cached `_isMin` boolean drives
+ * the hot compare); both operands of a meld must share kind. Keys are FINITE numbers
+ * (typeof-guarded BEFORE coercion -- Symbol / BigInt / NaN / +-Infinity fail closed
+ * with a `[lite-logn]` throw); the KEY door is checked FIRST, then the id, then the
+ * full-arena guard (the MinMaxHeap order). Every peek / popMin on an EMPTY heap
+ * returns `undefined` and NEVER throws. forEach / [Symbol.iterator] yield live ids in
+ * UNSPECIFIED (forest) order -- NOT sorted, NOT pop order. Fixed capacity: a full
+ * arena throws, never silently drops. Every hot op allocates ZERO bytes after
+ * construction.
+ */
+export class BinomialHeap {
+    /**
+     * @param {number} capacity  exact max live entries across the whole arena; integer in [1, 2^31-1].
+     * @param {'min'|'max'} [kind]  frozen heap polarity (default 'min').
+     */
+    constructor(capacity, kind) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > BINH_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] BinomialHeap capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        const k = kind === undefined ? 'min' : kind;
+        if (k !== 'min' && k !== 'max') {
+            throw new RangeError(
+                '[lite-logn] BinomialHeap kind must be "min" or "max", got ' + String(kind));
+        }
+        this._cap = capacity;                          // shared-arena node budget
+        this._key = new Float64Array(capacity + 1);    // key at each node slot
+        this._id = new Uint32Array(capacity + 1);      // opaque payload id at each node slot
+        this._parent = new Uint32Array(capacity + 1);  // parent slot; NIL = 0
+        this._child = new Uint32Array(capacity + 1);   // highest-order child slot; NIL = 0
+        this._sibling = new Uint32Array(capacity + 1); // next sibling / next root; NIL = 0
+        this._order = new Uint32Array(capacity + 1);   // binomial order (degree) at slot
+        this._pool = new NodePool(capacity);           // shared free-list over slots [1, capacity]
+        this._isMin = (k === 'min');                   // ctor-cached hot-compare polarity
+        this._kind = k;                                // frozen 'min' | 'max'
+        this._head = 0;                                // root-list head (increasing order), NIL = 0
+        this._min = 0;                                 // cached extreme root, NIL = 0 (empty)
+        this._n = 0;                                   // live entry count
+        this._consumed = false;                        // dead-after-meld: reuse fails closed
+    }
+
+    /**
+     * Build `count` EMPTY heaps that SHARE one backing arena (pool + columns), so any
+     * two of them can `meld`. A standalone `new BinomialHeap(capacity, kind)` is the
+     * count === 1 case (its own arena). The `capacity` is the arena-WIDE node budget
+     * shared across all returned heaps. Fails closed on a bad capacity / kind (via the
+     * constructor) or a non-integer / < 1 count.
+     * @param {number} capacity  arena-wide node budget; integer in [1, 2^31-1].
+     * @param {'min'|'max'} kind  frozen polarity shared by every heap in the arena.
+     * @param {number} count      how many arena-sharing heaps to return; integer >= 1.
+     * @returns {BinomialHeap[]}
+     */
+    static arena(capacity, kind, count) {
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+            throw new RangeError(
+                '[lite-logn] BinomialHeap.arena count must be an integer >= 1, got ' + String(count));
+        }
+        const first = new BinomialHeap(capacity, kind); // validates capacity + kind, allocates the arena
+        const heaps = new Array(count);
+        heaps[0] = first;
+        for (let i = 1; i < count; i++) heaps[i] = BinomialHeap._view(first);
+        return heaps;
+    }
+
+    /** @private build an EMPTY heap VIEW sharing `src`'s arena (pool + columns). */
+    static _view(src) {
+        const h = Object.create(BinomialHeap.prototype);
+        h._cap = src._cap;
+        h._key = src._key; h._id = src._id;
+        h._parent = src._parent; h._child = src._child;
+        h._sibling = src._sibling; h._order = src._order;
+        h._pool = src._pool;
+        h._isMin = src._isMin; h._kind = src._kind;
+        h._head = 0; h._min = 0; h._n = 0; h._consumed = false;
+        return h;
+    }
+
+    /** Live entry count (0 once consumed by a meld). O(1). */
+    get size() { return this._n; }
+
+    /** The fixed arena-wide capacity this heap draws from. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen heap polarity ('min' | 'max'). O(1). */
+    get kind() { return this._kind; }
+
+    /**
+     * Insert entity `id` with priority `key`. O(1) amortized (O(log n) worst -- a full
+     * binary carry). Fails closed: a non-finite / non-number key (checked FIRST), a
+     * non-integer / out-of-range id, a full arena, or a consumed heap each throw
+     * `[lite-logn]` as a no-op (size unchanged).
+     * @param {number} id   integer in [0, 2^32), an OPAQUE payload (not required unique)
+     * @param {number} key  a finite number
+     */
+    push(id, key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id > 0xFFFFFFFF) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        this._key[slot] = key; this._id[slot] = id;
+        this._parent[slot] = 0; this._child[slot] = 0; this._sibling[slot] = 0; this._order[slot] = 0;
+        // Maintain the cached extreme root: an empty heap, or a new strictly-extreme key.
+        if (this._min === 0 || (this._isMin ? key < this._key[this._min] : key > this._key[this._min])) {
+            this._min = slot;
+        }
+        this._n++;
+        this._unionInto(slot); // single-node union (binary carry); _min preserved inline
+    }
+
+    /**
+     * Remove and return the id at the extreme key (min for a 'min' heap, max for a
+     * 'max' heap), or `undefined` if empty (never throws on empty). O(log n) worst:
+     * unlink the extreme root, reverse its child list into a sibling root list, union
+     * that back, then rescan the O(log n) roots for the new extreme. Fails closed on a
+     * consumed heap.
+     * @returns {number|undefined}
+     */
+    popMin() {
+        if (this._consumed) return this._badConsumed();
+        const min = this._min;
+        if (min === 0) return undefined; // empty
+        const S = this._sibling, C = this._child, P = this._parent;
+        // 1. unlink the extreme root from the root list.
+        let prev = 0, r = this._head;
+        while (r !== min) { prev = r; r = S[r]; }
+        if (prev === 0) this._head = S[min];
+        else S[prev] = S[min];
+        // 2. reverse the extreme root's child list into an increasing-order root list.
+        let childHead = 0, c = C[min];
+        while (c !== 0) {
+            const nextC = S[c];
+            S[c] = childHead;
+            P[c] = 0;
+            childHead = c;
+            c = nextC;
+        }
+        // 3. free the extreme slot (its links are dead now), then union the two lists.
+        const outId = this._id[min];
+        C[min] = 0; S[min] = 0; P[min] = 0; this._order[min] = 0;
+        this._pool.free(min);
+        this._n--;
+        this._unionInto(childHead);
+        // 4. rescan the O(log n) roots for the new extreme (popMin is O(log n) anyway).
+        this._min = this._scanMin();
+        return outId;
+    }
+
+    /** The id at the extreme key, or `undefined` if empty. Read-only. O(1). Consumed heap throws. */
+    peekMin() {
+        if (this._consumed) return this._badConsumed();
+        return this._min === 0 ? undefined : this._id[this._min];
+    }
+
+    /** The extreme key, or `undefined` if empty. O(1). Consumed heap throws. */
+    peekMinKey() {
+        if (this._consumed) return this._badConsumed();
+        return this._min === 0 ? undefined : this._key[this._min];
+    }
+
+    /**
+     * MELD `other` INTO this heap in O(log n): relink the two order-sorted root lists
+     * with a binary carry, folding every node of `other` into `this`. CONSUMES
+     * `other` -- it becomes empty (size 0) and DEAD: any later op on it throws, so a
+     * reused operand can never silently re-enter the now-shared roots. Fails closed:
+     * a non-BinomialHeap arg, melding a heap with itself, a cross-arena operand
+     * (column identity `this._key !== other._key`), a kind mismatch (min vs max), or a
+     * consumed operand each throw `[lite-logn]`.
+     * @param {BinomialHeap} other  an arena-sibling heap of the same kind (consumed)
+     * @returns {this}
+     */
+    meld(other) {
+        if (!(other instanceof BinomialHeap)) {
+            throw new TypeError('[lite-logn] BinomialHeap.meld needs a BinomialHeap argument');
+        }
+        if (other === this) {
+            throw new Error('[lite-logn] BinomialHeap.meld cannot meld a heap with itself');
+        }
+        if (this._consumed || other._consumed) {
+            throw new Error('[lite-logn] BinomialHeap.meld operand was consumed by a prior meld');
+        }
+        if (this._key !== other._key) {
+            throw new Error(
+                '[lite-logn] BinomialHeap.meld requires two heaps sharing an arena (from BinomialHeap.arena)');
+        }
+        if (this._isMin !== other._isMin) {
+            throw new Error(
+                '[lite-logn] BinomialHeap.meld requires both heaps to share kind (min vs max)');
+        }
+        // Pick the extreme of the two cached roots BEFORE the carry (the carry then
+        // preserves it inline through any tie-demotion).
+        if (this._min === 0) this._min = other._min;
+        else if (other._min !== 0 && !this._extreme(this._min, other._min)) this._min = other._min;
+        this._n += other._n;
+        // Consume `other` FIRST (dead + empty) so the union can never alias its state.
+        const oh = other._head;
+        other._head = 0; other._min = 0; other._n = 0; other._consumed = true;
+        this._unionInto(oh);
+        return this;
+    }
+
+    /**
+     * Empty THIS heap, returning ONLY its own nodes to the shared pool (an arena
+     * sibling's nodes are untouched). O(n) cold forest walk, allocation-free. A
+     * consumed heap throws. @returns {this}
+     */
+    clear() {
+        if (this._consumed) return this._badConsumed();
+        this._freeForest(this._head);
+        this._head = 0; this._min = 0; this._n = 0;
+        return this;
+    }
+
+    /**
+     * Visit every live (id, key) pair in UNSPECIFIED (forest) order -- NOT sorted, NOT
+     * pop order. O(n) cold walk, allocation-free (pass a hoisted callback). Consumed
+     * heap throws.
+     * @param {(id:number, key:number, heap:BinomialHeap)=>void} fn
+     */
+    forEach(fn) {
+        if (this._consumed) return this._badConsumed();
+        this._forEach(this._head, fn);
+    }
+
+    /**
+     * Iterate live entity ids in UNSPECIFIED (forest) order -- NOT sorted. The one
+     * documented per-protocol allocator (a {value, done} per step + a sub-iterator per
+     * child list); use forEach for the alloc-free scan. Consumed heap throws.
+     */
+    [Symbol.iterator]() {
+        if (this._consumed) return this._badConsumed();
+        return this._iterNode(this._head);
+    }
+
+    // ---- private hot bodies (link / carry / scan) --------------------------
+
+    /**
+     * @private true iff node `a` is the extreme (should be the parent) vs node `b`.
+     * Ties resolve to `a` so the carry is deterministic. For a min heap a wins on
+     * `key[a] <= key[b]`; for a max heap on `key[a] >= key[b]`.
+     */
+    _extreme(a, b) {
+        const K = this._key;
+        return this._isMin ? K[a] <= K[b] : K[a] >= K[b];
+    }
+
+    /**
+     * @private make node `y` (the loser) a child of node `z` (the winner): both have
+     * equal order; `z`'s order grows by one. Four link writes, zero temporaries.
+     */
+    _link(y, z) {
+        this._parent[y] = z;
+        this._sibling[y] = this._child[z];
+        this._child[z] = y;
+        this._order[z]++;
+    }
+
+    /**
+     * @private merge two order-sorted root lists (`a`, `b`) into one order-sorted list
+     * by `_sibling`, returning the head. In-place splice, no allocation.
+     */
+    _mergeRoots(a, b) {
+        if (a === 0) return b;
+        if (b === 0) return a;
+        const S = this._sibling, O = this._order;
+        let head, tail;
+        if (O[a] <= O[b]) { head = a; a = S[a]; } else { head = b; b = S[b]; }
+        tail = head;
+        while (a !== 0 && b !== 0) {
+            if (O[a] <= O[b]) { S[tail] = a; a = S[a]; }
+            else { S[tail] = b; b = S[b]; }
+            tail = S[tail];
+        }
+        S[tail] = a !== 0 ? a : b;
+        return head;
+    }
+
+    /**
+     * @private union the root list `h2` into `this._head`: merge order-sorted, then
+     * walk the merged list doing a BINARY CARRY -- link consecutive equal-order roots
+     * (the extreme becomes parent), skipping the classic three-in-a-row case. The
+     * cached `_min` is preserved in O(1) whenever a tie demotes it to a child. This is
+     * the shared hot body behind both push and meld.
+     */
+    _unionInto(h2) {
+        const S = this._sibling, O = this._order;
+        let head = this._mergeRoots(this._head, h2);
+        if (head === 0) { this._head = 0; return; }
+        let prev = 0, curr = head, next = S[curr];
+        while (next !== 0) {
+            if (O[curr] !== O[next] || (S[next] !== 0 && O[S[next]] === O[curr])) {
+                prev = curr; curr = next;               // orders differ, or three in a row: advance
+            } else if (this._extreme(curr, next)) {
+                S[curr] = S[next];
+                this._link(next, curr);                 // next -> child of curr
+                if (this._min === next) this._min = curr;
+            } else {
+                if (prev === 0) head = next; else S[prev] = next;
+                this._link(curr, next);                 // curr -> child of next
+                if (this._min === curr) this._min = next;
+                curr = next;
+            }
+            next = S[curr];
+        }
+        this._head = head;
+    }
+
+    /** @private scan the O(log n) root list for the extreme root, or 0 if empty. */
+    _scanMin() {
+        const head = this._head;
+        if (head === 0) return 0;
+        const S = this._sibling, K = this._key, isMin = this._isMin;
+        let best = head, r = S[head];
+        while (r !== 0) {
+            if (isMin ? K[r] < K[best] : K[r] > K[best]) best = r;
+            r = S[r];
+        }
+        return best;
+    }
+
+    /** @private recursive forest free: siblings iterative, children recursive (depth <= order). */
+    _freeForest(node) {
+        const S = this._sibling, C = this._child;
+        while (node !== 0) {
+            const next = S[node];
+            this._freeForest(C[node]);
+            this._pool.free(node);
+            node = next;
+        }
+    }
+
+    /** @private recursive forest visit (siblings iterative, children recursive). */
+    _forEach(node, fn) {
+        const S = this._sibling, C = this._child, I = this._id, K = this._key;
+        while (node !== 0) {
+            fn(I[node], K[node], this);
+            this._forEach(C[node], fn);
+            node = S[node];
+        }
+    }
+
+    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
+    *_iterNode(node) {
+        const S = this._sibling, C = this._child, I = this._id;
+        while (node !== 0) {
+            yield I[node];
+            yield* this._iterNode(C[node]);
+            node = S[node];
+        }
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badId(id) {
+        throw new RangeError(
+            '[lite-logn] BinomialHeap id must be an integer in [0, 2^32), got ' + String(id));
+    }
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] BinomialHeap key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badConsumed() {
+        throw new Error('[lite-logn] BinomialHeap was consumed by a prior meld (reuse fails closed)');
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] BinomialHeap arena full (capacity ' + this._cap + ')');
     }
 }

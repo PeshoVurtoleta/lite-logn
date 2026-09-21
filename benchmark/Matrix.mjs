@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The eight shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree'];
+/** The nine shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap'];
 
-/** The eleven gated D1 witness op-rows (member.op), in build order. */
+/** The twelve gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -36,6 +36,7 @@ export const OP_ROWS = [
     'Scapegoat.get',
     'MinMaxHeap.popMin',
     'SplayTree.get',
+    'BinomialHeap.popMin',
 ];
 
 /** The eight measurement dimensions. */
@@ -63,6 +64,7 @@ export const BASELINE = {
     Scapegoat: 'linear-scan',
     MinMaxHeap: 'linear-min-scan-and-splice',
     SplayTree: 'linear-scan',
+    BinomialHeap: 'linear-min-scan-and-splice',
 };
 
 /**
@@ -91,6 +93,10 @@ export const COUNTER_FOIL = {
     // SplayTree is the family's SELF-ADJUSTING ordered map with the same Map order-tax, but the
     // counter-foil is the one-time family illustration carried by SkipList; SplayTree reads NA.
     SplayTree: NA,
+    // BinomialHeap is a MERGEABLE priority queue, not an ordered map; there is no "faster but
+    // order-blind" O(1) rival to a binomial heap (a Map serves neither the extreme nor meld),
+    // so it has no counter-foil -- NA (the string, never 0).
+    BinomialHeap: NA,
 };
 
 /**
@@ -161,6 +167,13 @@ export const RATIONALE = {
             'the root (faster-than-log on skewed access). The Map order-tax counterpoint is carried once by ' +
             'SkipList (the family\'s ordered representative), so SplayTree does not repeat it.',
     },
+    BinomialHeap: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear min-scan-and-splice extract over an unordered array (O(n) per extract-min) is the ' +
+            'honest default before the heap; the binomial heap buys O(1)-amortized push, O(log n) popMin, ' +
+            'AND O(log n) MELD of two heaps -- the mergeable op a single array-embedded heap cannot do ' +
+            'without an O(n) rebuild. No Map order-tax counterpoint (a Map serves neither the extreme nor meld).',
+    },
 };
 
 /**
@@ -211,7 +224,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (8 x 8 = 64 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (9 x 8 = 72 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -259,7 +272,7 @@ export const OLOGN_EXPECTED = 'O(log n) expected';
 export const OLOGN_AMORTIZED = 'O(log n) amortized';
 
 /**
- * The per-op honesty table, keyed `member.op`. Covers the 8 gated witness op-rows
+ * The per-op honesty table, keyed `member.op`. Covers the 12 gated witness op-rows
  * (Matrix.OP_ROWS) PLUS the four non-gated-but-honest ops the family surface exposes
  * (BinaryHeap.push climbs the same sift as pop; SkipList.delete descends the same
  * randomized tower as get/set; Treap.set/delete rotate/rewire the same randomized
@@ -288,6 +301,9 @@ export const OP_CLASS = Object.freeze({
     'SplayTree.get': OLOGN_AMORTIZED, // a read SPLAYS -> DETERMINISTIC amortized O(log n) (the gated row)
     'SplayTree.set': OLOGN_AMORTIZED, // splay + splice -> amortized (a cold deep splay is a DISCLOSED tail)
     'SplayTree.delete': OLOGN_AMORTIZED, // splay + join -> amortized (DETERMINISTIC, no RNG)
+    'BinomialHeap.push': OLOGN_AMORTIZED, // a binary carry -> O(1) AMORTIZED (O(log n) worst; a full carry is the tail)
+    'BinomialHeap.popMin': OLOGN_WORST,   // unlink extreme + child-reverse + remeld + root rescan (the gated row)
+    'BinomialHeap.meld': OLOGN_WORST,     // relink two order-sorted root lists with a binary carry -> full-height worst
 });
 
 // ===========================================================================
@@ -306,7 +322,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

@@ -1,9 +1,9 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.8.0 eight members have
+avoid, and how to measure the logarithm yourself. At v0.9.0 nine members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap and SplayTree -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree and BinomialHeap -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -59,15 +59,24 @@ START -- what do you need?
 |   (a double-ended priority queue)?                           -> MinMaxHeap (wc)   [v0.7.0]
 |
 +-- An ORDERED map whose ACCESS is SKEWED (temporal locality:
-    a hot working set), and you want hot keys to ride near
-    the root -- amortized, no order statistics needed?         -> SplayTree (am)    [v0.8.0]
+|   a hot working set), and you want hot keys to ride near
+|   the root -- amortized, no order statistics needed?         -> SplayTree (am)    [v0.8.0]
+|
++-- Repeated min (or max) + insert, AND you must MELD two
+    priority queues into one in O(log n) (not O(n) rebuild)?   -> BinomialHeap (wc) [v0.9.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
 addressable `changeKey` / `remove` by entity id; **MinMaxHeap** when you need BOTH
 extremes from one structure (a DEPQ: O(1) `peekMin` AND `peekMax`, O(log n)
 `push` / `popMin` / `popMax`) and do NOT need addressable reprioritize/remove (its
-id is an opaque, non-unique payload -- no reverse map).
+id is an opaque, non-unique payload -- no reverse map); **BinomialHeap** when you
+need ONE extreme AND the ability to **MELD two heaps in O(log n)** -- the mergeable
+op a single array-embedded heap (BinaryHeap / MinMaxHeap) cannot do without an O(n)
+rebuild. BinomialHeap is also non-addressable (opaque id, no `decreaseKey` /
+`remove`); its meld requires both heaps to share an arena (`BinomialHeap.arena(...)`)
+and CONSUMES the argument. Pick BinaryHeap/MinMaxHeap over BinomialHeap when you never
+meld: they are faster per op (a flat array beats a pointer-chased forest).
 
 Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
 / range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
@@ -104,10 +113,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | Ordered map + rank / select, WORST-case get (no RNG) | Scapegoat | worst-case O(log n) get, amortized O(log n) set/delete | 0.6.0 |
 | BOTH min AND max + insert (a double-ended PQ) | MinMaxHeap | O(1) peekMin/peekMax, O(log n) push/popMin/popMax | 0.7.0 |
 | Ordered map with SKEWED / hot-key access (self-adjusting) | SplayTree | amortized O(log n) get/set/delete (a read splays) | 0.8.0 |
+| Priority queue you must MELD with another in O(log n) | BinomialHeap | O(1)-amortized push, O(log n) popMin/meld, O(1) peekMin | 0.9.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's and SplayTree's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's and BinomialHeap's are below).
 
 ---
 
@@ -436,6 +446,45 @@ amortized, the witness also prints the MAX single get (a cold deep splay) as a d
 never gated. `node --expose-gc test/torture.mjs` proves get (splays!) / working-set get /
 set / delete+re-set / successor / forEach / rangeIter at 0 B/op (the top-down splay uses the
 slot-0 header + two scalar hands; rotations rewrite existing slot links only).
+
+---
+
+## BinomialHeap -- a mergeable priority queue (meld two heaps in O(log n))
+
+**Reach for it when** you need a priority queue that you must **MELD** with another one --
+fuse two queues into a single ordered heap in O(log n), the op a plain array-embedded heap
+(BinaryHeap / MinMaxHeap) cannot do without an O(n) rebuild. Canonical uses: merging
+per-worker or per-partition priority queues into a global one; a Dijkstra / Prim frontier
+assembled from sub-frontiers; any "combine these two work queues" step on a hot path. `push`
+is O(1) amortized, `popMin` is O(log n), `peekMin` / `peekMinKey` are O(1). `kind` ('min' |
+'max') is frozen at construction. To meld, both heaps must share ONE arena
+(`BinomialHeap.arena(capacity, kind, count)`); a standalone `new BinomialHeap(...)` owns its
+own arena and can only meld with siblings from the same `arena(...)` call.
+
+**Avoid it when:**
+
+- You never meld. A single array-embedded heap is faster per op (a flat `Float64Array` beats
+  a pointer-chased forest, and the witness slope shows it: ~45 ns/level vs BinaryHeap's ~9).
+  Use **BinaryHeap** (one extreme, addressable) or **MinMaxHeap** (both extremes) instead.
+- You need to reprioritize or remove an arbitrary element. BinomialHeap is LEAN +
+  non-addressable: the id is an opaque, non-unique payload (no reverse map), so there is no
+  `decreaseKey` / `remove` / `changeKey`. For addressable reprioritize/remove use **BinaryHeap**.
+- You need order statistics (`rank` / `select`) or an ordered scan (`successor` / range). A
+  heap answers only the extreme -- use **Treap** / **Scapegoat** (order statistics) or
+  **SkipList** (ordered scan).
+- You reuse a melded-away heap. `a.meld(b)` CONSUMES `b`: it becomes empty and DEAD, and every
+  later op on `b` throws (fail-closed, so a stale reference can never silently corrupt `a`).
+
+**Measure it yourself:** `npm run witness` fits `popMin` (unlink the extreme root, reverse its
+child list, union back, rescan the roots -- the mergeable heap's tallest honest walk) against
+`nsPerOp = intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and sit
+inside its own band (`popMin [26.89, 62.75]` ns/level -- well ABOVE the array-embedded heaps
+because a binomial popMin chases scattered forest slots; see
+[`decisions/0011-binomialheap.md`](./decisions/0011-binomialheap.md)), over the cache-resident
+`[2^11, 2^17]` sweep. The O(n) linear min-scan-and-splice foil must MISS the floor. WORST-case
+member (push / popMin / meld all worst-case), so NO max-single-op line. `node --expose-gc
+test/torture.mjs` proves push / popMin / meld / arena-churn / forEach at 0 B/op, and asserts
+conservation ACROSS MELD -- nodes move between root lists but never between pools.
 
 ---
 

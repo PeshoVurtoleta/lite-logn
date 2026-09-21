@@ -380,3 +380,51 @@ export class SplayTree {
     /** Empty the tree, keeping capacity. */
     clear(): this;
 }
+
+/**
+ * A binomial heap: the family's first MERGEABLE priority queue -- a forest of heap-ordered
+ * binomial trees whose defining op is `meld` (union two heaps) in O(log n) WORST-case via a
+ * binary carry over the two order-sorted root lists. push is O(1) amortized (O(log n) worst),
+ * popMin is O(log n) worst, peekMin is O(1) via a cached extreme root. LEAN + NON-ADDRESSABLE
+ * (the MinMaxHeap idiom): push / popMin / peekMin / peekMinKey / meld only -- the id is an
+ * OPAQUE Uint32 payload in [0, 2^32) (not unique, no reverse map), so there is deliberately NO
+ * decreaseKey / remove / changeKey / rank / select. SHARED-ARENA meld: a standalone
+ * `new BinomialHeap(capacity, kind)` owns its own arena; `BinomialHeap.arena(capacity, kind,
+ * count)` hands out `count` arena-sharing heaps that can meld with one another. `a.meld(b)`
+ * CONSUMES b (empty, size 0, and DEAD -- any later op throws). kind 'min' | 'max' is frozen at
+ * construction. Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN
+ * / +-Infinity fail closed). forEach / iterator yield ids in UNSPECIFIED (forest) order. Fixed
+ * capacity: a full arena throws. Every hot op allocates zero bytes.
+ */
+export class BinomialHeap {
+    /** @param capacity arena-wide node budget; integer in [1, 2^31-1]. @param kind frozen polarity (default 'min'). */
+    constructor(capacity: number, kind?: 'min' | 'max');
+
+    /** Build `count` empty heaps sharing ONE backing arena, so any two can meld. */
+    static arena(capacity: number, kind: 'min' | 'max', count: number): BinomialHeap[];
+
+    /** Live entry count (0 once consumed by a meld). */
+    readonly size: number;
+    /** The fixed arena-wide capacity this heap draws from. */
+    readonly capacity: number;
+    /** The frozen heap polarity. */
+    readonly kind: 'min' | 'max';
+
+    /** Insert id with priority key. Throws on non-finite key, out-of-range id, a full arena, or a consumed heap. */
+    push(id: number, key: number): void;
+    /** Remove and return the id at the extreme key, or undefined if empty. Consumed heap throws. */
+    popMin(): number | undefined;
+    /** The id at the extreme key, or undefined if empty. Consumed heap throws. */
+    peekMin(): number | undefined;
+    /** The extreme key, or undefined if empty. Consumed heap throws. */
+    peekMinKey(): number | undefined;
+    /** Meld `other` into this heap in O(log n); CONSUMES other. Non-BinomialHeap arg, self,
+     *  cross-arena, kind mismatch, or a consumed operand throw. */
+    meld(other: BinomialHeap): this;
+    /** Empty this heap, returning only its own nodes to the shared pool. Consumed heap throws. */
+    clear(): this;
+    /** Visit every live (id, key) pair in unspecified (forest) order (NOT sorted). */
+    forEach(fn: (id: number, key: number, heap: BinomialHeap) => void): void;
+    /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
+    [Symbol.iterator](): IterableIterator<number>;
+}

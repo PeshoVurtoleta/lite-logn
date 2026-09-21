@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.8.0
+Version: 0.9.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -20,7 +20,8 @@ line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
 adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
-v0.8.0 adds SplayTree. The roster (one member per session, each landing append-only):
+v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap. The roster (one member per session,
+each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -106,6 +107,28 @@ v0.8.0 adds SplayTree. The roster (one member per session, each landing append-o
   member: deliberately NO rank / select / split / merge (the documented asymmetry vs Treap /
   Scapegoat). Keys and values are finite numbers (typeof-guarded before coercion; Symbol /
   BigInt / NaN / +-Infinity fail closed). Zero allocation on every hot op.
+
+- BinomialHeap (v0.9.0) -- the family's first MERGEABLE priority queue: a forest of heap-
+  ordered binomial trees whose defining op is `meld` (union two heaps) in O(log n) WORST-case
+  via a BINARY CARRY over the two order-sorted root lists (the structural analogue of adding
+  two binary numbers). push is O(1) AMORTIZED (O(log n) worst), popMin is O(log n) worst
+  (unlink the extreme root, reverse its child list into a new root list, union back, rescan the
+  O(log n) roots), and peekMin is O(1) via a cached `_min` root maintained INLINE (never
+  rescanned on the hot path). Six pointer-free typed-array columns (`_key` Float64, `_id`
+  Uint32, `_parent` / `_child` / `_sibling` / `_order` Uint32) over a private free-list
+  (NodePool); NIL = 0 reserves slot 0. LEAN + NON-ADDRESSABLE (the MinMaxHeap idiom): the id is
+  an OPAQUE Uint32 payload in [0, 2^32) (not unique, no reverse map), so there is deliberately
+  NO decreaseKey / remove / changeKey / rank / select. SHARED-ARENA meld: a meld rewires roots
+  in place, so two heaps can meld only if they draw from the SAME arena -- a standalone
+  `new BinomialHeap(capacity, kind)` owns its own arena, `BinomialHeap.arena(capacity, kind,
+  count)` hands out `count` arena-sharing heaps. `a.meld(b)` CONSUMES b: b becomes empty (size
+  0) and DEAD -- every later op on b throws `[lite-logn]` rather than silently re-enter the now-
+  shared roots (the Treap.split/merge consume idiom, hardened with a consumed flag). Cross-arena
+  detection is column identity (`a._key !== b._key`); a kind mismatch, a non-BinomialHeap arg,
+  a self-meld, or a consumed operand each throw. kind 'min' | 'max' frozen at construction.
+  Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity
+  fail closed). forEach / [Symbol.iterator] yield ids in UNSPECIFIED (forest) order. Zero
+  allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -307,6 +330,27 @@ v0.8.0 adds SplayTree. The roster (one member per session, each landing append-o
     since reads splay) throws `[lite-logn]`.
   - `size` / `capacity` getters; `clear()` -> this; `forEach(fn)` and `[Symbol.iterator]()`
     are NON-splaying ascending-key walks (forEach passes (key, value, tree)).
+- `BinomialHeap` -- class. The family's first MERGEABLE priority queue: a forest of binomial
+  trees whose defining op is `meld` in O(log n). LEAN + NON-ADDRESSABLE (no decreaseKey /
+  remove / rank / select); the id is an OPAQUE Uint32 payload in [0, 2^32).
+  - `new BinomialHeap(capacity, kind = 'min')` -- capacity an integer in [1, 2^31-1]; kind
+    'min' | 'max' frozen at construction. Owns its OWN arena (six columns + a private pool).
+  - `BinomialHeap.arena(capacity, kind, count)` -> BinomialHeap[]. Builds `count` EMPTY heaps
+    that SHARE one backing arena (pool + columns), so any two of them can meld. `capacity` is
+    the arena-WIDE node budget. Fails closed on a bad capacity / kind / count (count integer >= 1).
+  - `push(id, key)` -> void. O(1) AMORTIZED (O(log n) worst -- a binary carry). Fails closed:
+    non-finite key (checked FIRST), out-of-range id, a full arena, or a consumed heap.
+  - `popMin()` -> id | undefined. O(log n) worst; removes the extreme (min for a 'min' heap,
+    max for a 'max' heap). undefined if empty (no throw). Consumed heap throws.
+  - `peekMin()` -> id | undefined; `peekMinKey()` -> key | undefined. O(1) via the cached
+    extreme root. undefined if empty. Consumed heap throws.
+  - `meld(other)` -> this. O(log n): relink the two order-sorted root lists with a binary
+    carry, folding every node of `other` into `this`. CONSUMES `other` (empty, size 0, DEAD --
+    any later op on it throws). Fails closed: non-BinomialHeap arg, self-meld, cross-arena
+    (column identity `this._key !== other._key`), kind mismatch, or a consumed operand.
+  - `size` / `capacity` / `kind` getters; `clear()` -> this (frees only THIS heap's own nodes
+    to the shared pool); `forEach(fn)` and `[Symbol.iterator]()` yield live ids in UNSPECIFIED
+    (forest) order -- NOT sorted / pop order. Consumed heap throws on clear / forEach / iterate.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -236,6 +236,29 @@ export const MINMAXHEAP_POPMIN_SLOPE_HI = 14.42;   // median 10.30 * 1.4
 export const SPLAYTREE_GET_SLOPE_LO = 16.39;       // median 27.316 * 0.6
 export const SPLAYTREE_GET_SLOPE_HI = 38.24;       // median 27.316 * 1.4
 
+// --- BinomialHeap (v0.9.0): shared R^2 floor, OWN popMin slope band (D-BH2 / 0011) ---
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide;
+// BinomialHeap's gated op is popMin (delete-extreme -- unlink the extreme root, reverse its
+// child list into a new root list, union back, rescan the O(log n) roots). It is the
+// mergeable heap's tallest honest walk, the exact analogue of BinaryHeap/MinMaxHeap's gated
+// pop. push / popMin / meld are all WORST-case O(log n) (push O(1) amortized), so there is
+// deliberately NO expected-op MAX-single-op disclosure line (unlike SkipList / Treap). Gated
+// over EXACT powers 2^11..2^17 (the same pointer-chasing window Treap/Scapegoat/SkipList.get
+// use): a binomial popMin chases scattered forest slots + reverses a child list + rescans the
+// root list, so its cost is DRAM-latency-sensitive; the fully-cache-resident exact-power window
+// keeps the fit on the structural level count, while the [1e4..1e6] band BinaryHeap.pop uses
+// curves at 1e6 (the memory wall) and flakes the fit. A binomial popMin does far more
+// pointer-chasing per level than a plain array-embedded sift, so its per-level slope (~44.8)
+// sits WELL ABOVE BinaryHeap.pop's (~9.6) yet on the same family shape; expected, which is why
+// only the R^2 floor is shared and each op declares its own band. Band = median-of-15 fit-runs
+// * [0.6, 1.4] on this machine. The 15 popMin slope samples (ns/level) over 2^11..2^17:
+//   44.41 44.32 44.88 44.38 44.33 44.25 44.99 45.13 44.51 44.72 44.99 44.82 44.99 45.35 45.09
+// with R^2 0.9786..0.9840 (every run >= the 0.958 floor); MEDIAN slope = 44.821 ns/level.
+// Centered on the MEDIAN (never a high sample) so a legitimately faster future run is not
+// false-failed; the R^2 floor independently rejects any non-log shape.
+export const BINOMIALHEAP_POPMIN_SLOPE_LO = 26.89; // median 44.821 * 0.6
+export const BINOMIALHEAP_POPMIN_SLOPE_HI = 62.75; // median 44.821 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -298,6 +321,13 @@ const MMH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // n resident keys. Its O(n) foil (a linear scan) stays on the small O(n^2) sweep.
 const SP_GET_SWEEP = [12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 const SP_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// BinomialHeap's gated popMin sweep: EXACT powers of two 2^11..2^17 (the same pointer-chasing
+// window Treap/Scapegoat/SkipList.get use -- a binomial popMin chases scattered forest slots
+// and its cost is DRAM-latency-sensitive, so it needs a cache-resident exact-power window, not
+// the [1e4..1e6] band the array-embedded heaps use). Its O(n) foil (a linear min-scan-and-splice
+// extract-min over an unordered array) stays on the small O(n^2) sweep.
+const BINH_POP_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const BINH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -992,6 +1022,55 @@ function measureSplayGetFoil(n) {
     return elapsed / count;
 }
 
+// --- BinomialHeap measurement (popMin hot op + its O(n) foil) ----------------
+// The heap is built OUTSIDE timing (n pushes), then a FULL popMin drain is timed, accumulated
+// across rebuilds until ~4e6 pops are timed (a stable mean, height ~ log2(n)). The rebuild is
+// excluded from the timed window. Same discipline as BinaryHeap/MinMaxHeap -- popMin is the
+// mergeable heap's tallest honest walk (unlink extreme root, reverse children, union, rescan).
+// WORST-case member: NO max-single-op disclosure.
+function measureBinomialHeap(n) {
+    const reps = Math.max(4, Math.ceil(4e6 / n));
+    const ids = new Uint32Array(n);
+    const keys = new Float64Array(n);
+    const rnd = mulberry32(0x1234 ^ n);
+    for (let i = 0; i < n; i++) { ids[i] = i & 0xffff; keys[i] = rnd(); }
+    { const h = new BinomialHeap(n, 'min'); for (let i = 0; i < n; i++) h.push(ids[i], keys[i]); while (h.size > 0) h.popMin(); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const h = new BinomialHeap(n, 'min');
+        for (let i = 0; i < n; i++) h.push(ids[i], keys[i]);
+        const t0 = nowNs();
+        while (h.size > 0) sink += h.popMin();
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// The O(n) foil: a linear MIN-SCAN-AND-SPLICE extract-min over an unordered array (the naive
+// way to serve a min without a heap: scan for the smallest, remove it by swapping in the tail).
+// O(n) per extraction, O(n^2) total drain, so on the log2(n) axis its per-op cost is EXPONENTIAL
+// and a straight-line fit MUST MISS the R^2 floor. Sweep stays small. (Same foil MinMaxHeap uses.)
+function measureBinomialHeapFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const src = new Float64Array(n);
+    const rnd = mulberry32(0x9E37 ^ n);
+    for (let i = 0; i < n; i++) src[i] = rnd();
+    const arr = new Float64Array(n);
+    { arr.set(src); let len = n; while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; arr[mi] = arr[len - 1]; len--; } } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        arr.set(src); let len = n;
+        const t0 = nowNs();
+        while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; sink += arr[mi]; arr[mi] = arr[len - 1]; len--; }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -1134,10 +1213,22 @@ export const MEMBERS = [
         foil: measureSplayGetFoil,
         foilName: 'linear scan (O(n) per search)',
     },
+    {
+        name: 'BinomialHeap',
+        op: 'popMin',
+        sweep: BINH_POP_SWEEP,
+        foilSweep: BINH_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,              // shared floor (0011 inherits D-08)
+        slopeLo: BINOMIALHEAP_POPMIN_SLOPE_LO,     // own band
+        slopeHi: BINOMIALHEAP_POPMIN_SLOPE_HI,
+        run: measureBinomialHeap,
+        foil: measureBinomialHeapFoil,
+        foilName: 'linear min-scan-and-splice (O(n) per extract-min)',
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.8.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.9.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

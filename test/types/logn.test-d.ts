@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -210,3 +210,39 @@ SplayTree.merge(sp, sp);
 
 // @ts-expect-error -- SplayTree takes a single capacity argument (no seed).
 new SplayTree(8, 7);
+
+// --- BinomialHeap ----------------------------------------------------------
+const bh = new BinomialHeap(1024, 'min');
+const bhDefault = new BinomialHeap(1024); // kind defaults to 'min'
+void bhDefault;
+bh.push(3, 2.5);
+const bhMin: number | undefined = bh.popMin();
+const bhPeek: number | undefined = bh.peekMin();
+const bhPeekKey: number | undefined = bh.peekMinKey();
+const bhSize: number = bh.size;
+const bhCap: number = bh.capacity;
+const bhKind: 'min' | 'max' = bh.kind;
+const bhClear: BinomialHeap = bh.clear(); // fluent -> this
+bh.forEach((id, key) => { void id; void key; });
+for (const id of bh) { void id; }
+const bhArena: BinomialHeap[] = BinomialHeap.arena(1024, 'min', 3);
+const bhMelded: BinomialHeap = bhArena[0].meld(bhArena[1]); // meld -> this, consumes the arg
+void bhMin; void bhPeek; void bhPeekKey; void bhSize; void bhCap; void bhKind; void bhClear; void bhMelded;
+
+// @ts-expect-error -- push key must be a number.
+bh.push(1, 'x');
+
+// @ts-expect-error -- kind must be 'min' | 'max'.
+new BinomialHeap(8, 'biggest');
+
+// @ts-expect-error -- BinomialHeap is LEAN + NON-ADDRESSABLE: no decreaseKey.
+bh.decreaseKey(3, 1.0);
+
+// @ts-expect-error -- BinomialHeap has no remove (non-addressable).
+bh.remove(3);
+
+// @ts-expect-error -- BinomialHeap has no rank (non-addressable, no order stats).
+bh.rank(3);
+
+// @ts-expect-error -- BinomialHeap has no select (non-addressable, no order stats).
+bh.select(0);

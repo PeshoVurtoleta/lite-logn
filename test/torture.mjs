@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -156,6 +156,18 @@ async function main() {
             sp.successor(3);
             sp.delete(5);
             tracker.track(sp, noopRelease, 7 * CYCLES + i, { audit: true });
+            // A fresh BinomialHeap ARENA per cycle (two arena-sharing heaps melded then drained),
+            // then dropped. Same held-value contract: a BinomialHeap owns only its six typed-array
+            // columns + a private NodePool (no external resource), so the no-op cleanup never
+            // defeats finalization -- and melding one sibling into the other keeps both alive to be
+            // reclaimed together (the arena is one graph of typed arrays).
+            const [bha, bhb] = BinomialHeap.arena(64, (i & 1) ? 'max' : 'min', 2);
+            for (let k = 0; k < 20; k++) bha.push(k & 63, (k * 2654435761) & 0xffff);
+            for (let k = 0; k < 20; k++) bhb.push((k + 20) & 63, (k * 40503) & 0xffff);
+            bha.meld(bhb);    // consumes bhb; its nodes move into bha's root list
+            bha.popMin();
+            bha.peekMin();
+            tracker.track(bha, noopRelease, 8 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -527,6 +539,52 @@ async function main() {
         spk = (spk + 1) | 0;
     };
 
+    // BinomialHeap: one out-of-loop standalone heap prefilled to capacity (its own arena).
+    // Each lane is a real hot op that MUST allocate zero bytes -- the six columns + the private
+    // NodePool are fixed at construction; the binary-carry union (_unionInto, shared by push AND
+    // meld), the child-list reversal + root rescan in popMin, and the forest walk all use only
+    // local scalars + slot indices, never a heap object.
+    const binh = new BinomialHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) binh.push(i & 0xffff, (i * 2654435761) & 0xffff);
+
+    let bhk = (VERSION.length | 0), bhacc = 0;
+    // push/popMin churn: pop the extreme, push a fresh id/key back -> steady full heap. Exercises
+    // the union binary-carry (push) AND the child-reverse + remeld + root rescan (popMin).
+    const stepBinhPopMin = () => {
+        const id = binh.popMin();
+        binh.push(id, (bhk * 2654435761) & 0xffff);
+        bhk = (bhk + 1) | 0;
+    };
+    // read mix: peekMin / peekMinKey folded into an accumulator (O(1) cached-root reads).
+    const stepBinhRead = () => {
+        bhacc = (bhacc + binh.peekMin() + (binh.peekMinKey() | 0)) | 0;
+        bhk = (bhk + 1) | 0;
+    };
+
+    // BinomialHeap MELD + arena-churn: a fixed two-heap arena, driven steady-state. meld CONSUMES
+    // its donor (a dead-after-meld heap fails closed on reuse), so to drive the meld hot body
+    // REPEATEDLY without allocating a fresh donor each call, the donor is REFRESHED in place
+    // (white-box scalar resets -- this torture gate is already white-box over _pool internals) and
+    // then reloaded. The measured body is the public meld() carry (_unionInto) + the drain, which
+    // MUST allocate zero bytes -- the carry is byte-identical to push's, and no ctor runs in the
+    // lane, so a non-zero reading here would be a real regression, not the refresh.
+    const [accB, donorB] = BinomialHeap.arena(CAP, 'min', 2);
+    let mbk = 0;
+    const stepBinhMeld = () => {
+        // refresh the (consumed) donor in place -- alloc-free, so measureAllocs reads the carry.
+        donorB._consumed = false; donorB._head = 0; donorB._min = 0; donorB._n = 0;
+        for (let k = 0; k < 8; k++) donorB.push((mbk + k) & 0xffff, ((mbk + k) * 40503) & 0xffff);
+        accB.meld(donorB);              // consumes donorB; its 8 nodes move into accB (0-alloc carry)
+        for (let k = 0; k < 8; k++) bhacc = (bhacc + accB.popMin()) | 0; // drain back -> steady empty accB
+        mbk = (mbk + 8) | 0;
+    };
+
+    // forEach: the O(n) forest walk through a HOISTED callback that closes over nothing but the
+    // shared accumulator -- no per-call closure alloc.
+    let bhfeAcc = 0;
+    function bhForEachCb(id, key) { bhfeAcc = (bhfeAcc + (id | 0) + (key | 0)) | 0; }
+    const stepBinhForEach = () => { binh.forEach(bhForEachCb); };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -547,7 +605,8 @@ async function main() {
         stepTrGet, stepTrSet, stepTrDelete, stepTrRankSelect, stepTrSuccessor,
         stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild,
         stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead,
-        stepSpGet, stepSpWorkingSet, stepSpSet, stepSpDelete, stepSpSuccessor]) {
+        stepSpGet, stepSpWorkingSet, stepSpSet, stepSpDelete, stepSpSuccessor,
+        stepBinhPopMin, stepBinhRead, stepBinhMeld]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -559,7 +618,7 @@ async function main() {
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
-        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter]) {
+        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -578,6 +637,8 @@ async function main() {
     if (macc === 0x7fffffff) throw new Error('unreachable'); // keep macc live
     if (spacc === 0x7fffffff) throw new Error('unreachable'); // keep spacc live
     if (spfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep spfeAcc live
+    if (bhacc === 0x7fffffff) throw new Error('unreachable'); // keep bhacc live
+    if (bhfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep bhfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -654,6 +715,21 @@ async function main() {
         sink = (sink + (sp.get(i & HMASK) | 0) + (sp.get(i & 15) | 0)) | 0;
         if ((i & 7) === 0) { const v = sp.successor(i & HMASK); sink = (sink + (v === undefined ? 0 : v | 0)) | 0; }
         if ((i & 63) === 0) { const key = i & HMASK; if (sp.delete(key)) sp.set(key, i & 0xffff); }
+        // BinomialHeap churn every op: popMin then push a fresh id/key back (steady full heap),
+        // exercising the union binary-carry + the child-reverse/remeld/rescan. A meld+arena-churn
+        // round fires SPARSELY (every 8192nd) on a fresh tiny arena: meld two arena-siblings then
+        // drain the result, proving meld runs inside the GC window with NO major collection. The
+        // cadence is sparse so the tiny transient arenas stay in new space (scavenged, never
+        // promoted) -- no major GC. Steady heap otherwise, zero alloc.
+        { const id = binh.popMin(); binh.push(id, (i * 2654435761) & 0xffff); sink = (sink + id) | 0; }
+        if ((i & 63) === 0) sink = (sink + binh.peekMin()) | 0;
+        if ((i & 8191) === 0) {
+            const [ca, cb] = BinomialHeap.arena(128, 'min', 2);
+            for (let k = 0; k < 64; k++) ca.push(k, (k * 2654435761) & 0xffff);
+            for (let k = 0; k < 64; k++) cb.push(k + 64, (k * 40503) & 0xffff);
+            ca.meld(cb); // consumes cb; O(log n) root relink
+            while (ca.size > 0) sink = (sink + ca.popMin()) | 0;
+        }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -675,6 +751,11 @@ async function main() {
     const abSc = new Scapegoat(1024);
     const abMmh = new MinMaxHeap(1024);
     const abSp = new SplayTree(1024);
+    const abBinh = new BinomialHeap(1024, 'min');
+    // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
+    // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
+    // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
+    const [abMeldAcc, abMeldDonor] = BinomialHeap.arena(1024, 'min', 2);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -741,6 +822,35 @@ async function main() {
         if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
         abSp.clear();
         if (abSp._pool.activeSlots + abSp._pool.freeListLength !== abSp._pool.capacity) conservationOk = false;
+        // BinomialHeap (standalone): same free-list conservation contract. A full fill (each push
+        // is a binary carry that links/frees no slots), then a real popMin() -> child-reverse +
+        // remeld + slot free round trip on half, then a refill, then clear() -> forest walk that
+        // frees every own node -- the invariant must hold after each phase.
+        for (let i = 0; i < 1024; i++) abBinh.push(i & 0xffff, (i * 2654435761) & 0xffff);
+        if (abBinh._pool.activeSlots + abBinh._pool.freeListLength !== abBinh._pool.capacity || abBinh._pool.activeSlots !== 1024) conservationOk = false;
+        for (let i = 0; i < 512; i++) abBinh.popMin();
+        if (abBinh._pool.activeSlots + abBinh._pool.freeListLength !== abBinh._pool.capacity || abBinh._pool.activeSlots !== 512) conservationOk = false;
+        for (let i = 0; i < 512; i++) abBinh.push(i & 0xffff, (i * 40503) & 0xffff);
+        if (abBinh._pool.activeSlots + abBinh._pool.freeListLength !== abBinh._pool.capacity) conservationOk = false;
+        abBinh.clear();
+        if (abBinh._pool.activeSlots + abBinh._pool.freeListLength !== abBinh._pool.capacity || abBinh._pool.activeSlots !== 0) conservationOk = false;
+        // CONSERVATION ACROSS MELD (the top-risk block): fill two arena-siblings, meld, and assert
+        // nodes MOVE between root lists but NEVER between pools -- activeSlots is unchanged by the
+        // meld, size is the exact sum, and a full drain returns every slot. The donor is refreshed
+        // in place (white-box, alloc-free) since meld consumes it (a reused donor fails closed).
+        abMeldDonor._consumed = false; abMeldDonor._head = 0; abMeldDonor._min = 0; abMeldDonor._n = 0;
+        for (let i = 0; i < 256; i++) abMeldAcc.push(i & 0xffff, (i * 2654435761) & 0xffff);
+        for (let i = 0; i < 256; i++) abMeldDonor.push((i + 256) & 0xffff, (i * 40503) & 0xffff);
+        const beforeMeldActive = abMeldAcc._pool.activeSlots; // 512 nodes across the two heaps
+        if (beforeMeldActive !== 512) conservationOk = false;
+        abMeldAcc.meld(abMeldDonor); // consumes donor; roots relink, pools untouched
+        if (abMeldAcc._pool.activeSlots !== beforeMeldActive) conservationOk = false;       // no pool churn
+        if (abMeldAcc._pool.activeSlots + abMeldAcc._pool.freeListLength !== abMeldAcc._pool.capacity) conservationOk = false;
+        if (abMeldAcc.size !== 512 || abMeldDonor.size !== 0) conservationOk = false;        // size conserved; donor emptied
+        let melded = 0; while (abMeldAcc.size > 0) { abMeldAcc.popMin(); melded++; }
+        if (melded !== 512) conservationOk = false;                                          // every node drained in order
+        if (abMeldAcc._pool.activeSlots !== 0) conservationOk = false;                        // every slot returned
+        if (abMeldAcc._pool.activeSlots + abMeldAcc._pool.freeListLength !== abMeldAcc._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -758,7 +868,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

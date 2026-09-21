@@ -6,6 +6,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-21
+
+### Added
+
+- **BinomialHeap** -- the ninth member and the family's first MERGEABLE priority queue: a forest
+  of heap-ordered binomial trees whose defining op is `meld` (union two heaps) in O(log n)
+  WORST-case via a BINARY CARRY over the two order-sorted root lists -- the structural analogue
+  of adding two binary numbers (Vuillemin 1978). `push` is O(1) AMORTIZED (O(log n) worst),
+  `popMin` is O(log n) worst (unlink the extreme root, reverse its child list into a new root
+  list, union back, rescan the O(log n) roots), and `peekMin` is O(1) via a cached `_min` root
+  maintained INLINE (never rescanned on the hot path). Surface: `push` / `popMin` / `peekMin` /
+  `peekMinKey` / `meld` / `clear` / `forEach` / `[Symbol.iterator]`, `size` / `capacity` /
+  `kind` getters, and the static `BinomialHeap.arena(capacity, kind, count)` factory. Keys are
+  finite numbers (typeof-guarded before coercion -- Symbol / BigInt / NaN / +-Infinity fail
+  closed with a `[lite-logn]` throw, key checked FIRST, then the opaque id).
+- **LEAN + NON-ADDRESSABLE (D-BH1).** The id is an OPAQUE Uint32 payload in [0, 2^32) -- not
+  unique, no reverse map (the MinMaxHeap idiom) -- so there is deliberately NO decreaseKey /
+  remove / changeKey / rank / select. Six pointer-free typed-array columns (`_key` Float64,
+  `_id` / `_parent` / `_child` / `_sibling` / `_order` Uint32) over a private free-list
+  (NodePool); NIL = 0 reserves slot 0. `kind` 'min' | 'max' is frozen at construction (a ctor-
+  cached `_isMin` boolean drives the hot compare).
+- **SHARED-ARENA, O(log n) meld (D-BH2).** A meld rewires roots in place, so two heaps can meld
+  only if they draw from the SAME backing arena. A standalone `new BinomialHeap(capacity, kind)`
+  owns its own arena; `BinomialHeap.arena(capacity, kind, count)` hands out `count` arena-
+  sharing heaps (the Treap.split/merge `_view` precedent). `a.meld(b)` CONSUMES b: b becomes
+  empty (size 0) AND DEAD -- every later op on b throws `[lite-logn]` rather than silently re-
+  enter the now-shared roots (the consume idiom, hardened with a `_consumed` flag). Cross-arena
+  detection is COLUMN IDENTITY (`a._key !== b._key`); a kind mismatch, a non-BinomialHeap arg,
+  a self-meld, or a consumed operand each throw. Conservation across meld is a hard invariant:
+  nodes MOVE between root lists but NEVER between pools (torture-tested every soak cycle).
+
+### Verified
+
+- **Witness (D-BH2).** `BinomialHeap.popMin` is the gated O(log n) witness op (the mergeable
+  heap's tallest honest walk). It inherits the FROZEN family R^2 floor 0.958 and calibrates its
+  OWN slope band by the shared ADR-0004 method: median-of-15 popMin fit-runs = 44.821 ns/level
+  (runs spanned 44.25..45.35, R^2 0.9786..0.9840), band = median x `[0.6, 1.4]` =
+  `[26.89, 62.75]`, gated over EXACT powers 2^11..2^17 (a binomial popMin chases scattered
+  forest slots, so it needs the cache-resident exact-power window the pointer-chasing members
+  use; the [1e4..1e6] band curves at the memory wall). WORST-case member: NO max-single-op
+  disclosure line. The O(n) foil is a linear min-scan-and-splice extract-min (OFF the line).
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the push / popMin / read /
+  meld / arena-churn / forEach lanes, gc major = 0, the deliberately-allocating control lane
+  still non-zero (teeth), the free-list conservation invariant holds ACROSS MELD (nodes move
+  root lists, not pools), arrayBuffers do not grow across fill/clear soak cycles. `npm run
+  test:perf` -- 0 scavenges + `grows === 0` on every BinomialHeap scenario.
+
+### Notes
+
+- `LogN.js` gains `BINH_MAX_CAPACITY` (`0x7FFFFFFF`, named distinctly from BinaryHeap's
+  identically-valued `BH_MAX_CAPACITY` to avoid a module-scope redeclaration) + the
+  `BinomialHeap` class, appended after SplayTree; the prior eight classes stay BYTE-IDENTICAL
+  (only the `VERSION` const changes above the append point -- a two-hunk diff). Version bumped
+  to 0.9.0 across `package.json`, `LogN.js`, and `llms.txt`. See `decisions/0011-binomialheap.md`.
+
 ## [0.8.0] - 2026-09-21
 
 ### Added
