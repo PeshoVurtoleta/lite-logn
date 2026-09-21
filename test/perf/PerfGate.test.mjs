@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -819,6 +819,147 @@ const binhMeldChurn = {
     statsOf(s) { return { grows: binhGrows(s) }; },
 };
 
+/** PairingHeap's zero-alloc counter: its five typed-array columns, the arena-wide reverse map
+ *  (_pos) + owner tags, the union-find alias, plus the private pool's free-stack -- all fixed at
+ *  construction, so the delta across the window must be 0 (the two-pass combine, the O(1) cut, and
+ *  the O(1) meld rewrite slot links only). */
+function phGrows(s) {
+    const h = s.ph;
+    return h._key.buffer.byteLength + h._id.buffer.byteLength +
+        h._parent.buffer.byteLength + h._child.buffer.byteLength +
+        h._sibling.buffer.byteLength + h._pos.buffer.byteLength +
+        h._owner.buffer.byteLength + h._alias.buffer.byteLength +
+        h._pool._free.buffer.byteLength;
+}
+
+/** A standalone PairingHeap prefilled to capacity (ids 0..CAP-1 resident, integer keys). */
+function phFill() {
+    const h = new PairingHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) h.push(i, (i * 2654435761) & 0xffff);
+    return h;
+}
+
+const PHMASK = CAP - 1; // ids 0..CAP-1 resident (capacity == id domain)
+
+/**
+ * push/popMin churn at steady capacity: the heap starts FULL, each op pops the extreme (a two-pass
+ * combine, freeing one slot) then pushes that same id back (an O(1) root-link). Heap never overflows
+ * or empties; zero allocation.
+ */
+const phPopMinChurn = {
+    name: 'PairingHeap push + popMin churn',
+    setup() { return { ph: phFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.ph;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = h.popMin();
+            h.push(id, (t * 2654435761) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: phGrows(s) }; },
+};
+
+/**
+ * decreaseKey churn: a full heap, each op reprioritizes a resident cycling id TOWARD the min with a
+ * fresh strictly-smaller key -- the O(1) cut + link at the root. To stay bounded (and monotone-
+ * safe), the key walks DOWN then the heap is periodically not needed: we cut to a fresh low key each
+ * time, which is always <= the current key of a full heap seeded in [0, 0xffff] shifted negative.
+ */
+const phDecreaseKeyChurn = {
+    name: 'PairingHeap decreaseKey churn (cut + link at root)',
+    setup() {
+        const h = new PairingHeap(CAP, 'min');
+        for (let i = 0; i < CAP; i++) h.push(i, 1e12 + i); // high keys so any decrease is toward the min
+        return { ph: h, tick: 0 };
+    },
+    hot(s, n) {
+        const h = s.ph;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & PHMASK;
+            // Always decrease: newKey below the current root's key, then re-raise by re-pushing via
+            // popMin+push is not needed -- decreaseKey to a value derived from a descending counter
+            // keeps every move toward the min (monotone), and the key never underflows in this window.
+            h.decreaseKey(id, -(t + 1));
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: phGrows(s) }; },
+};
+
+/**
+ * remove + re-push churn: addressable delete of a resident cycling id (cut + two-pass-combine its
+ * children + link at root) then re-insert the SAME id -> steady full heap. Zero allocation.
+ */
+const phRemoveChurn = {
+    name: 'PairingHeap remove + re-push churn',
+    setup() { return { ph: phFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.ph;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & PHMASK;
+            if (h.remove(id)) h.push(id, (t * 2246822519) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: phGrows(s) }; },
+};
+
+/**
+ * peekMin / peekMinKey / has / keyOf read mix over a full heap, folded into an int32 accumulator.
+ * All O(1) reads (cached root + arena-wide reverse map); no allocation.
+ */
+const phReadMix = {
+    name: 'PairingHeap peekMin/peekMinKey/has/keyOf read mix',
+    setup() { return { ph: phFill(), acc: 0, tick: 0 }; },
+    hot(s, n) {
+        const h = s.ph;
+        let acc = s.acc | 0, t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & PHMASK;
+            acc = (acc + h.peekMin() + (h.peekMinKey() | 0) + (h.has(id) ? 1 : 0) + (h.keyOf(id) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.acc = acc | 0; s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: phGrows(s) }; },
+};
+
+/**
+ * meld + arena-churn: a fixed two-heap arena. meld CONSUMES its donor (a dead-after-meld heap fails
+ * closed on reuse), so to drive the O(1) meld hot body REPEATEDLY the donor is refreshed in place
+ * (white-box scalar + alias resets -- alloc-free) then reloaded; the melded result is drained back
+ * so the arena returns to empty and the arena-wide _pos slots are released. The measured body is the
+ * public O(1) meld (a single root-link + alias write) + the drain, which allocates zero bytes.
+ */
+const phMeldChurn = {
+    name: 'PairingHeap meld + arena-churn',
+    setup() {
+        const [acc, donor] = PairingHeap.arena(CAP, 'min', 2);
+        return { ph: acc, donor, tick: 0 };
+    },
+    hot(s, n) {
+        const acc = s.ph, donor = s.donor;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            // alloc-free refresh of the (consumed) donor: reset scalars AND its alias entry to a root.
+            donor._consumed = false; donor._root = 0; donor._n = 0; donor._alias[donor._hid] = donor._hid;
+            for (let k = 0; k < 8; k++) donor.push(((t + k) & PHMASK), ((t + k) * 40503) & 0xffff);
+            acc.meld(donor);                          // consumes donor; O(1) root-link + alias write
+            for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc, slots released
+            t = (t + 8) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: phGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -856,6 +997,7 @@ zgcSuite({
         sgGetChurn, sgSetChurn, sgDeleteChurn, sgRebuildChurn, sgOrderMix,
         mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix,
         spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn,
-        binhPopMinChurn, binhReadMix, binhMeldChurn],
+        binhPopMinChurn, binhReadMix, binhMeldChurn,
+        phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn],
     mustFail: [teethMustFailAlloc],
 });

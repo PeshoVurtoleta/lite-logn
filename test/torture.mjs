@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -168,6 +168,20 @@ async function main() {
             bha.popMin();
             bha.peekMin();
             tracker.track(bha, noopRelease, 8 * CYCLES + i, { audit: true });
+            // A fresh PairingHeap ARENA per cycle (two arena-sharing heaps melded, decreaseKey'd,
+            // removed, then drained), dropped. Same held-value contract: a PairingHeap owns only its
+            // typed-array columns + arena-wide maps + a private NodePool (no external resource), so
+            // the no-op cleanup never defeats finalization -- and the O(1) meld keeps both alive to
+            // be reclaimed together (the arena is one graph of typed arrays).
+            const [pha, phb] = PairingHeap.arena(64, (i & 1) ? 'max' : 'min', 2);
+            for (let k = 0; k < 20; k++) pha.push(k, (k * 2654435761) & 0xffff);
+            for (let k = 20; k < 40; k++) phb.push(k, (k * 40503) & 0xffff);
+            pha.meld(phb);    // consumes phb; O(1) root-link
+            pha.decreaseKey(30, (i & 1) ? 0x1ffff : -5); // reprioritize a melded-in id toward the extreme
+            pha.remove(10);
+            pha.popMin();
+            pha.peekMin();
+            tracker.track(pha, noopRelease, 9 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -585,6 +599,63 @@ async function main() {
     function bhForEachCb(id, key) { bhfeAcc = (bhfeAcc + (id | 0) + (key | 0)) | 0; }
     const stepBinhForEach = () => { binh.forEach(bhForEachCb); };
 
+    // PairingHeap: one out-of-loop standalone heap prefilled to capacity (its own arena). Each lane
+    // is a real hot op that MUST allocate zero bytes -- the five columns + arena-wide _pos/_owner
+    // maps + union-find alias + private NodePool are fixed at construction; the two-pass combine
+    // (popMin), the O(1) cut (decreaseKey/remove), and the O(1) meld all rewrite slot links only,
+    // never a heap object. ids are UNIQUE arena-wide, so the churn lanes cycle within [0, CAP).
+    const ph = new PairingHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) ph.push(i, (i * 2654435761) & 0xffff);
+
+    let phk = (VERSION.length | 0), phacc = 0;
+    // push/popMin churn: pop the extreme id, push it back with a fresh key -> steady full heap.
+    // Exercises the two-pass combine (popMin) AND the O(1) root-link (push).
+    const stepPhPopMin = () => {
+        const id = ph.popMin();
+        ph.push(id, (phk * 2654435761) & 0xffff);
+        phk = (phk + 1) | 0;
+    };
+    // decreaseKey churn: reprioritize a resident cycling id toward the min with an ever-smaller key
+    // (a descending counter keeps every move a genuine decrease -- the O(1) cut + link at root).
+    let phdk = 0;
+    const stepPhDecreaseKey = () => {
+        ph.decreaseKey(phdk & MASK, -(phdk + 1));
+        phdk = (phdk + 1) | 0;
+    };
+    // remove + re-push churn: addressable delete then re-insert of the SAME id -> steady full heap,
+    // exercising the cut + two-pass-combine of the removed node's children + free-list free/alloc.
+    const stepPhRemove = () => {
+        const id = phk & MASK;
+        if (ph.remove(id)) ph.push(id, (phk * 2246822519) & 0xffff);
+        phk = (phk + 1) | 0;
+    };
+    // read mix: peekMin / peekMinKey / has / keyOf folded into an accumulator (O(1) reads).
+    const stepPhRead = () => {
+        const id = phk & MASK;
+        phacc = (phacc + ph.peekMin() + (ph.peekMinKey() | 0) + (ph.has(id) ? 1 : 0) + (ph.keyOf(id) | 0)) | 0;
+        phk = (phk + 1) | 0;
+    };
+
+    // PairingHeap MELD + arena-churn: a fixed two-heap arena, driven steady-state. meld CONSUMES its
+    // donor (dead-after-meld fails closed), so to drive the O(1) meld hot body REPEATEDLY the donor
+    // is REFRESHED in place (white-box scalar + alias resets -- alloc-free) then reloaded. The
+    // measured body is the public O(1) meld (a single root-link + alias write) + the drain, which
+    // MUST allocate zero bytes; no ctor runs in the lane, so a non-zero reading is a real regression.
+    const [accP, donorP] = PairingHeap.arena(CAP, 'min', 2);
+    let mpk = 0;
+    const stepPhMeld = () => {
+        donorP._consumed = false; donorP._root = 0; donorP._n = 0; donorP._alias[donorP._hid] = donorP._hid;
+        for (let k = 0; k < 8; k++) donorP.push((mpk + k) & MASK, ((mpk + k) * 40503) & 0xffff);
+        accP.meld(donorP);              // consumes donorP; O(1) root-link + alias write
+        for (let k = 0; k < 8; k++) phacc = (phacc + accP.popMin()) | 0; // drain back -> steady empty accP
+        mpk = (mpk + 8) | 0;
+    };
+
+    // forEach: the O(n) forest walk through a HOISTED callback -- no per-call closure alloc.
+    let phfeAcc = 0;
+    function phForEachCb(id, key) { phfeAcc = (phfeAcc + (id | 0) + (key | 0)) | 0; }
+    const stepPhForEach = () => { ph.forEach(phForEachCb); };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -606,7 +677,8 @@ async function main() {
         stepScGet, stepScSet, stepScDelete, stepScRankSelect, stepScSuccessor, stepScRebuild,
         stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead,
         stepSpGet, stepSpWorkingSet, stepSpSet, stepSpDelete, stepSpSuccessor,
-        stepBinhPopMin, stepBinhRead, stepBinhMeld]) {
+        stepBinhPopMin, stepBinhRead, stepBinhMeld,
+        stepPhPopMin, stepPhDecreaseKey, stepPhRemove, stepPhRead, stepPhMeld]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -618,7 +690,7 @@ async function main() {
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
-        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach]) {
+        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach, stepPhForEach]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -639,6 +711,8 @@ async function main() {
     if (spfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep spfeAcc live
     if (bhacc === 0x7fffffff) throw new Error('unreachable'); // keep bhacc live
     if (bhfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep bhfeAcc live
+    if (phacc === 0x7fffffff) throw new Error('unreachable'); // keep phacc live
+    if (phfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep phfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -730,6 +804,22 @@ async function main() {
             ca.meld(cb); // consumes cb; O(log n) root relink
             while (ca.size > 0) sink = (sink + ca.popMin()) | 0;
         }
+        // PairingHeap churn every op: popMin then push a fresh id/key back (steady full heap),
+        // exercising the two-pass combine (popMin) + the O(1) root-link (push). A decreaseKey every
+        // 8th (O(1) cut + link) and a remove+re-push every 64th (cut + two-pass-combine of children).
+        // A meld+arena-churn round fires SPARSELY (every 8192nd) on a fresh tiny arena: meld two
+        // arena-siblings then drain -- proving the O(1) meld runs inside the GC window with NO major
+        // collection (the transient arenas stay in new space). Steady heap otherwise, zero alloc.
+        { const id = ph.popMin(); ph.push(id, (i * 2654435761) & 0xffff); sink = (sink + id) | 0; }
+        if ((i & 7) === 0) ph.decreaseKey(i & MASK, -((i >>> 3) + 1));
+        if ((i & 63) === 0) { const rid = i & MASK; if (ph.remove(rid)) ph.push(rid, i & 0xffff); }
+        if ((i & 8191) === 0) {
+            const [pa, pb] = PairingHeap.arena(128, 'min', 2);
+            for (let k = 0; k < 64; k++) pa.push(k, (k * 2654435761) & 0xffff);
+            for (let k = 0; k < 64; k++) pb.push(k + 64, (k * 40503) & 0xffff);
+            pa.meld(pb); // consumes pb; O(1) root relink
+            while (pa.size > 0) sink = (sink + pa.popMin()) | 0;
+        }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -752,10 +842,13 @@ async function main() {
     const abMmh = new MinMaxHeap(1024);
     const abSp = new SplayTree(1024);
     const abBinh = new BinomialHeap(1024, 'min');
+    const abPh = new PairingHeap(1024, 'min');
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
     const [abMeldAcc, abMeldDonor] = BinomialHeap.arena(1024, 'min', 2);
+    // The same conservation-ACROSS-MELD soak for PairingHeap's O(1) meld (one backing store).
+    const [abPhMeldAcc, abPhMeldDonor] = PairingHeap.arena(1024, 'min', 2);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -851,6 +944,40 @@ async function main() {
         if (melded !== 512) conservationOk = false;                                          // every node drained in order
         if (abMeldAcc._pool.activeSlots !== 0) conservationOk = false;                        // every slot returned
         if (abMeldAcc._pool.activeSlots + abMeldAcc._pool.freeListLength !== abMeldAcc._pool.capacity) conservationOk = false;
+        // PairingHeap (standalone): same free-list conservation contract, PLUS the addressable
+        // decreaseKey/remove paths. A full fill (each push is an O(1) root-link, frees no slots),
+        // then a decreaseKey round on half (cut + link, frees nothing), then a real remove() round
+        // on half (cut + two-pass-combine children + slot free), then a refill, then clear() -> a
+        // forest walk that frees every own node -- the invariant must hold after each phase.
+        for (let i = 0; i < 1024; i++) abPh.push(i, (i * 2654435761) & 0xffff);
+        if (abPh._pool.activeSlots + abPh._pool.freeListLength !== abPh._pool.capacity || abPh._pool.activeSlots !== 1024) conservationOk = false;
+        for (let i = 0; i < 512; i++) abPh.decreaseKey(i, -(i + 1)); // cut + link, no pool churn
+        if (abPh._pool.activeSlots !== 1024) conservationOk = false;
+        for (let i = 0; i < 512; i++) abPh.remove(i);
+        if (abPh._pool.activeSlots + abPh._pool.freeListLength !== abPh._pool.capacity || abPh._pool.activeSlots !== 512) conservationOk = false;
+        for (let i = 0; i < 512; i++) abPh.push(i, (i * 40503) & 0xffff);
+        if (abPh._pool.activeSlots + abPh._pool.freeListLength !== abPh._pool.capacity) conservationOk = false;
+        abPh.clear();
+        if (abPh._pool.activeSlots + abPh._pool.freeListLength !== abPh._pool.capacity || abPh._pool.activeSlots !== 0) conservationOk = false;
+        // CONSERVATION ACROSS MELD for PairingHeap's O(1) meld: fill two arena-siblings, meld, and
+        // assert nodes MOVE root lists but NEVER pools -- activeSlots unchanged, size the exact sum,
+        // the melded-in ids reprioritizable via the surviving heap (the addressable contract), and a
+        // full drain returns every slot. The donor is refreshed in place (alloc-free) each round.
+        abPhMeldDonor._consumed = false; abPhMeldDonor._root = 0; abPhMeldDonor._n = 0; abPhMeldDonor._alias[abPhMeldDonor._hid] = abPhMeldDonor._hid;
+        for (let i = 0; i < 256; i++) abPhMeldAcc.push(i, (i * 2654435761) & 0xffff);
+        for (let i = 256; i < 512; i++) abPhMeldDonor.push(i, (i * 40503) & 0xffff);
+        const beforePhMeldActive = abPhMeldAcc._pool.activeSlots; // 512 nodes across the two heaps
+        if (beforePhMeldActive !== 512) conservationOk = false;
+        abPhMeldAcc.meld(abPhMeldDonor); // consumes donor; single root-link + alias, pools untouched
+        if (abPhMeldAcc._pool.activeSlots !== beforePhMeldActive) conservationOk = false;     // no pool churn
+        if (abPhMeldAcc._pool.activeSlots + abPhMeldAcc._pool.freeListLength !== abPhMeldAcc._pool.capacity) conservationOk = false;
+        if (abPhMeldAcc.size !== 512 || abPhMeldDonor.size !== 0) conservationOk = false;      // size conserved; donor emptied
+        abPhMeldAcc.decreaseKey(400, -1); // a melded-in id is now the acc's -> reprioritizable
+        if (abPhMeldAcc.peekMin() !== 400) conservationOk = false;                             // reached the root
+        let phMelded = 0; while (abPhMeldAcc.size > 0) { abPhMeldAcc.popMin(); phMelded++; }
+        if (phMelded !== 512) conservationOk = false;                                          // every node drained
+        if (abPhMeldAcc._pool.activeSlots !== 0) conservationOk = false;                       // every slot returned
+        if (abPhMeldAcc._pool.activeSlots + abPhMeldAcc._pool.freeListLength !== abPhMeldAcc._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -868,7 +995,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

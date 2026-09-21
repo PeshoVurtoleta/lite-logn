@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -218,6 +218,20 @@ function kBinomialHeapPopMin(n) {
     };
 }
 
+function kPairingHeapPopMin(n) {
+    // A full pairing heap of n ids; each op pops the extreme id and re-pushes it with a fresh key
+    // -- the amortized O(log n) two-pass-combine (popMin) + O(1) root-link (push) pair, size steady
+    // at n. SINK is kept a 32-bit Smi (`| 0`) to avoid boxing a HeapNumber per op (D6 hygiene).
+    const h = new PairingHeap(n, 'min');
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) h.push(k, rng());
+    let t = 1;
+    return {
+        obj: h,
+        op: () => { const id = h.popMin(); t = (t * 1103515245 + 12345) & 0x7fffffff; h.push(id, t); SINK = (SINK + id) | 0; },
+    };
+}
+
 function kSplayGet(n) {
     // A full ordered map of n keys; each op searches a random resident key. A splay-get
     // RESTRUCTURES (moves the touched key to the root), so cost is AMORTIZED O(log n). The
@@ -262,6 +276,7 @@ export function makeOpKernel(member, op, n) {
         case 'MinMaxHeap.popMin': return kMinMaxHeapPopMin(n);
         case 'SplayTree.get': return kSplayGet(n);
         case 'BinomialHeap.popMin': return kBinomialHeapPopMin(n);
+        case 'PairingHeap.popMin': return kPairingHeapPopMin(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -277,6 +292,7 @@ export function makeSubject(member, n) {
     if (member === 'MinMaxHeap') return kMinMaxHeapPopMin(n);
     if (member === 'SplayTree') return kSplaySet(n);
     if (member === 'BinomialHeap') return kBinomialHeapPopMin(n);
+    if (member === 'PairingHeap') return kPairingHeapPopMin(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -459,6 +475,12 @@ export function memberBytes(member, obj) {
             obj._sibling.buffer.byteLength + obj._order.buffer.byteLength +
             obj._pool._free.buffer.byteLength;
     }
+    if (member === 'PairingHeap') {
+        return obj._key.buffer.byteLength + obj._id.buffer.byteLength +
+            obj._parent.buffer.byteLength + obj._child.buffer.byteLength +
+            obj._sibling.buffer.byteLength + obj._pos.buffer.byteLength +
+            obj._owner.buffer.byteLength + obj._pool._free.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -473,6 +495,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'MinMaxHeap') return 12;  // key (Float64, 8) + id (Uint32, 4) per live entry
     if (member === 'SplayTree') return 16;   // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'BinomialHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
+    if (member === 'PairingHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -492,6 +515,7 @@ function fillMember(member, obj, count) {
     if (member === 'MinMaxHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     if (member === 'SplayTree') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'BinomialHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
+    if (member === 'PairingHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -514,7 +538,7 @@ function fillMember(member, obj, count) {
  * fixed length, so their "content" is the residual accumulated total (0 == cleared).
  */
 function clearContent(member, obj) {
-    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap') return obj.size;
+    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap') return obj.size;
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -529,6 +553,7 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'MinMaxHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'SplayTree') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'BinomialHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
+    if (member === 'PairingHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -588,6 +613,7 @@ export function D3(member, opts = {}) {
     else if (member === 'MinMaxHeap') obj = new MinMaxHeap(n);
     else if (member === 'SplayTree') obj = new SplayTree(n);
     else if (member === 'BinomialHeap') obj = new BinomialHeap(n, 'min');
+    else if (member === 'PairingHeap') obj = new PairingHeap(n, 'min');
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -682,6 +708,9 @@ function randomLookupOp(member, obj, n, rng) {
     // BinomialHeap is NOT addressable by key (a mergeable PQ, not a map); its only O(1) read is
     // the cached extreme root. rng is consumed to keep the call shape uniform. PROXY-only.
     if (member === 'BinomialHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += (v + (rng() & 1)) | 0; };
+    // PairingHeap IS addressable by id (has(id) is O(1) over the arena-wide reverse map). Probe a
+    // random resident id -- the addressable random-read analogue. PROXY-only.
+    if (member === 'PairingHeap') return () => { if (obj.has(rng() % n)) SINK++; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -698,6 +727,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'MinMaxHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     // BinomialHeap: same -- the cached extreme root is the only O(1) read. PROXY-only.
     if (member === 'BinomialHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    // PairingHeap IS addressable by id: sequential has(id) probe (its addressable read). PROXY-only.
+    if (member === 'PairingHeap') return () => { if (obj.has(i)) SINK++; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -713,6 +744,7 @@ function buildFull(member, n) {
     else if (member === 'MinMaxHeap') { obj = new MinMaxHeap(n); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'SplayTree') { obj = new SplayTree(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'BinomialHeap') { obj = new BinomialHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
+    else if (member === 'PairingHeap') { obj = new PairingHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -937,6 +969,12 @@ function buildOrderNs(member, n, order) {
             for (let i = 0; i < n; i++) bh.push(i, keys[i]);
             elapsed += performance.now() - t0;
             SINK += bh.size;
+        } else if (member === 'PairingHeap') {
+            const ph = new PairingHeap(n, 'min');
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) ph.push(i, keys[i]);
+            elapsed += performance.now() - t0;
+            SINK += ph.size;
         } else { // SkipList
             const sl = new SkipList(n, 0x13 >>> 0);
             const t0 = performance.now();
@@ -972,7 +1010,7 @@ export function D7(member, opts = {}) {
     const nearFullNs = loadOpNs(member, n, 0.99);
 
     // Insertion order: applicable only to the comparison/order-sensitive members.
-    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap');
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap');
     const on = opts.orderN ?? Math.min(n, 1 << 14);
     const insertionOrder = orderSensitive
         ? {
@@ -1070,7 +1108,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
     if (member === 'BinaryHeap' || member === 'Fenwick' ||
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
-        member === 'BinomialHeap') mode = 0;
+        member === 'BinomialHeap' || member === 'PairingHeap') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

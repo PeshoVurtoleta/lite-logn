@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.9.0';
+export const VERSION = '0.10.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -3755,5 +3755,543 @@ export class BinomialHeap {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] BinomialHeap arena full (capacity ' + this._cap + ')');
+    }
+}
+
+/**
+ * Max PairingHeap capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns, so an index must fit an unsigned 32-bit
+ * word; `NIL = 0` reserves slot 0, so live slots run [1, capacity]. The arena-wide
+ * reverse map `_pos` is an `Int32Array(capacity)` (id -> slot, sentinel -1 = absent), so
+ * a caller id must fit [0, capacity). The index arithmetic (Uint32 slot indices +
+ * `NIL = 0` + the Int32 reverse map), not the byte count, is the hard ceiling -- the same
+ * "the arithmetic caps it" reasoning as the other pointer-free members. Named distinctly
+ * to avoid a module-scope redeclaration of BinaryHeap's identically-valued constant.
+ */
+const PH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A PAIRING HEAP: the mergeable-heap arc's ADDRESSABLE member -- a single multi-way
+ * heap-ordered tree (left-child / right-sibling) whose defining ops are a cut-and-link
+ * `decreaseKey` and an O(1) `meld`, both in AMORTIZED O(log n) (popMin / decreaseKey) or
+ * strict O(1) (push / peekMin / meld). Where BinomialHeap is a LEAN, NON-addressable
+ * forest with opaque ids, a pairing heap carries an ARENA-WIDE reverse map so an
+ * arbitrary entity can be reprioritized (decreaseKey) or evicted (remove) by its id --
+ * the addressable mergeable PQ a Dijkstra / Prim relaxation loop reaches for.
+ *
+ * ADDRESSABLE, ARENA-WIDE-UNIQUE IDS (the LOUD contract difference vs BinomialHeap):
+ * caller ids are UNIQUE integers in [0, capacity), and the reverse map `_pos` (id ->
+ * slot, sentinel -1 = absent) is shared across EVERY heap drawing the arena. An id live
+ * anywhere in the arena cannot be pushed again (a full-arena dup throws) -- unlike
+ * BinomialHeap's opaque, non-unique payload ids. Each slot also carries an `_owner` tag
+ * (the owning heap's small integer id) so `decreaseKey(id)` / `remove(id)` on an id owned
+ * by a DIFFERENT live sibling heap in the same arena is O(1)-detected and throws
+ * `[lite-logn]` (fail closed), never a silent cross-heap cut. See decisions/0012.
+ *
+ * TWO-PASS combine (the make-or-break hot path, decisions/0012 D-PH2): popMin unlinks the
+ * root, then combines the root's child list left-to-right into pairs, then folds the
+ * paired list right-to-left into one new root. It is ITERATIVE and POINTER-FREE -- the
+ * sibling links themselves are the work list, so NO temporary array is allocated and the
+ * whole drain is 0 B/op.
+ *
+ * SHARED-ARENA meld in O(1) (decisions/0012 D-PH3): `a.meld(b)` is a SINGLE root-link
+ * (<= ~6 column writes, INDEPENDENT of |b|) plus a union alias redirecting b's heap id to
+ * a's -- BETTER than BinomialHeap's O(log n) meld. It CONSUMES b (b.size -> 0, DEAD via a
+ * consumed flag; every later op on b throws). The alias is a tiny union-find over heap
+ * ids, so a node melded in from b still resolves its owner to a in ~O(1) (path-halved) --
+ * this is why meld need NOT re-tag b's nodes (a per-heap map would make meld O(|b|), the
+ * rejected alternative in D-PH1). Cross-arena is detected by COLUMN IDENTITY
+ * (`this._key !== other._key`); a kind mismatch, a non-PairingHeap arg, a self-meld, or a
+ * consumed operand each throw.
+ *
+ * Storage (allocated once per arena, sized to capacity + 1; slot 0 reserved NIL):
+ *   - `_key` Float64Array   -- the priority key at each node slot.
+ *   - `_id`  Uint32Array    -- the caller entity id at each node slot.
+ *   - `_child` Uint32Array  -- leftmost child (NIL = 0).
+ *   - `_sibling` Uint32Array -- next (right) sibling (NIL = 0).
+ *   - `_parent` Uint32Array -- the PREV pointer: a leftmost child's `_parent` is its true
+ *     parent; a non-leftmost node's `_parent` is its LEFT sibling; a root's is NIL. This
+ *     dual role is what makes `_cut` O(1) (no sibling scan).
+ *   - `_pos` Int32Array(capacity) -- ARENA-WIDE reverse map id -> slot; -1 == absent.
+ *   - `_owner` Uint32Array  -- per-slot owning-heap id (0 = free slot).
+ *   - `_alias` Int32Array   -- union-find over heap ids (meld redirects b's id to a's).
+ *   - `_pool` NodePool      -- the shared free-list handing out slots [1, capacity].
+ * Per-heap scalars: `_hid` (this heap's arena id), `_root` (NIL = 0), `_n` (size),
+ * `_consumed` (dead-after-meld flag). Conservation: activeSlots + freeList === capacity.
+ *
+ * kind 'min' | 'max' is FROZEN at construction (a ctor-cached `_isMin` boolean drives the
+ * hot compare); both operands of a meld must share kind. `decreaseKey` is named for the
+ * classic min-heap op but operates TOWARD the heap's extreme (decrease for 'min',
+ * increase for 'max') -- a move AWAY from the extreme is NOT supported by a cut-and-link
+ * and fails closed with a `[lite-logn]` throw. Keys are FINITE numbers (typeof-guarded
+ * BEFORE coercion -- the KEY door FIRST, then the id, then full / consumed). Every peek /
+ * popMin on an EMPTY heap returns `undefined` and never throws. forEach / [Symbol.iterator]
+ * yield live ids in UNSPECIFIED (forest) order -- NOT sorted, NOT pop order, NO version
+ * stamp. Fixed capacity: a full arena throws, never silently drops. Every hot op allocates
+ * ZERO bytes after construction.
+ */
+export class PairingHeap {
+    /**
+     * @param {number} capacity  exact max live entries across the whole arena; integer in [1, 2^31-1].
+     * @param {'min'|'max'} [kind]  frozen heap polarity (default 'min').
+     */
+    constructor(capacity, kind) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > PH_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] PairingHeap capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        const k = kind === undefined ? 'min' : kind;
+        if (k !== 'min' && k !== 'max') {
+            throw new RangeError(
+                '[lite-logn] PairingHeap kind must be "min" or "max", got ' + String(kind));
+        }
+        const slots = capacity + 1;
+        this._cap = capacity;                          // shared-arena node budget
+        this._key = new Float64Array(slots);           // key at each node slot
+        this._id = new Uint32Array(slots);             // caller entity id at each node slot
+        this._child = new Uint32Array(slots);          // leftmost child; NIL = 0
+        this._sibling = new Uint32Array(slots);        // next sibling; NIL = 0
+        this._parent = new Uint32Array(slots);         // PREV pointer (parent-or-left-sibling); NIL = 0
+        this._pos = new Int32Array(capacity);          // ARENA-WIDE id -> slot; -1 == absent
+        this._pos.fill(-1);                            // slot 0 is a valid slot: null is not zero
+        this._owner = new Uint32Array(slots);          // per-slot owning-heap id (0 = free)
+        this._pool = new NodePool(capacity);           // shared free-list over slots [1, capacity]
+        this._alias = new Int32Array(2);               // union-find over heap ids (hid 1 only, standalone)
+        this._alias[1] = 1;
+        this._isMin = (k === 'min');                   // ctor-cached hot-compare polarity
+        this._kind = k;                                // frozen 'min' | 'max'
+        this._hid = 1;                                 // this heap's arena id (standalone = 1)
+        this._root = 0;                                // tree root slot, NIL = 0 (empty)
+        this._n = 0;                                   // live entry count
+        this._consumed = false;                        // dead-after-meld: reuse fails closed
+    }
+
+    /**
+     * Build `count` EMPTY heaps that SHARE one backing arena (pool + columns + arena-wide
+     * `_pos` reverse map + `_owner` tags), so any two of them can `meld` in O(1). A
+     * standalone `new PairingHeap(capacity, kind)` is the count === 1 case (its own arena).
+     * The `capacity` is the arena-WIDE node budget (and the arena-wide id domain [0,
+     * capacity)) shared across all returned heaps. Fails closed on a bad capacity / kind
+     * (via the constructor) or a non-integer / < 1 count.
+     * @param {number} capacity  arena-wide node budget; integer in [1, 2^31-1].
+     * @param {'min'|'max'} kind  frozen polarity shared by every heap in the arena.
+     * @param {number} count      how many arena-sharing heaps to return; integer >= 1.
+     * @returns {PairingHeap[]}
+     */
+    static arena(capacity, kind, count) {
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+            throw new RangeError(
+                '[lite-logn] PairingHeap.arena count must be an integer >= 1, got ' + String(count));
+        }
+        const first = new PairingHeap(capacity, kind); // validates capacity + kind, allocates the arena
+        const alias = new Int32Array(count + 1);       // union-find over heap ids 1..count
+        for (let h = 1; h <= count; h++) alias[h] = h; // each heap starts as its own root
+        first._alias = alias;
+        const heaps = new Array(count);
+        heaps[0] = first;
+        for (let i = 1; i < count; i++) heaps[i] = PairingHeap._view(first, i + 1);
+        return heaps;
+    }
+
+    /** @private build an EMPTY heap VIEW sharing `src`'s arena (pool + columns + maps), with heap id `hid`. */
+    static _view(src, hid) {
+        const h = Object.create(PairingHeap.prototype);
+        h._cap = src._cap;
+        h._key = src._key; h._id = src._id;
+        h._child = src._child; h._sibling = src._sibling; h._parent = src._parent;
+        h._pos = src._pos; h._owner = src._owner;
+        h._pool = src._pool; h._alias = src._alias;
+        h._isMin = src._isMin; h._kind = src._kind;
+        h._hid = hid;
+        h._root = 0; h._n = 0; h._consumed = false;
+        return h;
+    }
+
+    /** Live entry count (0 once consumed by a meld). O(1). */
+    get size() { return this._n; }
+
+    /** The fixed arena-wide capacity this heap draws from. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen heap polarity ('min' | 'max'). O(1). */
+    get kind() { return this._kind; }
+
+    /**
+     * Insert entity `id` with priority `key`. O(1) (a single root-link). Fails closed: a
+     * non-finite / non-number key (checked FIRST), a non-integer / out-of-range id, an id
+     * already live ANYWHERE in the arena (arena-wide uniqueness -- no silent overwrite), a
+     * full arena, or a consumed heap each throw `[lite-logn]` as a no-op (size unchanged).
+     * @param {number} id   integer in [0, capacity), UNIQUE arena-wide
+     * @param {number} key  a finite number
+     */
+    push(id, key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        if (this._pos[id] !== -1) return this._dup(id);   // arena-wide: id live anywhere
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        this._key[slot] = key; this._id[slot] = id;
+        this._child[slot] = 0; this._sibling[slot] = 0; this._parent[slot] = 0;
+        this._pos[id] = slot; this._owner[slot] = this._hid;
+        this._n++;
+        this._root = this._root === 0 ? slot : this._linkPair(this._root, slot);
+    }
+
+    /**
+     * Remove and return the id at the extreme key (min for a 'min' heap, max for a 'max'
+     * heap), or `undefined` if empty (never throws on empty). AMORTIZED O(log n): unlink
+     * the root, two-pass-combine its child list into a new root, release the old slot.
+     * Consumed heap throws.
+     * @returns {number|undefined}
+     */
+    popMin() {
+        if (this._consumed) return this._badConsumed();
+        const r = this._root;
+        if (r === 0) return undefined; // empty
+        const outId = this._id[r];
+        const first = this._child[r];
+        this._pos[outId] = -1; this._owner[r] = 0;
+        this._child[r] = 0; this._sibling[r] = 0; this._parent[r] = 0;
+        this._pool.free(r);
+        this._n--;
+        this._root = this._twoPass(first);
+        return outId;
+    }
+
+    /** The id at the extreme key, or `undefined` if empty. Read-only. O(1). Consumed heap throws. */
+    peekMin() {
+        if (this._consumed) return this._badConsumed();
+        return this._root === 0 ? undefined : this._id[this._root];
+    }
+
+    /** The extreme key, or `undefined` if empty. O(1). Consumed heap throws. */
+    peekMinKey() {
+        if (this._consumed) return this._badConsumed();
+        return this._root === 0 ? undefined : this._key[this._root];
+    }
+
+    /**
+     * Reprioritize a present entity TOWARD the heap's extreme (decrease for a 'min' heap,
+     * increase for a 'max' heap). AMORTIZED O(log n): cut the node's subtree from its
+     * parent's child list, then link it at the root. Fails closed: a non-finite key
+     * (checked FIRST), an out-of-range id, a non-member id, an id owned by a DIFFERENT live
+     * sibling heap (arena cross-heap guard), a move AWAY from the extreme (unsupported by a
+     * cut-and-link), or a consumed heap each throw `[lite-logn]`.
+     * @param {number} id      integer in [0, capacity), currently present in THIS heap
+     * @param {number} newKey  a finite number, toward the heap's extreme
+     */
+    decreaseKey(id, newKey) {
+        if (typeof newKey !== 'number' || !Number.isFinite(newKey)) return this._badKey(newKey);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return this._notMember(id);
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return this._badOwner(id);
+        const cur = this._key[slot];
+        // Toward-extreme only: a move away cannot be served by a cut-and-link -- fail closed.
+        if (this._isMin ? newKey > cur : newKey < cur) return this._badDir(id);
+        this._key[slot] = newKey;
+        if (slot === this._root) return;             // already the extreme: nothing to cut
+        this._cut(slot);                             // detach the subtree (O(1) prev-pointer)
+        this._root = this._linkPair(this._root, slot);
+    }
+
+    /**
+     * Remove entity `id` from THIS heap, returning true if it was present, false if it was
+     * absent from the arena. AMORTIZED O(log n): cut its subtree, two-pass-combine that
+     * subtree's children, link the result at the root, release the slot. Fails closed: an
+     * out-of-range id, an id owned by a DIFFERENT live sibling heap, or a consumed heap
+     * each throw `[lite-logn]`. Removing the root delegates to popMin.
+     * @param {number} id  integer in [0, capacity)
+     * @returns {boolean}
+     */
+    remove(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return false;               // absent from the arena
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return this._badOwner(id);
+        if (slot === this._root) { this.popMin(); return true; }
+        this._cut(slot);
+        const first = this._child[slot];
+        this._pos[id] = -1; this._owner[slot] = 0;
+        this._child[slot] = 0; this._sibling[slot] = 0; this._parent[slot] = 0;
+        this._pool.free(slot);
+        this._n--;
+        const sub = this._twoPass(first);
+        if (sub !== 0) this._root = this._root === 0 ? sub : this._linkPair(this._root, sub);
+        return true;
+    }
+
+    /** True iff `id` is currently in THIS heap. O(1). Out-of-range id throws; consumed heap throws. */
+    has(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return false;
+        return this._resolve(this._owner[slot]) === this._resolve(this._hid);
+    }
+
+    /**
+     * The key currently associated with `id` in THIS heap, or `undefined` if id is absent
+     * or owned by a sibling heap. O(1). Out-of-range id throws; consumed heap throws.
+     * @param {number} id
+     * @returns {number|undefined}
+     */
+    keyOf(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return undefined;
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return undefined;
+        return this._key[slot];
+    }
+
+    /**
+     * MELD `other` INTO this heap in O(1): a single root-link plus a union alias redirecting
+     * `other`'s heap id to this -- <= ~6 column writes, INDEPENDENT of |other| (BETTER than
+     * BinomialHeap's O(log n) meld). CONSUMES `other`: it becomes empty (size 0) and DEAD --
+     * any later op on it throws, so a reused operand can never re-enter the shared nodes.
+     * Fails closed: a non-PairingHeap arg, a self-meld, a cross-arena operand (column
+     * identity `this._key !== other._key`), a kind mismatch, or a consumed operand each
+     * throw `[lite-logn]`.
+     * @param {PairingHeap} other  an arena-sibling heap of the same kind (consumed)
+     * @returns {this}
+     */
+    meld(other) {
+        if (!(other instanceof PairingHeap)) {
+            throw new TypeError('[lite-logn] PairingHeap.meld needs a PairingHeap argument');
+        }
+        if (other === this) {
+            throw new Error('[lite-logn] PairingHeap.meld cannot meld a heap with itself');
+        }
+        if (this._consumed || other._consumed) {
+            throw new Error('[lite-logn] PairingHeap.meld operand was consumed by a prior meld');
+        }
+        if (this._key !== other._key) {
+            throw new Error(
+                '[lite-logn] PairingHeap.meld requires two heaps sharing an arena (from PairingHeap.arena)');
+        }
+        if (this._isMin !== other._isMin) {
+            throw new Error(
+                '[lite-logn] PairingHeap.meld requires both heaps to share kind (min vs max)');
+        }
+        const or = other._root;
+        this._n += other._n;
+        // Union alias: redirect other's heap id to THIS heap's root id, so other's nodes
+        // (owner = other._hid) resolve to this in O(1) -- NO per-node re-tag (that would be O(|b|)).
+        this._alias[other._hid] = this._resolve(this._hid);
+        other._root = 0; other._n = 0; other._consumed = true;
+        if (or !== 0) this._root = this._root === 0 ? or : this._linkPair(this._root, or);
+        return this;
+    }
+
+    /**
+     * Empty THIS heap, returning ONLY its own nodes to the shared pool (an arena sibling's
+     * nodes are untouched). O(n) cold forest walk, allocation-free. A consumed heap throws.
+     * @returns {this}
+     */
+    clear() {
+        if (this._consumed) return this._badConsumed();
+        this._freeForest(this._root);
+        this._root = 0; this._n = 0;
+        return this;
+    }
+
+    /**
+     * Visit every live (id, key) pair in UNSPECIFIED (forest) order -- NOT sorted, NOT pop
+     * order. O(n) cold walk, allocation-free (pass a hoisted callback). Consumed heap throws.
+     * @param {(id:number, key:number, heap:PairingHeap)=>void} fn
+     */
+    forEach(fn) {
+        if (this._consumed) return this._badConsumed();
+        this._forEach(this._root, fn);
+    }
+
+    /**
+     * Iterate live entity ids in UNSPECIFIED (forest) order -- NOT sorted. The one
+     * documented per-protocol allocator (a {value, done} per step + a sub-iterator per
+     * child list); use forEach for the alloc-free scan. Consumed heap throws.
+     */
+    [Symbol.iterator]() {
+        if (this._consumed) return this._badConsumed();
+        return this._iterNode(this._root);
+    }
+
+    // ---- private hot bodies (link / cut / two-pass / resolve) --------------
+
+    /**
+     * @private link two roots `a`, `b` and return the winner (the extreme). The loser
+     * becomes the winner's leftmost child (prepend), maintaining the prev-pointer
+     * invariant. For a min heap `a` wins on `key[a] <= key[b]`; for a max heap on `>=`.
+     */
+    _linkPair(a, b) {
+        const K = this._key;
+        let w, l;
+        if (this._isMin ? K[a] <= K[b] : K[a] >= K[b]) { w = a; l = b; } else { w = b; l = a; }
+        const oldChild = this._child[w];
+        this._sibling[l] = oldChild;
+        if (oldChild !== 0) this._parent[oldChild] = l; // old first child's PREV is now l
+        this._child[w] = l;
+        this._parent[l] = w;                            // l is leftmost: PREV = parent w
+        this._sibling[w] = 0; this._parent[w] = 0;      // w is a root
+        return w;
+    }
+
+    /**
+     * @private cut node `s` (not the root) from its parent's child list in O(1) using the
+     * dual-role PREV pointer: `_parent[s]` is s's true parent iff `_child[parent] === s`
+     * (s is leftmost), else it is s's left sibling. Fix the right sibling's PREV, then
+     * detach s (its subtree travels with it).
+     */
+    _cut(s) {
+        const pv = this._parent[s];
+        const rs = this._sibling[s];
+        if (this._child[pv] === s) this._child[pv] = rs; // s was leftmost: pv is true parent
+        else this._sibling[pv] = rs;                     // pv is s's left sibling
+        if (rs !== 0) this._parent[rs] = pv;             // right sibling's PREV skips s
+        this._parent[s] = 0; this._sibling[s] = 0;
+    }
+
+    /**
+     * @private the TWO-PASS combine (D-PH2): pair the sibling list `first` left-to-right,
+     * then fold the paired list right-to-left into one root. Iterative and POINTER-FREE --
+     * the `_sibling` links are the work list, so NO temporary array is allocated (0 B/op).
+     * PASS 1 PREPENDS each merged pair onto `list` (so `list` is in reverse pair order);
+     * PASS 2 then folds `list` front-to-back, which IS right-to-left over the pairs.
+     */
+    _twoPass(first) {
+        if (first === 0) return 0;
+        const S = this._sibling;
+        let list = 0, a = first;
+        // PASS 1: meld adjacent pairs, prepend each result onto `list`.
+        while (a !== 0) {
+            const b = S[a];
+            if (b === 0) { this._parent[a] = 0; S[a] = list; list = a; break; } // odd tail
+            const next = S[b];
+            this._parent[a] = 0; this._parent[b] = 0; S[a] = 0; S[b] = 0;
+            const m = this._linkPair(a, b);
+            S[m] = list; list = m;
+            a = next;
+        }
+        // PASS 2: fold the reversed paired list into one root.
+        let root = list;
+        let nxt = S[root];
+        S[root] = 0; this._parent[root] = 0;
+        while (nxt !== 0) {
+            const after = S[nxt];
+            S[nxt] = 0; this._parent[nxt] = 0;
+            root = this._linkPair(root, nxt);
+            nxt = after;
+        }
+        this._sibling[root] = 0; this._parent[root] = 0;
+        return root;
+    }
+
+    /**
+     * @private resolve a heap id to its union-find root (the canonical live owner), with
+     * path halving so a long meld chain stays ~O(1). Meld redirects a consumed operand's id
+     * to its melder, so a node owned by a melded-in heap resolves to the surviving heap.
+     * NOTE: the path halving WRITES the shared `_alias` array, so the read-only-looking
+     * `has()` / `keyOf()` (and decreaseKey / remove) can mutate `_alias` -- a benign,
+     * 0-alloc, idempotent compaction that never touches node columns, conservation, or forEach.
+     */
+    _resolve(h) {
+        const A = this._alias;
+        while (A[h] !== h) { A[h] = A[A[h]]; h = A[h]; }
+        return h;
+    }
+
+    /** @private recursive forest free (siblings iterative, children recursive). */
+    _freeForest(node) {
+        const S = this._sibling, C = this._child, I = this._id;
+        while (node !== 0) {
+            const next = S[node];
+            this._freeForest(C[node]);
+            this._pos[I[node]] = -1; this._owner[node] = 0;
+            C[node] = 0; S[node] = 0; this._parent[node] = 0;
+            this._pool.free(node);
+            node = next;
+        }
+    }
+
+    /** @private recursive forest visit (siblings iterative, children recursive). */
+    _forEach(node, fn) {
+        const S = this._sibling, C = this._child, I = this._id, K = this._key;
+        while (node !== 0) {
+            fn(I[node], K[node], this);
+            this._forEach(C[node], fn);
+            node = S[node];
+        }
+    }
+
+    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
+    *_iterNode(node) {
+        const S = this._sibling, C = this._child, I = this._id;
+        while (node !== 0) {
+            yield I[node];
+            yield* this._iterNode(C[node]);
+            node = S[node];
+        }
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badId(id) {
+        throw new RangeError(
+            '[lite-logn] PairingHeap id must be an integer in [0, capacity), got ' + String(id));
+    }
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] PairingHeap key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _dup(id) {
+        throw new Error('[lite-logn] PairingHeap id ' + id + ' is already live in the arena (ids are unique arena-wide)');
+    }
+
+    /** @private */
+    _notMember(id) {
+        throw new Error('[lite-logn] PairingHeap decreaseKey on a non-member id ' + id);
+    }
+
+    /** @private */
+    _badOwner(id) {
+        throw new Error('[lite-logn] PairingHeap id ' + id + ' is owned by a different live heap in the arena (fail closed)');
+    }
+
+    /** @private */
+    _badDir(id) {
+        throw new RangeError(
+            '[lite-logn] PairingHeap.decreaseKey on id ' + id + ' must move the key TOWARD the ' +
+            this._kind + ' extreme (a move away is unsupported)');
+    }
+
+    /** @private */
+    _badConsumed() {
+        throw new Error('[lite-logn] PairingHeap was consumed by a prior meld (reuse fails closed)');
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] PairingHeap arena full (capacity ' + this._cap + ')');
     }
 }

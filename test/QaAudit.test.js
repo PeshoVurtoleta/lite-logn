@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.9.0 at the BinomialHeap release', () => {
-    assert.equal(VERSION, '0.9.0');
+test('VERSION is exactly 0.10.0 at the PairingHeap release', () => {
+    assert.equal(VERSION, '0.10.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (9 members) --------
+// --- frozen export surface: VERSION + the shipped members (10 members) --------
 
-test('LogN.js exports exactly VERSION + the nine members at v0.9.0 (adds BinomialHeap)', () => {
+test('LogN.js exports exactly VERSION + the ten members at v0.10.0 (adds PairingHeap)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'MinMaxHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the nine members incl BinomialHeap)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the ten members incl PairingHeap)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -53,6 +53,7 @@ test('LogN.js exports exactly VERSION + the nine members at v0.9.0 (adds Binomia
     assert.equal(typeof LogNModule.MinMaxHeap, 'function');
     assert.equal(typeof LogNModule.SplayTree, 'function');
     assert.equal(typeof LogNModule.BinomialHeap, 'function');
+    assert.equal(typeof LogNModule.PairingHeap, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -466,4 +467,124 @@ test('BinomialHeap fails closed with a [lite-logn]-tagged throw on every coercio
     assert.equal(typeof h.changeKey, 'undefined', 'BinomialHeap has no changeKey (LEAN)');
     assert.equal(typeof h.rank, 'undefined', 'BinomialHeap has no rank (LEAN)');
     assert.equal(typeof h.select, 'undefined', 'BinomialHeap has no select (LEAN)');
+});
+
+// --- PairingHeap (v0.10.0): coercion + [lite-logn] fail-closed tag ------------
+
+test('PairingHeap fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { PairingHeap } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 10n, 2 ** 31]) {
+        assert.throws(() => new PairingHeap(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    // constructor: bad kind (only 'min' | 'max'; default 'min' when omitted)
+    for (const bad of ['biggest', 'MIN', '', null, 0, Symbol('k'), {}, 3n]) {
+        assert.throws(() => new PairingHeap(8, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    assert.doesNotThrow(() => new PairingHeap(8));         // kind omitted -> 'min'
+    assert.equal(new PairingHeap(8).kind, 'min');
+    assert.equal(new PairingHeap(8, 'max').kind, 'max');
+    const h = new PairingHeap(8, 'min');
+    // non-finite / non-number key, typeof-first (checked BEFORE the id); size unchanged
+    for (const bad of [NaN, Infinity, -Infinity, '3', null, undefined, {}, Symbol('k'), 1n]) {
+        assert.throws(() => h.push(0, bad), /\[lite-logn\]/, 'push key ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // non-integer / out-of-range id (the id domain is [0, capacity))
+    for (const bad of [-1, 1.5, NaN, Infinity, 8, 100, '0', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => h.push(bad, 1), /\[lite-logn\]/, 'push id ' + String(bad));
+    }
+    assert.equal(h.size, 0);
+    // ADDRESSABLE, ARENA-WIDE-UNIQUE ids: a re-push of a live id throws (no silent overwrite)
+    h.push(2, 5);
+    assert.throws(() => h.push(2, 9), /\[lite-logn\]/, 'duplicate live id fails closed');
+    assert.equal(h.size, 1);
+    // full arena fails closed (never a silent drop); size unchanged
+    const full = new PairingHeap(2, 'min');
+    full.push(0, 1); full.push(1, 2);
+    assert.throws(() => full.push(2, 3), /\[lite-logn\]/); // capacity is the id domain too (id 2 out of range)
+    assert.equal(full.size, 2);
+    // empty peek/pop never throw (they return undefined)
+    const empty = new PairingHeap(4, 'min');
+    assert.equal(empty.peekMin(), undefined);
+    assert.equal(empty.peekMinKey(), undefined);
+    assert.equal(empty.popMin(), undefined);
+
+    // decreaseKey: bad key (FIRST), out-of-range id, non-member, wrong-direction all fail closed
+    const dk = new PairingHeap(16, 'min');
+    for (let k = 0; k < 8; k++) dk.push(k, 100 + k);
+    for (const bad of [NaN, Infinity, -Infinity, '3', null, undefined, {}, Symbol('k'), 1n]) {
+        assert.throws(() => dk.decreaseKey(0, bad), /\[lite-logn\]/, 'decreaseKey key ' + String(bad));
+    }
+    for (const bad of [-1, 1.5, NaN, 16, 100, '0', null, Symbol('i'), 3n]) {
+        assert.throws(() => dk.decreaseKey(bad, 1), /\[lite-logn\]/, 'decreaseKey id ' + String(bad));
+    }
+    assert.throws(() => dk.decreaseKey(12, 1), /\[lite-logn\]/, 'decreaseKey non-member');    // id 12 absent
+    assert.throws(() => dk.decreaseKey(3, 999), /\[lite-logn\]/, 'decreaseKey away from extreme'); // min: increase rejected
+    dk.decreaseKey(3, -5); // toward-extreme OK
+    assert.equal(dk.peekMin(), 3);
+    assert.equal(dk.keyOf(3), -5);
+
+    // remove: out-of-range id throws; absent id returns false; present returns true
+    for (const bad of [-1, 1.5, NaN, 16, '0', null, Symbol('i'), 3n]) {
+        assert.throws(() => dk.remove(bad), /\[lite-logn\]/, 'remove id ' + String(bad));
+    }
+    assert.equal(dk.remove(11), false, 'remove absent id -> false');
+    assert.equal(dk.remove(3), true, 'remove present id -> true');
+    assert.equal(dk.has(3), false);
+    // has / keyOf on out-of-range throw; on absent return false / undefined
+    for (const bad of [-1, 16, 1.5, NaN, Symbol('i'), 3n]) {
+        assert.throws(() => dk.has(bad), /\[lite-logn\]/, 'has id ' + String(bad));
+        assert.throws(() => dk.keyOf(bad), /\[lite-logn\]/, 'keyOf id ' + String(bad));
+    }
+    assert.equal(dk.has(11), false);
+    assert.equal(dk.keyOf(11), undefined);
+
+    // arena factory: bad count fails closed
+    for (const bad of [0, -1, 1.5, NaN, '2', null, undefined, {}, Symbol('c'), 2n]) {
+        assert.throws(() => PairingHeap.arena(8, 'min', bad), /\[lite-logn\]/, 'arena count ' + String(bad));
+    }
+    assert.throws(() => PairingHeap.arena(0, 'min', 2), /\[lite-logn\]/);
+    assert.throws(() => PairingHeap.arena(8, 'bad', 2), /\[lite-logn\]/);
+
+    // meld fails closed: non-PairingHeap arg, self, cross-arena, kind mismatch
+    assert.throws(() => h.meld({}), /\[lite-logn\]/, 'meld non-PairingHeap');
+    assert.throws(() => h.meld(h), /\[lite-logn\]/, 'meld self');
+    assert.throws(() => new PairingHeap(4, 'min').meld(new PairingHeap(4, 'min')), /\[lite-logn\]/, 'meld cross-arena');
+    const [minA, minB] = PairingHeap.arena(16, 'min', 2);
+    const [maxA] = PairingHeap.arena(16, 'max', 1);
+    assert.throws(() => minA.meld(maxA), /\[lite-logn\]/, 'meld kind mismatch (also cross-arena)');
+
+    // ARENA-WIDE ids + per-heap OWNER: an id live in sibling minB cannot be pushed into minA, and
+    // decreaseKey/remove on a sibling's id from minA is O(1)-detected and fails closed.
+    for (let k = 0; k < 4; k++) minA.push(k, 100 - k);
+    for (let k = 4; k < 8; k++) minB.push(k, 100 - k);
+    assert.throws(() => minA.push(5, 1), /\[lite-logn\]/, 'arena-wide unique id (5 is minB\'s)');
+    assert.throws(() => minA.decreaseKey(5, 1), /\[lite-logn\]/, 'cross-heap decreaseKey fails closed');
+    assert.throws(() => minA.remove(5), /\[lite-logn\]/, 'cross-heap remove fails closed');
+    assert.equal(minA.has(5), false, 'sibling id is not a member of this heap');
+    assert.equal(minA.keyOf(5), undefined, 'sibling id keyOf is undefined');
+
+    // meld CONSUMES the donor: it becomes empty (size 0) AND dead; every later op fails closed.
+    minA.meld(minB);
+    assert.equal(minB.size, 0, 'consumed donor is empty');
+    assert.equal(minA.size, 8, 'melded heap holds every node');
+    // the melded-in id 5 is NOW minA's -> decreaseKey succeeds (the addressable meld contract)
+    assert.doesNotThrow(() => minA.decreaseKey(5, -1));
+    assert.equal(minA.peekMin(), 5, 'melded-in id decreaseKey reaches the root');
+    assert.throws(() => minB.push(1, 1), /\[lite-logn\]/, 'consumed donor push fails closed');
+    assert.throws(() => minB.popMin(), /\[lite-logn\]/, 'consumed donor popMin fails closed');
+    assert.throws(() => minB.peekMin(), /\[lite-logn\]/, 'consumed donor peekMin fails closed');
+    assert.throws(() => minB.decreaseKey(4, 1), /\[lite-logn\]/, 'consumed donor decreaseKey fails closed');
+    assert.throws(() => minB.remove(4), /\[lite-logn\]/, 'consumed donor remove fails closed');
+    assert.throws(() => minB.clear(), /\[lite-logn\]/, 'consumed donor clear fails closed');
+    assert.throws(() => minB.forEach(() => {}), /\[lite-logn\]/, 'consumed donor forEach fails closed');
+    assert.throws(() => [...minB], /\[lite-logn\]/, 'consumed donor iteration fails closed');
+    assert.throws(() => minA.meld(minB), /\[lite-logn\]/, 'melding a consumed operand fails closed');
+
+    // PairingHeap is ADDRESSABLE but NOT an ordered map: NO changeKey / rank / select / successor.
+    assert.equal(typeof h.changeKey, 'undefined', 'PairingHeap has no changeKey (use decreaseKey)');
+    assert.equal(typeof h.rank, 'undefined', 'PairingHeap has no rank (not an ordered map)');
+    assert.equal(typeof h.select, 'undefined', 'PairingHeap has no select (not an ordered map)');
+    assert.equal(typeof h.successor, 'undefined', 'PairingHeap has no successor (not an ordered map)');
 });

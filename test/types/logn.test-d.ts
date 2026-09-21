@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -246,3 +246,47 @@ bh.rank(3);
 
 // @ts-expect-error -- BinomialHeap has no select (non-addressable, no order stats).
 bh.select(0);
+
+// --- PairingHeap -----------------------------------------------------------
+const ph = new PairingHeap(1024, 'min');
+const phDefault = new PairingHeap(1024); // kind defaults to 'min'
+void phDefault;
+ph.push(3, 2.5);
+const phMin: number | undefined = ph.popMin();
+const phPeek: number | undefined = ph.peekMin();
+const phPeekKey: number | undefined = ph.peekMinKey();
+ph.decreaseKey(3, 1.0);
+const phRemoved: boolean = ph.remove(3);
+const phHas: boolean = ph.has(3);
+const phKeyOf: number | undefined = ph.keyOf(3);
+const phSize: number = ph.size;
+const phCap: number = ph.capacity;
+const phKind: 'min' | 'max' = ph.kind;
+const phClear: PairingHeap = ph.clear(); // fluent -> this
+ph.forEach((id, key) => { void id; void key; });
+for (const id of ph) { void id; }
+const phArena: PairingHeap[] = PairingHeap.arena(1024, 'min', 3);
+const phMelded: PairingHeap = phArena[0].meld(phArena[1]); // meld -> this, consumes the arg
+void phMin; void phPeek; void phPeekKey; void phRemoved; void phHas; void phKeyOf;
+void phSize; void phCap; void phKind; void phClear; void phMelded;
+
+// @ts-expect-error -- push key must be a number.
+ph.push(1, 'x');
+
+// @ts-expect-error -- decreaseKey newKey must be a number.
+ph.decreaseKey(1, 'x');
+
+// @ts-expect-error -- kind must be 'min' | 'max'.
+new PairingHeap(8, 'biggest');
+
+// @ts-expect-error -- PairingHeap has no changeKey (use decreaseKey).
+ph.changeKey(3, 1.0);
+
+// @ts-expect-error -- PairingHeap is not an ordered map: no rank.
+ph.rank(3);
+
+// @ts-expect-error -- PairingHeap is not an ordered map: no select.
+ph.select(0);
+
+// @ts-expect-error -- PairingHeap is not an ordered map: no successor.
+ph.successor(3);

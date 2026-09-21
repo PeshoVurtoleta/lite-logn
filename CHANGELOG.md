@@ -6,6 +6,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-21
+
+### Added
+
+- **PairingHeap** -- the tenth member and the mergeable-heap arc's ADDRESSABLE priority queue: a
+  single multi-way heap-ordered tree (left-child / right-sibling) whose defining ops are a cut-and-
+  link `decreaseKey` (AMORTIZED O(log n)) and an O(1) `meld` (Fredman, Sedgewick, Sleator, Tarjan
+  1986). `push` / `peekMin` / `peekMinKey` / `meld` are O(1); `popMin` / `decreaseKey` / `remove`
+  are AMORTIZED O(log n). `popMin` unlinks the root then does a TWO-PASS combine of the root's
+  child list (pair left-to-right, then fold right-to-left) -- iterative and POINTER-FREE, the
+  `_sibling` links ARE the work list, so NO temporary array (0 B/op). Surface: `push` / `popMin` /
+  `peekMin` / `peekMinKey` / `decreaseKey` / `remove` / `has` / `keyOf` / `meld` / `clear` /
+  `forEach` / `[Symbol.iterator]`, `size` / `capacity` / `kind` getters, and the static
+  `PairingHeap.arena(capacity, kind, count)` factory. Keys are finite numbers (typeof-guarded
+  before coercion -- Symbol / BigInt / NaN / +-Infinity fail closed, key checked FIRST).
+- **ADDRESSABLE, ARENA-WIDE-UNIQUE ids (D-PH1).** Caller ids are UNIQUE integers in [0, capacity),
+  and the reverse map `_pos` (id -> slot, sentinel -1) is SHARED across EVERY heap drawing the
+  arena -- a user-visible contract difference vs BinomialHeap's opaque, non-unique ids. A per-slot
+  `_owner` tag makes `decreaseKey(id)` / `remove(id)` on an id owned by a DIFFERENT live sibling
+  heap an O(1)-detected `[lite-logn]` throw (never a silent cross-heap cut); pushing an id live
+  ANYWHERE in the arena throws. Five pointer-free typed-array columns (`_key` Float64, `_id` /
+  `_child` / `_sibling` / `_parent` Uint32 -- `_parent` is a dual-role PREV pointer for O(1) cut)
+  + the arena-wide `_pos` Int32 reverse map + a per-slot `_owner` + a union-find `_alias` over
+  heap ids, over a private free-list (NodePool); NIL = 0 reserves slot 0. `kind` 'min' | 'max' is
+  frozen at construction (a ctor-cached `_isMin` boolean drives the hot compare). `decreaseKey`
+  operates TOWARD the heap's extreme (decrease for 'min', increase for 'max'); a move away fails
+  closed.
+- **SHARED-ARENA, O(1) meld (D-PH3).** `a.meld(b)` is a SINGLE root-link plus a union alias
+  redirecting b's heap id to a's -- <= ~6 column writes, INDEPENDENT of |b| (BETTER than
+  BinomialHeap's O(log n) meld). It CONSUMES b: b becomes empty (size 0) AND DEAD -- every later
+  op on b throws `[lite-logn]`. The alias is a tiny path-halved union-find over heap ids, so a
+  node melded in from b still resolves its owner to a in ~O(1) WITHOUT re-tagging every node (a
+  per-heap map would make meld O(|b|), the rejected alternative in D-PH1); a melded-in id stays
+  reprioritizable via the surviving heap. Cross-arena detection is COLUMN IDENTITY
+  (`a._key !== b._key`); a kind mismatch, a non-PairingHeap arg, a self-meld, or a consumed
+  operand each throw. Conservation across meld is a hard invariant: nodes MOVE between root lists
+  but NEVER between pools (torture-tested every soak cycle, incl. the addressable decreaseKey/remove
+  paths).
+
+### Verified
+
+- **Witness (D-PH2).** `PairingHeap.popMin` is the gated O(log n) witness op (the pairing heap's
+  tallest honest walk -- the two-pass combine). It inherits the FROZEN family R^2 floor 0.958 and
+  calibrates its OWN slope band by the shared ADR-0004 method: median-of-15 popMin fit-runs =
+  21.799 ns/level (samples 20.96 21.70 21.82 21.74 21.80 21.18 21.54 21.81 21.79 21.97 21.49 21.88
+  22.19 22.08 22.24), band = median x `[0.6, 1.4]` = `[13.08, 30.52]`, gated over EXACT powers
+  2^11..2^17 (the cache-resident pointer-chasing window). AMORTIZED member: the MAX single popMin
+  (a long two-pass fold) is DISCLOSED, not gated. The O(n) foil is a linear min-scan-and-splice
+  extract-min (OFF the line).
+- **Witness RELIABILITY (median-of-fits).** A pairing-heap full-drain average has genuine
+  run-to-run SHAPE variance, so a SINGLE sweep-fit's R^2 is FLAKY -- individual single-fit R^2
+  ranges ~0.945..0.985 on this machine and dips below the 0.958 floor in a minority of runs (even
+  while the slope stays in-band). The PairingHeap lane therefore gates on the MEDIAN of 5
+  independent sweep-fits (the `fitRuns` hook), rejecting the occasional tilted sweep on both ends
+  -- measurement-quality only (the frozen 0.958 floor + slope band are UNTOUCHED; a real O(n) shape
+  fails all fits). Measured: the median-of-5 fit R^2 ranges 0.9907..0.9974 over 15 back-to-back
+  meta-runs (0/15 below the floor), and `node test/witness.mjs` re-run 12x back-to-back was ON-LINE
+  every time (observed R^2 range recorded in `decisions/0012-pairingheap.md`).
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the push / popMin / decreaseKey /
+  remove / read / meld / arena-churn / forEach lanes, gc major = 0, the deliberately-allocating
+  control lane still non-zero (teeth), the free-list conservation invariant holds ACROSS MELD
+  (nodes move root lists, not pools) AND across the addressable decreaseKey/remove paths,
+  arrayBuffers do not grow across fill/clear soak cycles. `npm run test:perf` -- 0 scavenges +
+  `grows === 0` on every PairingHeap scenario (push/popMin, decreaseKey, remove, read, meld).
+
+### Notes
+
+- `LogN.js` gains `PH_MAX_CAPACITY` (`0x7FFFFFFF`, named distinctly from BinaryHeap's identically-
+  valued `BH_MAX_CAPACITY` to avoid a module-scope redeclaration) + the `PairingHeap` class,
+  appended after BinomialHeap; the prior nine classes stay BYTE-IDENTICAL (only the `VERSION` const
+  changes above the append point -- a two-hunk diff). Version bumped to 0.10.0 across
+  `package.json`, `LogN.js`, and `llms.txt`. See `decisions/0012-pairingheap.md`.
+
 ## [0.9.0] - 2026-09-21
 
 ### Added

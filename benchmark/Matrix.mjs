@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The nine shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap'];
+/** The ten shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap'];
 
-/** The twelve gated D1 witness op-rows (member.op), in build order. */
+/** The thirteen gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -37,6 +37,7 @@ export const OP_ROWS = [
     'MinMaxHeap.popMin',
     'SplayTree.get',
     'BinomialHeap.popMin',
+    'PairingHeap.popMin',
 ];
 
 /** The eight measurement dimensions. */
@@ -65,6 +66,7 @@ export const BASELINE = {
     MinMaxHeap: 'linear-min-scan-and-splice',
     SplayTree: 'linear-scan',
     BinomialHeap: 'linear-min-scan-and-splice',
+    PairingHeap: 'linear-min-scan-and-splice',
 };
 
 /**
@@ -97,6 +99,10 @@ export const COUNTER_FOIL = {
     // order-blind" O(1) rival to a binomial heap (a Map serves neither the extreme nor meld),
     // so it has no counter-foil -- NA (the string, never 0).
     BinomialHeap: NA,
+    // PairingHeap is an ADDRESSABLE mergeable priority queue, not an ordered map; a Map serves
+    // neither the extreme, decreaseKey, nor meld, so there is no "faster but order-blind" O(1)
+    // rival -- NA (the string, never 0).
+    PairingHeap: NA,
 };
 
 /**
@@ -173,6 +179,14 @@ export const RATIONALE = {
             'honest default before the heap; the binomial heap buys O(1)-amortized push, O(log n) popMin, ' +
             'AND O(log n) MELD of two heaps -- the mergeable op a single array-embedded heap cannot do ' +
             'without an O(n) rebuild. No Map order-tax counterpoint (a Map serves neither the extreme nor meld).',
+    },
+    PairingHeap: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear min-scan-and-splice extract over an unordered array (O(n) per extract-min) is the ' +
+            'honest default before the heap; the pairing heap buys O(1) push/meld, amortized O(log n) ' +
+            'popMin/decreaseKey, AND an ADDRESSABLE decreaseKey/remove by id -- the reprioritize op a ' +
+            'binomial heap declines to carry. No Map order-tax counterpoint (a Map serves neither the ' +
+            'extreme, decreaseKey, nor meld).',
     },
 };
 
@@ -304,6 +318,14 @@ export const OP_CLASS = Object.freeze({
     'BinomialHeap.push': OLOGN_AMORTIZED, // a binary carry -> O(1) AMORTIZED (O(log n) worst; a full carry is the tail)
     'BinomialHeap.popMin': OLOGN_WORST,   // unlink extreme + child-reverse + remeld + root rescan (the gated row)
     'BinomialHeap.meld': OLOGN_WORST,     // relink two order-sorted root lists with a binary carry -> full-height worst
+    // PairingHeap: popMin / decreaseKey / remove are AMORTIZED O(log n) (a single two-pass fold or
+    // cut-and-link can be O(n), which amortizes to O(log n)) -- DETERMINISTIC, no RNG. push and meld
+    // are strict O(1) (a single root-link), so they are deliberately NOT in this O(log n) honesty
+    // table (the same exclusion as the O(1) getters -- listing an O(1) op here would violate the
+    // no-O(1)-token rule); their O(1) nature is stated in llms/README/decisions instead.
+    'PairingHeap.popMin': OLOGN_AMORTIZED,      // unlink root + TWO-PASS combine the child list (the gated row)
+    'PairingHeap.decreaseKey': OLOGN_AMORTIZED, // cut the subtree + link at the root
+    'PairingHeap.remove': OLOGN_AMORTIZED,      // cut + two-pass-combine children + link at root
 });
 
 // ===========================================================================
@@ -322,7 +344,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

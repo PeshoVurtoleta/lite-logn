@@ -428,3 +428,58 @@ export class BinomialHeap {
     /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
     [Symbol.iterator](): IterableIterator<number>;
 }
+
+/**
+ * A pairing heap: the mergeable-heap arc's ADDRESSABLE member -- a single multi-way heap-ordered
+ * tree whose defining ops are a cut-and-link `decreaseKey` (AMORTIZED O(log n)) and an O(1) `meld`.
+ * push / peekMin / peekMinKey / meld are O(1); popMin / decreaseKey / remove are AMORTIZED O(log n).
+ * ADDRESSABLE with ARENA-WIDE-UNIQUE ids: caller ids are unique integers in [0, capacity), and the
+ * reverse map is shared across EVERY heap drawing the arena (a LOUD contract difference vs
+ * BinomialHeap's opaque, non-unique ids). Each slot carries an owner tag so decreaseKey(id) /
+ * remove(id) on an id owned by a DIFFERENT live sibling heap throws `[lite-logn]` (fail closed).
+ * SHARED-ARENA meld is O(1) (a single root-link + a union alias, INDEPENDENT of |other|) and
+ * CONSUMES `other` (empty, size 0, DEAD -- any later op throws). `decreaseKey` operates TOWARD the
+ * heap's extreme (decrease for 'min', increase for 'max'); a move away fails closed. kind
+ * 'min' | 'max' is frozen at construction. Keys are finite numbers (typeof-guarded before coercion).
+ * forEach / iterator yield ids in UNSPECIFIED (forest) order. Fixed capacity: a full arena throws.
+ * Every hot op allocates zero bytes.
+ */
+export class PairingHeap {
+    /** @param capacity arena-wide node budget (and the id domain [0, capacity)); integer in [1, 2^31-1]. @param kind frozen polarity (default 'min'). */
+    constructor(capacity: number, kind?: 'min' | 'max');
+
+    /** Build `count` empty heaps sharing ONE backing arena (pool + columns + arena-wide reverse map), so any two can meld in O(1). */
+    static arena(capacity: number, kind: 'min' | 'max', count: number): PairingHeap[];
+
+    /** Live entry count (0 once consumed by a meld). */
+    readonly size: number;
+    /** The fixed arena-wide capacity this heap draws from. */
+    readonly capacity: number;
+    /** The frozen heap polarity. */
+    readonly kind: 'min' | 'max';
+
+    /** Insert id (unique arena-wide) with priority key. Throws on non-finite key, out-of-range id, a live-anywhere id, a full arena, or a consumed heap. */
+    push(id: number, key: number): void;
+    /** Remove and return the id at the extreme key, or undefined if empty. Consumed heap throws. */
+    popMin(): number | undefined;
+    /** The id at the extreme key, or undefined if empty. Consumed heap throws. */
+    peekMin(): number | undefined;
+    /** The extreme key, or undefined if empty. Consumed heap throws. */
+    peekMinKey(): number | undefined;
+    /** Reprioritize `id` TOWARD the heap's extreme. Throws on non-finite key, out-of-range/non-member id, a sibling-owned id, a move away from the extreme, or a consumed heap. */
+    decreaseKey(id: number, newKey: number): void;
+    /** Remove `id` from this heap; true if present, false if absent. Throws on out-of-range id, a sibling-owned id, or a consumed heap. */
+    remove(id: number): boolean;
+    /** True iff `id` is currently in THIS heap. Out-of-range id / consumed heap throw. */
+    has(id: number): boolean;
+    /** The key of `id` in THIS heap, or undefined if absent / sibling-owned. Out-of-range id / consumed heap throw. */
+    keyOf(id: number): number | undefined;
+    /** Meld `other` into this heap in O(1); CONSUMES other. Non-PairingHeap arg, self, cross-arena, kind mismatch, or a consumed operand throw. */
+    meld(other: PairingHeap): this;
+    /** Empty this heap, returning only its own nodes to the shared pool. Consumed heap throws. */
+    clear(): this;
+    /** Visit every live (id, key) pair in unspecified (forest) order (NOT sorted). */
+    forEach(fn: (id: number, key: number, heap: PairingHeap) => void): void;
+    /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
+    [Symbol.iterator](): IterableIterator<number>;
+}

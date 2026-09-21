@@ -1,9 +1,9 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.9.0 nine members have
+avoid, and how to measure the logarithm yourself. At v0.10.0 ten members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap, SplayTree and BinomialHeap -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree, BinomialHeap and PairingHeap -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -63,7 +63,11 @@ START -- what do you need?
 |   the root -- amortized, no order statistics needed?         -> SplayTree (am)    [v0.8.0]
 |
 +-- Repeated min (or max) + insert, AND you must MELD two
-    priority queues into one in O(log n) (not O(n) rebuild)?   -> BinomialHeap (wc) [v0.9.0]
+|   priority queues into one in O(log n) (not O(n) rebuild)?   -> BinomialHeap (wc) [v0.9.0]
+|
++-- Repeated min (or max) + insert, AND you must DECREASE-KEY /
+    remove an arbitrary element by id, AND/OR MELD in O(1)
+    (e.g. a Dijkstra / Prim relaxation loop)?                  -> PairingHeap (am)  [v0.10.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -77,6 +81,15 @@ rebuild. BinomialHeap is also non-addressable (opaque id, no `decreaseKey` /
 `remove`); its meld requires both heaps to share an arena (`BinomialHeap.arena(...)`)
 and CONSUMES the argument. Pick BinaryHeap/MinMaxHeap over BinomialHeap when you never
 meld: they are faster per op (a flat array beats a pointer-chased forest).
+**PairingHeap** is the ADDRESSABLE mergeable heap: like BinomialHeap it melds two
+arena-sharing heaps (and CONSUMES the argument), but its meld is **O(1)** (better than
+BinomialHeap's O(log n)) AND it supports **`decreaseKey` / `remove` / `has` / `keyOf`
+by an arena-wide-unique id** -- the reprioritize-by-id BinomialHeap declines to carry.
+Pick PairingHeap over BinomialHeap when you need decrease-key or an O(1) meld (the
+graph-algorithm case); pick BinomialHeap over PairingHeap when you never reprioritize
+and want a smaller per-node footprint (no reverse map / owner / alias). `decreaseKey`
+moves TOWARD the extreme only (decrease for 'min', increase for 'max'); a move away
+fails closed. A `decreaseKey` / `remove` on a **sibling** heap's id fails closed.
 
 Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
 / range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
@@ -114,10 +127,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | BOTH min AND max + insert (a double-ended PQ) | MinMaxHeap | O(1) peekMin/peekMax, O(log n) push/popMin/popMax | 0.7.0 |
 | Ordered map with SKEWED / hot-key access (self-adjusting) | SplayTree | amortized O(log n) get/set/delete (a read splays) | 0.8.0 |
 | Priority queue you must MELD with another in O(log n) | BinomialHeap | O(1)-amortized push, O(log n) popMin/meld, O(1) peekMin | 0.9.0 |
+| Priority queue with DECREASE-KEY / remove by id, and/or O(1) MELD (graph algorithms) | PairingHeap | O(1) push/meld, amortized O(log n) popMin/decreaseKey/remove | 0.10.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's and BinomialHeap's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's and PairingHeap's are below).
 
 ---
 
@@ -485,6 +499,52 @@ because a binomial popMin chases scattered forest slots; see
 member (push / popMin / meld all worst-case), so NO max-single-op line. `node --expose-gc
 test/torture.mjs` proves push / popMin / meld / arena-churn / forEach at 0 B/op, and asserts
 conservation ACROSS MELD -- nodes move between root lists but never between pools.
+
+---
+
+## PairingHeap -- an ADDRESSABLE mergeable priority queue (decrease-key + O(1) meld)
+
+**Reach for it when** you need a priority queue that supports **`decreaseKey` / `remove` by
+id** AND/OR an **O(1) `meld`** -- the classic graph-algorithm heap. Canonical use: a
+**Dijkstra / Prim relaxation loop**, where each edge relaxation decreases a frontier node's
+key by its node id, and sub-frontiers are melded in O(1). `push` / `peekMin` / `peekMinKey` /
+`meld` are O(1); `popMin` / `decreaseKey` / `remove` are amortized O(log n). ids are UNIQUE
+ARENA-WIDE (integers in `[0, capacity)`); the reverse map is shared across every heap in the
+arena, so `decreaseKey(id)` / `remove(id)` / `has(id)` / `keyOf(id)` are addressable by id.
+`decreaseKey` moves TOWARD the extreme (decrease for 'min', increase for 'max'). `kind` is
+frozen at construction. To meld, both heaps must share ONE arena
+(`PairingHeap.arena(capacity, kind, count)`); a standalone `new PairingHeap(...)` owns its own
+arena.
+
+**Avoid it when:**
+
+- You never decrease-key / remove by id AND never meld. A single array-embedded heap is faster
+  per op (the witness slope shows it: ~22 ns/level vs BinaryHeap's ~9). Use **BinaryHeap** or
+  **MinMaxHeap**.
+- You meld but never reprioritize, and want a smaller per-node footprint. **BinomialHeap** has
+  no reverse map / owner / alias columns; pick it when the addressable surface is dead weight
+  (its meld is O(log n), PairingHeap's is O(1), so the trade is footprint vs meld cost).
+- You need an unrestricted `changeKey` (either direction) or a private (non-arena) id space per
+  heap. PairingHeap's `decreaseKey` moves TOWARD the extreme only, and its ids are unique
+  arena-wide; for an either-direction `changeKey` over a per-instance id space use **BinaryHeap**.
+- You need order statistics (`rank` / `select`) or an ordered scan (`successor` / range). A heap
+  answers only the extreme -- use **Treap** / **Scapegoat** or **SkipList**.
+- You reuse a melded-away heap, or touch a sibling heap's id. `a.meld(b)` CONSUMES `b` (empty,
+  dead -- every later op throws); `decreaseKey` / `remove` on an id owned by a live sibling heap
+  fails closed (an O(1) owner-tag check), never a silent cross-heap cut.
+
+**Measure it yourself:** `npm run witness` fits `popMin` (unlink the root, TWO-PASS combine its
+child list -- the pairing heap's tallest honest walk) against `nsPerOp = intercept +
+slope*log2(n)`; it must clear the shared R^2 floor (0.958) and sit inside its own band
+(`popMin [13.08, 30.52]` ns/level -- BETWEEN the array-embedded heaps and BinomialHeap, a single
+multi-way tree not a forest; 15-sample median 21.799; see
+[`decisions/0012-pairingheap.md`](./decisions/0012-pairingheap.md)), over the cache-resident
+`[2^11, 2^17]` sweep. The O(n) linear min-scan-and-splice foil must MISS the floor. AMORTIZED
+member: a single pop can fold a long child list, so the witness prints the MAX single popMin as a
+disclosure, never gated. `node --expose-gc test/torture.mjs` proves push / popMin / decreaseKey /
+remove / meld / arena-churn / forEach at 0 B/op (the two-pass combine is pointer-free, no temp
+array), and asserts conservation ACROSS MELD and across the addressable decreaseKey / remove paths
+-- nodes move between root lists but never between pools.
 
 ---
 
