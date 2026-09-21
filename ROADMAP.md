@@ -880,7 +880,7 @@ depend on the D-01 NodePool being bound (SkipList).
 - **MinMaxHeap (v0.9.0)** -- double-ended PQ in ONE array-embedded heap
   (alternating min/max levels, Atkinson et al. 1986): both extremes in O(log n),
   no second structure. Naturally node-free; a clean second heap-family witness.
-- **SplayTree (v0.10.0)** -- self-adjusting BST, amortized O(log n), the working-
+- **SplayTree (v0.8.0)** -- self-adjusting BST, amortized O(log n), the working-
   set specialist and the honest amortized-with-a-real-single-op-spike hero.
   Deterministic (no RNG). NodePool.
 

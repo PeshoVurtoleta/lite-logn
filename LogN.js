@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.11.0';
+export const VERSION = '0.12.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -4941,5 +4941,343 @@ export class FibonacciHeap {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] FibonacciHeap arena full (capacity ' + this._cap + ')');
+    }
+}
+
+/**
+ * Max Fenwick2D backing cell count: `(rows + 1) * (cols + 1)` must fit a single
+ * `Float64Array` AND stay a positive safe int32 index for the flat `r' * w + c'`
+ * address arithmetic, so the PRODUCT is capped at `0x7FFFFFFF` (2^31 - 1). The
+ * ceiling is checked with a FLOAT multiply -- NEVER `| 0` -- because `| 0` would
+ * wrap a large product to a small or negative int that sails through the door
+ * (fail OPEN); the float product is exact up to 2^53, well past the ceiling, so a
+ * genuine overflow fails CLOSED. Named distinctly to avoid a module-scope
+ * redeclaration of the identically-valued 1D Fenwick / BinaryHeap constant.
+ */
+const F2D_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A 2D Fenwick tree (2D Binary Indexed Tree): a point-update AND a rectangle-sum,
+ * BOTH O(log^2 n), over a SINGLE flat `Float64Array` -- the lowest-set-bit walk
+ * (`i & -i`) NESTED over two dimensions. The second dimension is not free: the
+ * price is a SQUARED log (one i&-i climb per dimension), and the witness proves
+ * the square is straight (a line on a `(log2 n)^2` axis, not `log2 n`).
+ *
+ * Layout: one flat `Float64Array((rows + 1) * (cols + 1))`, 1-based in BOTH dims.
+ * Public coordinates are 0-based `(r, c)` in `[0, rows) x [0, cols)`; each maps to
+ * `(r + 1, c + 1)` at flat index `(r + 1) * (cols + 1) + (c + 1)`. Row 0 and col 0
+ * are the unused identity sentinels -- never a legal cell (null is not zero: a 0
+ * slot means "no cell", not "the element at 0"). Every cell holds, spread across a
+ * logarithmic set of positions, a piece of the 2D prefix sum.
+ *
+ * The two nested walks are the whole structure:
+ *   - `update(r, c, delta)` CLIMBS both dims: from `i = r + 1` step `i += i & -i`
+ *     (until `i > rows`), and inside from `j = c + 1` step `j += j & -j` (until
+ *     `j > cols`), one `_t` touch per (i, j) level pair.
+ *   - `_pfx(r, c)` DESCENDS both dims: from `i = r + 1` step `i -= i & -i` (until
+ *     `i == 0`), and inside from `j = c + 1` step `j -= j & -j`, summing one cell
+ *     per level pair. `_pfx(-1, .)` and `_pfx(., -1)` are 0 by a `k = 0` loop-skip
+ *     -- never an index `-1` read (the clean empty-prefix base case).
+ * Both take at most `log2(rows) * log2(cols)` steps -- the squared logarithm.
+ *
+ * Rectangle sum uses 2D inclusion-exclusion:
+ *   `rectSum(r1,c1,r2,c2) = P(r2,c2) - P(r1-1,c2) - P(r2,c1-1) + P(r1-1,c1-1)`,
+ * inlined as four nested descents; when `r1 == 0` or `c1 == 0` the corresponding
+ * term collapses to 0 via the `k = 0` loop-skip (never a `prefix(-1)` call).
+ *
+ * SUM-ONLY: the value is an invertible group (addition), exactly the 1D Fenwick
+ * limitation lifted to 2D. Rectangle MIN / MAX / GCD are NOT supported -- they need
+ * a future 2D SegmentTree and are the DOCUMENTED not-for. Values are `Float64`;
+ * deltas and values may be ANY finite number (negatives included). NaN / +-Infinity
+ * / non-number fail closed (typeof-guarded BEFORE coercion). WORST-CASE member (a
+ * BIT has no randomization or amortization); every hot op allocates zero bytes.
+ *
+ * Fixed dimensions: `rows` and `cols` are frozen at construction; there is no grow.
+ * Every out-of-range coordinate and every non-finite value is a hard `[lite-logn]`
+ * throw. See decisions/0014-fenwick2d.md.
+ */
+export class Fenwick2D {
+    /**
+     * @param {number} rows  row count; integer >= 1.
+     * @param {number} cols  column count; integer >= 1.
+     */
+    constructor(rows, cols) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof rows !== 'number' || !Number.isInteger(rows) || rows < 1) {
+            throw new RangeError(
+                '[lite-logn] Fenwick2D rows must be an integer >= 1, got ' + String(rows));
+        }
+        if (typeof cols !== 'number' || !Number.isInteger(cols) || cols < 1) {
+            throw new RangeError(
+                '[lite-logn] Fenwick2D cols must be an integer >= 1, got ' + String(cols));
+        }
+        // FLOAT product (never `| 0`): `| 0` would wrap a large product to a small /
+        // negative int and pass the door (fail OPEN). The float product is exact to
+        // 2^53, so a genuine overflow of the 2^31-1 cell ceiling fails CLOSED.
+        const cells = (rows + 1) * (cols + 1);
+        if (cells > F2D_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] Fenwick2D grid too large: (rows+1)*(cols+1) = ' + cells +
+                ' exceeds ' + F2D_MAX_CELLS);
+        }
+        this._r = rows;                       // row count (fixed)
+        this._c = cols;                       // column count (fixed)
+        this._w = cols + 1;                   // row stride (1-based cols + sentinel col 0)
+        this._t = new Float64Array(cells);    // flat (rows+1) x (cols+1); row 0 / col 0 sentinels
+    }
+
+    /** Row count this tree was sized for. O(1). */
+    get rows() { return this._r; }
+
+    /** Column count this tree was sized for. O(1). */
+    get cols() { return this._c; }
+
+    /**
+     * Unvalidated 2D prefix sum over `[0..r] x [0..c]` (public 0-based coords). The
+     * nested `i & -i` descent -- the whole structure, reused (inlined) by prefix /
+     * rectSum / at / set. `r === -1` or `c === -1` yields 0 by a `k = 0` loop-skip
+     * (never a `_t[-1]` read). PRIVATE + hot: no validation, no allocation.
+     * @private
+     * @param {number} r  integer in [-1, rows)
+     * @param {number} c  integer in [-1, cols)
+     * @returns {number}
+     */
+    _pfx(r, c) {
+        const t = this._t, w = this._w;
+        let s = 0;
+        for (let i = r + 1; i > 0; i -= i & -i) {
+            const b = i * w;
+            for (let j = c + 1; j > 0; j -= j & -j) s += t[b + j];
+        }
+        return s;
+    }
+
+    /**
+     * Add `delta` to the cell at 0-based `(r, c)`. O(log^2 n): climb both dims by
+     * the lowest set bit, one `_t` touch per (i, j) level pair. Fails closed: a
+     * non-finite delta (typeof-guarded first) or an out-of-range coordinate throws.
+     * @param {number} r      integer in [0, rows)
+     * @param {number} c      integer in [0, cols)
+     * @param {number} delta  a finite number (may be negative)
+     * @returns {this}
+     */
+    update(r, c, delta) {
+        if (typeof delta !== 'number' || !Number.isFinite(delta)) return this._badDelta(delta);
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        const t = this._t, w = this._w, rows = this._r, cols = this._c;
+        for (let i = r + 1; i <= rows; i += i & -i) {
+            const b = i * w;
+            for (let j = c + 1; j <= cols; j += j & -j) t[b + j] += delta;
+        }
+        return this;
+    }
+
+    /**
+     * Sum of the rectangle `[0..r] x [0..c]` INCLUSIVE (the 2D prefix). O(log^2 n).
+     * `prefix(-1, .)` and `prefix(., -1)` are 0 (the empty-prefix base case); the
+     * valid domain is `[-1, rows) x [-1, cols)`. Out-of-range throws `[lite-logn]`.
+     * @param {number} r  integer in [-1, rows)
+     * @param {number} c  integer in [-1, cols)
+     * @returns {number}
+     */
+    prefix(r, c) {
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < -1 || r >= this._r) return this._badPrefixRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < -1 || c >= this._c) return this._badPrefixCol(c);
+        return this._pfx(r, c);
+    }
+
+    /**
+     * Sum of the rectangle `[r1..r2] x [c1..c2]` INCLUSIVE on all four edges, via 2D
+     * inclusion-exclusion `P(r2,c2) - P(r1-1,c2) - P(r2,c1-1) + P(r1-1,c1-1)`, with
+     * the four nested descents inlined (no `_pfx` call, no intermediate object).
+     * O(log^2 n). When `r1 == 0` the `P(r1-1,.)` terms are 0 by a `k = 0` loop-skip
+     * (the loop starts at `i = r1 = 0`), and likewise `c1 == 0` -- never a
+     * `prefix(-1)` / index `-1`. Fails closed: out-of-range or `r1 > r2` / `c1 > c2`.
+     * @param {number} r1  integer in [0, rows)
+     * @param {number} c1  integer in [0, cols)
+     * @param {number} r2  integer in [r1, rows)
+     * @param {number} c2  integer in [c1, cols)
+     * @returns {number}
+     */
+    rectSum(r1, c1, r2, c2) {
+        if (typeof r1 !== 'number' || !Number.isInteger(r1) || r1 < 0 || r1 >= this._r) return this._badRect(r1, c1, r2, c2);
+        if (typeof c1 !== 'number' || !Number.isInteger(c1) || c1 < 0 || c1 >= this._c) return this._badRect(r1, c1, r2, c2);
+        if (typeof r2 !== 'number' || !Number.isInteger(r2) || r2 < 0 || r2 >= this._r) return this._badRect(r1, c1, r2, c2);
+        if (typeof c2 !== 'number' || !Number.isInteger(c2) || c2 < 0 || c2 >= this._c) return this._badRect(r1, c1, r2, c2);
+        if (r1 > r2 || c1 > c2) return this._badRect(r1, c1, r2, c2);
+        const t = this._t, w = this._w;
+        let s = 0;
+        for (let i = r2 + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c2 + 1; j > 0; j -= j & -j) s += t[b + j]; } // + P(r2, c2)
+        for (let i = r1;     i > 0; i -= i & -i) { const b = i * w; for (let j = c2 + 1; j > 0; j -= j & -j) s -= t[b + j]; } // - P(r1-1, c2)
+        for (let i = r2 + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c1;     j > 0; j -= j & -j) s -= t[b + j]; } // - P(r2, c1-1)
+        for (let i = r1;     i > 0; i -= i & -i) { const b = i * w; for (let j = c1;     j > 0; j -= j & -j) s += t[b + j]; } // + P(r1-1, c1-1)
+        return s;
+    }
+
+    /**
+     * The single cell at 0-based `(r, c)` = the 1x1 rectangle sum, inlined as the
+     * four inclusion-exclusion descents. O(log^2 n), zero allocation. Out-of-range
+     * throws `[lite-logn]`.
+     * @param {number} r  integer in [0, rows)
+     * @param {number} c  integer in [0, cols)
+     * @returns {number}
+     */
+    at(r, c) {
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        const t = this._t, w = this._w;
+        let s = 0;
+        for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) s += t[b + j]; }
+        for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) s -= t[b + j]; }
+        for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) s -= t[b + j]; }
+        for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) s += t[b + j]; }
+        return s;
+    }
+
+    /**
+     * Set the cell at 0-based `(r, c)` to `value` (absolute), via `update(r, c,
+     * value - at(r, c))`, inlined so the read and the climb share one validation and
+     * allocate nothing. O(log^2 n). Fails closed: a non-finite value (typeof-guarded
+     * first) or an out-of-range coordinate throws `[lite-logn]`.
+     * @param {number} r      integer in [0, rows)
+     * @param {number} c      integer in [0, cols)
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(r, c, value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
+        if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        const t = this._t, w = this._w, rows = this._r, cols = this._c;
+        let cur = 0;                                            // = at(r, c)
+        for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) cur += t[b + j]; }
+        for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) cur -= t[b + j]; }
+        for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cur -= t[b + j]; }
+        for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cur += t[b + j]; }
+        const delta = value - cur;
+        for (let i = r + 1; i <= rows; i += i & -i) { const b = i * w; for (let j = c + 1; j <= cols; j += j & -j) t[b + j] += delta; }
+        return this;
+    }
+
+    /** Zero every cell in place, keeping the fixed dimensions. O(rows*cols) cold. */
+    clear() {
+        this._t.fill(0);
+        return this;
+    }
+
+    /**
+     * Visit every cell as `(value, r, c, fenwick2d)` in row-major ascending order
+     * (`r` outer, `c` inner). O(rows*cols*log^2 n) COLD scan (each cell re-derives
+     * its value via the `at` inclusion-exclusion); allocation-free in the loop body
+     * (pass a hoisted callback).
+     * @param {(value:number, r:number, c:number, fenwick2d:Fenwick2D)=>void} fn
+     */
+    forEach(fn) {
+        const rows = this._r, cols = this._c;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) fn(this.at(r, c), r, c, this);
+        }
+    }
+
+    /**
+     * O(rows*cols) LINEAR bulk build from a 2D `matrix` (rows of equal-length finite-
+     * number array-likes). Load each value into its own cell, then propagate in TWO
+     * SEPARATE passes -- FIRST along the columns within each row, THEN along the rows
+     * -- each a 1D linear Fenwick build lifted to its dimension. The two passes must
+     * stay SEPARATE: fusing them into one nested loop DOUBLE-COUNTS. COLD path; fails
+     * closed on a non-2D-array-like or any non-finite entry before the tree is usable.
+     * @param {ArrayLike<ArrayLike<number>>} matrix  rows of finite numbers
+     * @returns {Fenwick2D}
+     */
+    static build(matrix) {
+        if (matrix == null || typeof matrix.length !== 'number') {
+            throw new TypeError('[lite-logn] Fenwick2D.build needs a 2D array-like (rows of finite numbers)');
+        }
+        const rows = matrix.length;
+        const row0 = matrix[0];
+        if (row0 == null || typeof row0.length !== 'number') {
+            throw new TypeError('[lite-logn] Fenwick2D.build needs a 2D array-like (rows of finite numbers)');
+        }
+        const cols = row0.length;
+        const f = new Fenwick2D(rows, cols);      // validates dims + the cell-product ceiling
+        const t = f._t, w = f._w;
+        for (let r = 0; r < rows; r++) {
+            const row = matrix[r];
+            if (row == null || typeof row.length !== 'number' || row.length !== cols) {
+                throw new TypeError('[lite-logn] Fenwick2D.build rows must be equal-length array-likes');
+            }
+            const base = (r + 1) * w;
+            for (let c = 0; c < cols; c++) {
+                const v = row[c];
+                if (typeof v !== 'number' || !Number.isFinite(v)) {
+                    throw new TypeError(
+                        '[lite-logn] Fenwick2D.build value must be a finite number, got ' + String(v));
+                }
+                t[base + c + 1] = v;              // seed each cell with its own value
+            }
+        }
+        // Pass 1: propagate along COLS within each row (each row is a 1D linear build).
+        for (let i = 1; i <= rows; i++) {
+            const base = i * w;
+            for (let j = 1; j <= cols; j++) {
+                const j2 = j + (j & -j);
+                if (j2 <= cols) t[base + j2] += t[base + j];
+            }
+        }
+        // Pass 2 (SEPARATE): propagate along ROWS. Fusing this into Pass 1 double-counts.
+        for (let j = 1; j <= cols; j++) {
+            for (let i = 1; i <= rows; i++) {
+                const i2 = i + (i & -i);
+                if (i2 <= rows) t[i2 * w + j] += t[i * w + j];
+            }
+        }
+        return f;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badRow(r) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D row must be an integer in [0, ' + this._r + '), got ' + String(r));
+    }
+
+    /** @private */
+    _badCol(c) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D col must be an integer in [0, ' + this._c + '), got ' + String(c));
+    }
+
+    /** @private */
+    _badPrefixRow(r) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D prefix row must be an integer in [-1, ' + this._r + '), got ' + String(r));
+    }
+
+    /** @private */
+    _badPrefixCol(c) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D prefix col must be an integer in [-1, ' + this._c + '), got ' + String(c));
+    }
+
+    /** @private */
+    _badRect(r1, c1, r2, c2) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D rectSum needs integers 0 <= r1 <= r2 < ' + this._r +
+            ' and 0 <= c1 <= c2 < ' + this._c + ', got r1=' + String(r1) + ' c1=' + String(c1) +
+            ' r2=' + String(r2) + ' c2=' + String(c2));
+    }
+
+    /** @private */
+    _badDelta(delta) {
+        throw new TypeError(
+            '[lite-logn] Fenwick2D delta must be a finite number, got ' + String(delta));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] Fenwick2D value must be a finite number, got ' + String(value));
     }
 }

@@ -1,9 +1,9 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.11.0 eleven members have
+avoid, and how to measure the logarithm yourself. At v0.12.0 twelve members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap, SplayTree, BinomialHeap, PairingHeap and FibonacciHeap -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap and Fenwick2D -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -70,8 +70,11 @@ START -- what do you need?
 |   (e.g. a Dijkstra / Prim relaxation loop)?                  -> PairingHeap (am)  [v0.10.0]
 |
 +-- Same as PairingHeap, but you want the textbook-optimal
-    O(1)-amortized decrease-key bound ON PAPER (a teaching /
-    analysis reference) and accept slower real wall-clock?     -> FibonacciHeap (am) [v0.11.0]
+|   O(1)-amortized decrease-key bound ON PAPER (a teaching /
+|   analysis reference) and accept slower real wall-clock?     -> FibonacciHeap (am) [v0.11.0]
+|
++-- RECTANGLE SUMS over a 2D grid that stay correct under
+    point updates (2D prefix sums; SUM only, not min/max)?     -> Fenwick2D (wc)    [v0.12.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -143,10 +146,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | Priority queue you must MELD with another in O(log n) | BinomialHeap | O(1)-amortized push, O(log n) popMin/meld, O(1) peekMin | 0.9.0 |
 | Priority queue with DECREASE-KEY / remove by id, and/or O(1) MELD (graph algorithms) | PairingHeap | O(1) push/meld, amortized O(log n) popMin/decreaseKey/remove | 0.10.0 |
 | Same addressable + mergeable surface, textbook-optimal bounds ON PAPER (teaching / analysis; slower wall-clock) | FibonacciHeap | O(1)-amortized push/meld/decreaseKey, O(log n)-amortized popMin/remove | 0.11.0 |
+| 2D grid RECTANGLE SUMS under point updates (2D prefix sums; SUM only) | Fenwick2D | O(log^2 n) update / prefix / rectSum | 0.12.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's and FibonacciHeap's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's and Fenwick2D's are below).
 
 ---
 
@@ -610,6 +614,40 @@ remove / meld / arena-churn / forEach at 0 B/op (the cascade is iterative, no re
 bucket is preallocated and cleared per call, never reallocated), and asserts conservation ACROSS MELD
 and across the addressable decreaseKey / remove paths -- nodes move between root lists but never
 between pools.
+
+---
+
+## Fenwick2D -- 2D rectangle sums that stay correct under point updates
+
+**Reach for it when** you have a mutable 2D grid of counts / weights and need axis-aligned
+RECTANGLE totals under point updates: heatmaps, 2D prefix analytics, an integral image that keeps
+changing, a scoreboard over a coordinate plane. Fenwick2D lifts the 1D Fenwick's lowest-set-bit walk
+to a rectangle: `update(r, c, delta)` and `prefix(r, c)` (the 2D prefix `[0..r] x [0..c]`) are both
+O(log^2 n) = O(log rows * log cols), and `rectSum(r1, c1, r2, c2)` answers any axis-aligned rectangle
+in O(log^2 n) via 2D inclusion-exclusion. Dims are frozen at construction; the whole grid is ONE flat
+`Float64Array((rows+1)*(cols+1))`, zero allocation per op. Bulk-load a dense matrix with the O(rows*cols)
+`Fenwick2D.build(matrix)`.
+
+**Avoid it when:**
+
+- You need 2D range **min / max / gcd** (not sum). Fenwick2D is SUM-ONLY -- `rectSum` works only
+  because subtraction inverts addition, and min / max / gcd have no inverse. Those need a future 2D
+  SegmentTree; do NOT try to fake them on a BIT.
+- Your data is 1D. Use the 1D **Fenwick** (a rectangle collapses to a segment; the 2D machinery is
+  wasted overhead).
+- You key by value, not grid position, or you need `rank` / `select` / `changeKey`. Fenwick2D is
+  index-addressed (by `(r, c)`), not keyed -- use an ordered map (**Treap** / **Scapegoat** /
+  **SkipList**).
+- The grid never changes. If updates never happen, a plain precomputed 2D prefix-sum array answers
+  each query in O(1) -- Fenwick2D's O(log^2 n) query buys you nothing when nothing updates.
+
+**Measure it yourself:** `npm run witness` fits BOTH `update` and `rectSum` against the family's FIRST
+SQUARED-log axis, `nsPerOp = intercept + slope*(log2 n)^2` (its ops are O(log^2 n), not O(log n)); each
+must clear the shared R^2 floor (0.958) and sit inside its own band (`update [2.13, 4.96]`, `rectSum
+[2.90, 6.77]` ns per (log2 n)^2 unit; see [`decisions/0014-fenwick2d.md`](./decisions/0014-fenwick2d.md)),
+over exact power-of-two square sides `[2^5, 2^11]`, while each O(n^2)-per-op dense-rescan foil leaves
+the line. WORST-case member: every op is worst-case O(log^2 n), so there is no MAX-single-op line.
+`node --expose-gc test/torture.mjs` proves update / prefix / rectSum / at / set at 0 B/op.
 
 ---
 

@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.11.0
+Version: 0.12.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -21,8 +21,9 @@ line on that same axis, one added level per doubling of n).
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
 adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
 v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap; v0.11.0
-adds FibonacciHeap (the mergeable-heap arc's FINALE). The roster (one member per
-session, each landing append-only):
+adds FibonacciHeap (the mergeable-heap arc's FINALE); v0.12.0 adds Fenwick2D (the
+family's FIRST 2D structure). The roster (one member per session, each landing
+append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -186,6 +187,24 @@ session, each landing append-only):
   kind 'min' | 'max' frozen at construction; keys are finite numbers (typeof-guarded before
   coercion). forEach / [Symbol.iterator] yield ids in UNSPECIFIED (forest) order. Zero allocation
   on every hot op.
+
+- Fenwick2D (v0.12.0) -- the family's FIRST 2D / multi-dimensional member: a 2D Binary Indexed Tree
+  that lifts the 1D Fenwick's lowest-set-bit walk to a rectangle. BOTH point-update AND 2D-prefix
+  (and therefore arbitrary axis-aligned RECTANGLE sums via inclusion-exclusion) in O(log^2 n) =
+  O(log rows * log cols) over a SINGLE flat `Float64Array((rows+1)*(cols+1))` -- row 0 / col 0 the
+  unused identity sentinels, 1-based internally, 0-based public coords. update climbs BOTH dims by
+  `i & -i` (an outer rows loop, an inner cols loop, one `_t` touch per (i, j) level pair); prefix
+  descends both dims; rectSum inlines the 2D inclusion-exclusion `P(r2,c2) - P(r1-1,c2) - P(r2,c1-1)
+  + P(r1-1,c1-1)` (r1 == 0 / c1 == 0 zero their terms by a k = 0 loop-skip -- never a prefix(-1)
+  read). Dims frozen at ctor; `F2D_MAX_CELLS = 0x7FFFFFFF` caps (rows+1)*(cols+1), guarded by a
+  FLOAT multiply (never `| 0`, which would wrap a large product to a small int and fail OPEN).
+  Fenwick2D.build(matrix) is O(rows*cols) LINEAR in TWO SEPARATE passes (cols within each row, then
+  rows) -- fusing them double-counts. Values are finite numbers (negatives allowed; typeof-guarded
+  before coercion; NaN / +-Infinity / non-number / Symbol / BigInt fail closed). SUM-ONLY and
+  index-addressed (the 1D Fenwick's boundary, lifted): deliberately NO 2D min / max / gcd (a BIT has
+  no inverse for them -- a future 2D SegmentTree) and NO changeKey / rank / select. WORST-CASE (no
+  max-single-op line). This member's witness is the family's FIRST on a SQUARED-log axis
+  ((log2 n)^2). Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -475,6 +494,30 @@ session, each landing append-only):
   - `size` / `capacity` / `kind` getters; `clear()` -> this (frees only THIS heap's own nodes to the
     shared pool); `forEach(fn)` and `[Symbol.iterator]()` yield live ids in UNSPECIFIED (forest)
     order -- NOT sorted / pop order. Consumed heap throws on clear / forEach / iterate.
+- `Fenwick2D` -- class. A 2D Fenwick tree (2D Binary Indexed Tree): BOTH point-update AND
+  2D-prefix / rectangle-sum in O(log^2 n) over a single flat `Float64Array((rows+1)*(cols+1))` via
+  the NESTED lowest-set-bit walk (`i & -i` on both dims). Public coords 0-based in
+  [0, rows) x [0, cols); internally 1-based (row 0 / col 0 the unused identity sentinels). Values
+  are finite numbers (negatives allowed); NaN / +-Infinity / non-number fail closed. SUM-ONLY and
+  index-addressed (no 2D min / max / gcd, no changeKey / rank / select).
+  - `new Fenwick2D(rows, cols)` -- rows, cols integers >= 1, frozen at ctor. Allocates one
+    `Float64Array((rows+1)*(cols+1))`, zero-initialized. Throws when (rows+1)*(cols+1) exceeds
+    `F2D_MAX_CELLS` (2^31-1), guarded by a float multiply (never `| 0`).
+  - `rows` / `cols` getters. O(1).
+  - `update(r, c, delta)` -> this. Add delta at 0-based (r, c) (climb both dims by `i & -i`); delta
+    must be a finite number (typeof-guarded first); out-of-range coord throws.
+  - `prefix(r, c)` -> number. Sum of the rectangle [0..r] x [0..c] INCLUSIVE. `prefix(-1, .)` and
+    `prefix(., -1)` are 0 (the empty-prefix base case); valid domain [-1, rows) x [-1, cols).
+  - `rectSum(r1, c1, r2, c2)` -> number. Sum of [r1..r2] x [c1..c2] INCLUSIVE on all four edges,
+    via 2D inclusion-exclusion; throws on out-of-range or r1 > r2 / c1 > c2.
+  - `at(r, c)` -> number. The single cell = the 1x1 rectangle sum.
+  - `set(r, c, value)` -> this. Set cell (r, c) to value (absolute), via update(r, c, value -
+    at(r, c)); value must be finite.
+  - `clear()` -> this (zero-fill, keep dims); `forEach(fn)` visits (value, r, c, fenwick2d) in
+    row-major ascending order (r outer, c inner).
+  - `Fenwick2D.build(matrix)` -> Fenwick2D. O(rows*cols) LINEAR bulk build from a 2D array-like in
+    TWO SEPARATE passes (cols within each row, then rows -- fusing them double-counts); fails closed
+    on a non-2D-array-like, ragged rows, or any non-finite entry.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The ten shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap'];
+/** The twelve shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D'];
 
-/** The fourteen gated D1 witness op-rows (member.op), in build order. */
+/** The sixteen gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -39,6 +39,7 @@ export const OP_ROWS = [
     'BinomialHeap.popMin',
     'PairingHeap.popMin',
     'FibonacciHeap.popMin',
+    'Fenwick2D.update', 'Fenwick2D.rectSum',
 ];
 
 /** The eight measurement dimensions. */
@@ -69,6 +70,7 @@ export const BASELINE = {
     BinomialHeap: 'linear-min-scan-and-splice',
     PairingHeap: 'linear-min-scan-and-splice',
     FibonacciHeap: 'linear-min-scan-and-splice',
+    Fenwick2D: '2d-prefix-rebuild/rect-scan',
 };
 
 /**
@@ -109,6 +111,9 @@ export const COUNTER_FOIL = {
     // neither the extreme, decreaseKey, nor meld, so there is no "faster but order-blind" O(1)
     // rival -- NA (the string, never 0).
     FibonacciHeap: NA,
+    // Fenwick2D is an index-addressed 2D range structure, not an ordered map; a Map cannot answer
+    // a rectangle sum at all, so there is no "faster but order-blind" O(1) rival -- NA (never 0).
+    Fenwick2D: NA,
 };
 
 /**
@@ -202,6 +207,13 @@ export const RATIONALE = {
             'HONESTLY it is OFTEN slower wall-clock than Pairing/Binary here (large constants); it is shipped ' +
             'for completeness. No Map order-tax counterpoint (a Map serves neither the extreme, decreaseKey, nor meld).',
     },
+    Fenwick2D: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a plain 2D array with an O(n^2) prefix-array rebuild per update (or a naive O(n^2) ' +
+            'rectangle scan per query) is the honest default before the 2D BIT -- one of point-update ' +
+            'OR rectangle-sum is always O(n^2) there. The 2D Fenwick buys BOTH at O(log^2 n). No Map ' +
+            'order-tax counterpoint (a Map cannot answer a rectangle sum at all).',
+    },
 };
 
 /**
@@ -231,7 +243,7 @@ export function baselineFor(member, dim) {
  */
 export function supportsKeyType(member, keyType) {
     if (!SUBJECTS.includes(member)) return false;
-    return keyType === 'int'; // all four members are numeric/integer substrates
+    return keyType === 'int'; // every member is a numeric/integer substrate (keys / indices / coords)
 }
 
 /**
@@ -252,7 +264,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (11 x 8 = 88 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (12 x 8 = 96 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -298,6 +310,11 @@ export const OLOGN_EXPECTED = 'O(log n) expected';
  *  subtree rebuild, so the per-op cost is O(log n) AMORTIZED, not per-op worst-case. This is
  *  a THIRD honesty class distinct from both worst-case and (randomized) expected. */
 export const OLOGN_AMORTIZED = 'O(log n) amortized';
+
+/** The SQUARED-log honesty class for a worst-case 2D BIT op -- a nested i&-i walk over TWO
+ *  dimensions is O(log^2 n) worst-case, NOT O(log n). Distinct from OLOGN_WORST so the second
+ *  dimension's squared-log price is never understated as a single log (Fenwick2D's honesty hook). */
+export const OLOGN2_WORST = 'O(log^2 n) worst-case';
 
 /**
  * The per-op honesty table, keyed `member.op`. Covers the 12 gated witness op-rows
@@ -349,6 +366,11 @@ export const OP_CLASS = Object.freeze({
     'FibonacciHeap.popMin': OLOGN_AMORTIZED,      // splice children + CONSOLIDATE the root list by degree (the gated row)
     'FibonacciHeap.decreaseKey': OLOGN_AMORTIZED, // cut the subtree + CASCADING cut up the parent chain
     'FibonacciHeap.remove': OLOGN_AMORTIZED,      // cut + cascade + splice-children consolidation
+    // Fenwick2D: a nested i&-i walk over TWO dimensions -> WORST-CASE O(log^2 n) (a deterministic
+    // BIT has no randomization / amortization). The SQUARED log is the honesty hook: the second
+    // dimension is not free, so these are OLOGN2_WORST, never the single-log OLOGN_WORST.
+    'Fenwick2D.update': OLOGN2_WORST,   // climb both dims: for each i&-i row level, an i&-i col climb
+    'Fenwick2D.rectSum': OLOGN2_WORST,  // 4 nested inclusion-exclusion descents (the gated query row)
 });
 
 // ===========================================================================
@@ -367,7 +389,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

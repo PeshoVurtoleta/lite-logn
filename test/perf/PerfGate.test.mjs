@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1099,6 +1099,77 @@ const fhMeldChurn = {
     statsOf(s) { return { grows: fhGrows(s) }; },
 };
 
+/** Fenwick2D's zero-alloc counter: its single flat backing buffer's byte length, fixed at
+ *  construction, so the delta across the window must be 0 even under the nested i&-i walks. */
+function f2Grows(s) { return s.f2._t.buffer.byteLength; }
+
+const F2SIDE = 128; // 128 x 128 = 16384 cells (= CAP scale)
+const F2MASK = F2SIDE - 1;
+
+/** A Fenwick2D prefilled to a full SIDE x SIDE grid with integer values. */
+function f2Fill() {
+    const f = new Fenwick2D(F2SIDE, F2SIDE);
+    for (let r = 0; r < F2SIDE; r++) for (let c = 0; c < F2SIDE; c++) f.update(r, c, (r * F2SIDE + c) & 0xffff);
+    return f;
+}
+
+/**
+ * update churn: each op climbs the nested `i & -i` walk over BOTH dims at a walking (r, c),
+ * balanced +/- so the running sums stay bounded. Zero allocation.
+ */
+const f2UpdateChurn = {
+    name: 'Fenwick2D update churn',
+    setup() { return { f2: f2Fill(), tick: 0 }; },
+    hot(s, n) {
+        const f = s.f2;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { f.update(t & F2MASK, (t >> 7) & F2MASK, (t & 1) ? 1 : -1); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: f2Grows(s) }; },
+};
+
+/**
+ * rectSum churn: each op folds a fixed-width rectangle (the four inclusion-exclusion descents),
+ * folded into an int32 accumulator. Zero allocation.
+ */
+const f2RectSumChurn = {
+    name: 'Fenwick2D rectSum churn',
+    setup() { return { f2: f2Fill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const f = s.f2;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const r = t & (F2MASK >> 1), c = (t >> 3) & (F2MASK >> 1);
+            acc = (acc + (f.rectSum(r, c, r + 20, c + 20) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: f2Grows(s) }; },
+};
+
+/**
+ * prefix / at / set mix: a 2D prefix descent, a single-cell `at`, and an absolute `set`, folded
+ * into an int32 accumulator, proving the flat backing buffer never grows. Zero allocation.
+ */
+const f2PrefixAtSetMix = {
+    name: 'Fenwick2D prefix/at/set mix (buffer never grows)',
+    setup() { return { f2: f2Fill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const f = s.f2;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const r = t & F2MASK, c = (t >> 7) & F2MASK;
+            acc = (acc + (f.prefix(r, c) | 0) + (f.at(r, c) | 0)) | 0;
+            f.set(r, c, t & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: f2Grows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1138,6 +1209,7 @@ zgcSuite({
         spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn,
         binhPopMinChurn, binhReadMix, binhMeldChurn,
         phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn,
-        fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn],
+        fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn,
+        f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix],
     mustFail: [teethMustFailAlloc],
 });

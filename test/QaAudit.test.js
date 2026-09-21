@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.11.0 at the FibonacciHeap release', () => {
-    assert.equal(VERSION, '0.11.0');
+test('VERSION is exactly 0.12.0 at the Fenwick2D release', () => {
+    assert.equal(VERSION, '0.12.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (11 members) --------
+// --- frozen export surface: VERSION + the shipped members (12 members) --------
 
-test('LogN.js exports exactly VERSION + the eleven members at v0.11.0 (adds FibonacciHeap)', () => {
+test('LogN.js exports exactly VERSION + the twelve members at v0.12.0 (adds Fenwick2D)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the eleven members incl FibonacciHeap)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the twelve members incl Fenwick2D)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -55,6 +55,7 @@ test('LogN.js exports exactly VERSION + the eleven members at v0.11.0 (adds Fibo
     assert.equal(typeof LogNModule.BinomialHeap, 'function');
     assert.equal(typeof LogNModule.PairingHeap, 'function');
     assert.equal(typeof LogNModule.FibonacciHeap, 'function');
+    assert.equal(typeof LogNModule.Fenwick2D, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -708,4 +709,55 @@ test('FibonacciHeap fails closed with a [lite-logn]-tagged throw on every coerci
     assert.equal(typeof h.rank, 'undefined', 'FibonacciHeap has no rank (not an ordered map)');
     assert.equal(typeof h.select, 'undefined', 'FibonacciHeap has no select (not an ordered map)');
     assert.equal(typeof h.successor, 'undefined', 'FibonacciHeap has no successor (not an ordered map)');
+});
+
+// --- Fenwick2D (v0.12.0): coercion + [lite-logn] fail-closed tag --------------
+
+test('Fenwick2D fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { Fenwick2D } = LogNModule;
+    // constructor: bad rows / cols (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, Symbol('x'), 3n]) {
+        assert.throws(() => new Fenwick2D(bad, 4), /\[lite-logn\]/, 'ctor rows ' + String(bad));
+        assert.throws(() => new Fenwick2D(4, bad), /\[lite-logn\]/, 'ctor cols ' + String(bad));
+    }
+    // INDEX CEILING: a dim pair whose (rows+1)*(cols+1) overflows the 2^31-1 cell ceiling fails
+    // CLOSED (a float multiply, never | 0 which would wrap a large product to a small int -> OPEN).
+    assert.throws(() => new Fenwick2D(0x40000000, 0x40000000), /\[lite-logn\]/, 'cell-product overflow');
+    assert.throws(() => new Fenwick2D(0x7FFFFFFF, 0x7FFFFFFF), /\[lite-logn\]/, 'cell-product overflow (max dims)');
+    const f = new Fenwick2D(8, 8);
+    // non-finite / non-number delta and value, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => f.update(0, 0, bad), /\[lite-logn\]/, 'update delta ' + String(bad));
+        assert.throws(() => f.set(0, 0, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+    }
+    // out-of-range coords on every coord-taking op
+    for (const bad of [-1, 8, 100, 1.5, NaN, '0', null, Symbol('i')]) {
+        assert.throws(() => f.update(bad, 0, 1), /\[lite-logn\]/, 'update r ' + String(bad));
+        assert.throws(() => f.update(0, bad, 1), /\[lite-logn\]/, 'update c ' + String(bad));
+        assert.throws(() => f.at(bad, 0), /\[lite-logn\]/, 'at r ' + String(bad));
+        assert.throws(() => f.at(0, bad), /\[lite-logn\]/, 'at c ' + String(bad));
+        assert.throws(() => f.set(bad, 0, 1), /\[lite-logn\]/, 'set r ' + String(bad));
+        assert.throws(() => f.rectSum(bad, 0, 7, 7), /\[lite-logn\]/, 'rectSum r1 ' + String(bad));
+        assert.throws(() => f.rectSum(0, bad, 7, 7), /\[lite-logn\]/, 'rectSum c1 ' + String(bad));
+        assert.throws(() => f.rectSum(0, 0, bad, 7), /\[lite-logn\]/, 'rectSum r2 ' + String(bad));
+        assert.throws(() => f.rectSum(0, 0, 7, bad), /\[lite-logn\]/, 'rectSum c2 ' + String(bad));
+    }
+    // prefix admits -1 on EACH dim (the empty-prefix base case) but rejects other sub-zero
+    assert.equal(f.prefix(-1, 5), 0);
+    assert.equal(f.prefix(5, -1), 0);
+    assert.equal(f.prefix(-1, -1), 0);
+    assert.throws(() => f.prefix(-2, 0), /\[lite-logn\]/);
+    assert.throws(() => f.prefix(0, -2), /\[lite-logn\]/);
+    assert.throws(() => f.prefix(8, 0), /\[lite-logn\]/);
+    // rectSum r1 > r2 / c1 > c2 fail closed
+    assert.throws(() => f.rectSum(5, 0, 2, 7), /\[lite-logn\]/);
+    assert.throws(() => f.rectSum(0, 5, 7, 2), /\[lite-logn\]/);
+    // build fails closed on non-2D-array-like / ragged rows / non-finite entry
+    assert.throws(() => Fenwick2D.build(null), /\[lite-logn\]/);
+    assert.throws(() => Fenwick2D.build([1, 2, 3]), /\[lite-logn\]/);          // rows not array-like
+    assert.throws(() => Fenwick2D.build([[1, 2], [3]]), /\[lite-logn\]/);      // ragged rows
+    assert.throws(() => Fenwick2D.build([[1, NaN], [3, 4]]), /\[lite-logn\]/); // non-finite entry
+    // Fenwick2D is index-addressed SUM-ONLY: deliberately NO min/max/gcd, no changeKey/rank/select.
+    assert.equal(typeof f.rank, 'undefined', 'Fenwick2D has no rank (sum-only range structure)');
+    assert.equal(typeof f.select, 'undefined', 'Fenwick2D has no select (sum-only range structure)');
 });

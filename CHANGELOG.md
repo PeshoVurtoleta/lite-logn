@@ -6,6 +6,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-21
+
+### Added
+
+- **Fenwick2D** -- the twelfth member and the family's FIRST 2D / multi-dimensional structure: a 2D
+  Binary Indexed Tree that lifts the 1D Fenwick's lowest-set-bit walk (`i & -i`) to a rectangle.
+  BOTH point-`update` AND 2D-`prefix` (and therefore arbitrary axis-aligned RECTANGLE sums via
+  inclusion-exclusion) in O(log^2 n) = O(log rows * log cols) over a SINGLE flat
+  `Float64Array((rows+1)*(cols+1))` (row 0 / col 0 the unused identity sentinels; 1-based
+  internally, 0-based public coords). Surface: `update` / `prefix` / `rectSum` / `at` / `set` /
+  `clear` / `forEach`, `rows` / `cols` getters, and the static `Fenwick2D.build(matrix)`. Values
+  are finite numbers (negatives allowed; typeof-guarded before coercion; NaN / +-Infinity /
+  non-number / Symbol / BigInt fail closed). See `decisions/0014-fenwick2d.md`.
+- **Flat SoA layout + nested `i & -i` (D-F2-1).** `update` climbs BOTH dims by the lowest set bit
+  (an outer rows loop, an inner cols loop, one `_t` touch per (i, j) level pair); `prefix` descends
+  both. Row stride `_w = cols + 1`. No pointers, no per-op allocation.
+- **The product-overflow door is a FLOAT multiply, never `| 0` (D-F2-2).** `F2D_MAX_CELLS`
+  (`0x7FFFFFFF`) caps `(rows + 1) * (cols + 1)`. The guard computes the product as a JS float
+  (exact to 2^53) and throws when it exceeds the ceiling -- `| 0` would wrap a large product to a
+  small / negative int32 and PASS (fail OPEN), handing back a degenerate zero-cell tree. The
+  adversarial case `rows+1 = cols+1 = 65536` (true product 2^32 > 2^31-1, but `(2**32) | 0 === 0`)
+  is pinned in the boundary suite.
+- **Two-pass LINEAR build + rectSum base case (D-F2-3).** `Fenwick2D.build(matrix)` is
+  O(rows*cols): seed each cell, then propagate in TWO SEPARATE passes (cols within each row, THEN
+  rows). Fusing them into one nested loop DOUBLE-COUNTS -- the behavioral suite proves `build`
+  equals the same cells inserted by repeated `update`. `rectSum` inlines the 2D inclusion-exclusion
+  `P(r2,c2) - P(r1-1,c2) - P(r2,c1-1) + P(r1-1,c1-1)`; when `r1 == 0` / `c1 == 0` the `P(-1, .)`
+  terms vanish by a `k = 0` loop-skip (never a `prefix(-1)` / `_t[-1]` read).
+- **SUM-ONLY, index-addressed (D-F2-3/4, the 1D Fenwick's boundary lifted).** Like the 1D Fenwick,
+  rectSum works ONLY because subtraction inverts addition -- there is deliberately NO 2D min / max /
+  gcd (a BIT has no inverse for them; a future 2D SegmentTree owns those) and NO changeKey / rank /
+  select. WORST-CASE member: no max-single-op line.
+
+### Verified
+
+- **Witness (D-F2-4) -- the family's FIRST SQUARED-log axis.** Fenwick2D's ops are O(log^2 n), so
+  its witness lane fits `nsPerOp = intercept + slope * (log2 n)^2` via a per-lane `xOf` axis hook
+  added to both `test/witness.mjs` and `benchmark/Dimensions.mjs` (default `xOf = Math.log2` keeps
+  every prior lane BYTE-IDENTICAL). Two ops are gated on the squared-log axis over exact power-of-two
+  SQUARE SIDES 2^5..2^11, both inheriting the FROZEN family R^2 floor 0.958: `update` slope band
+  `[2.13, 4.96]` (median-of-fits, median 3.542 x `[0.6, 1.4]`) and `rectSum` slope band
+  `[2.90, 6.77]` (median 4.832 x `[0.6, 1.4]`). Each op's O(n^2)-per-op FOIL (a dense rectangle
+  rescan) leaves the squared-log line. The prior eleven members stay ON-LINE / unchanged.
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the update / prefix / rectSum / at /
+  set lanes, gc major = 0, the deliberately-allocating control lane still non-zero (teeth),
+  conservation / leak clean. `npm run test:perf` -- `grows === 0` on every Fenwick2D scenario.
+
+### Notes
+
+- `LogN.js` gains `F2D_MAX_CELLS` + the `Fenwick2D` class, appended after FibonacciHeap; the prior
+  ELEVEN classes stay BYTE-IDENTICAL (only the `VERSION` const changes above the append point).
+  Version bumped to 0.12.0 across `package.json`, `LogN.js`, and `llms.txt`. See
+  `decisions/0014-fenwick2d.md`.
+
 ## [0.11.0] - 2026-09-21
 
 ### Added

@@ -537,3 +537,43 @@ export class FibonacciHeap {
     /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
     [Symbol.iterator](): IterableIterator<number>;
 }
+
+/**
+ * A 2D Fenwick tree (2D Binary Indexed Tree): a point-update AND a rectangle-sum,
+ * BOTH O(log^2 n), over a single flat Float64Array((rows+1)*(cols+1)) via the
+ * i & -i lowest-set-bit walk NESTED over two dimensions. Public coordinates are
+ * 0-based (r, c) in [0, rows) x [0, cols); row 0 / col 0 are internal sentinels.
+ * rectSum(r1,c1,r2,c2) is INCLUSIVE on all four edges (2D inclusion-exclusion);
+ * prefix(r, c) is the rectangle [0..r] x [0..c] INCLUSIVE (prefix(-1, .) / prefix
+ * (., -1) === 0). SUM-ONLY (an invertible group): rectangle min/max/gcd are NOT
+ * supported. Values are finite numbers; NaN / +-Infinity / non-number fail closed.
+ * Dimensions are fixed at construction. Every hot op allocates zero bytes.
+ */
+export class Fenwick2D {
+    /** @param rows row count; integer >= 1. @param cols column count; integer >= 1.
+     *  (rows+1)*(cols+1) must be <= 2^31-1 (checked with a float multiply). */
+    constructor(rows: number, cols: number);
+
+    /** Row count this tree was sized for. */
+    readonly rows: number;
+    /** Column count this tree was sized for. */
+    readonly cols: number;
+
+    /** Add delta at 0-based (r, c). O(log^2 n). Non-finite delta / out-of-range coord throws. */
+    update(r: number, c: number, delta: number): this;
+    /** Sum of the rectangle [0..r] x [0..c] inclusive (prefix(-1, .) / prefix(., -1) === 0). O(log^2 n). Out-of-range throws. */
+    prefix(r: number, c: number): number;
+    /** Sum of [r1..r2] x [c1..c2] inclusive on all four edges (2D inclusion-exclusion). O(log^2 n). r1 > r2 / c1 > c2 throws. */
+    rectSum(r1: number, c1: number, r2: number, c2: number): number;
+    /** The single cell at (r, c) = its 1x1 rectangle sum. O(log^2 n). Out-of-range throws. */
+    at(r: number, c: number): number;
+    /** Set the cell at (r, c) to value (absolute). O(log^2 n). Non-finite value throws. */
+    set(r: number, c: number, value: number): this;
+    /** Zero every cell in place, keeping dimensions. */
+    clear(): this;
+    /** Visit every cell as (value, r, c, fenwick2d) in row-major ascending order. */
+    forEach(fn: (value: number, r: number, c: number, fenwick2d: Fenwick2D) => void): void;
+
+    /** O(rows*cols) linear bulk build from a 2D array-like of finite numbers (equal-length rows). */
+    static build(matrix: ArrayLike<ArrayLike<number>>): Fenwick2D;
+}
