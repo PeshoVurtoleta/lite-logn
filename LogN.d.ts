@@ -483,3 +483,57 @@ export class PairingHeap {
     /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
     [Symbol.iterator](): IterableIterator<number>;
 }
+
+/**
+ * A Fibonacci heap: the mergeable-heap arc's FINALE -- the textbook-optimal addressable + mergeable
+ * priority queue whose push / meld / decreaseKey are O(1) AMORTIZED and popMin / remove O(log n)
+ * AMORTIZED, reached by a lazy forest of heap-ordered trees, a CASCADING-cut decreaseKey governed by
+ * a per-node MARK bit, and a degree-CONSOLIDATING popMin. Same ADDRESSABLE, ARENA-WIDE-UNIQUE-id
+ * contract as PairingHeap: ids are unique integers in [0, capacity); the reverse map is shared across
+ * every heap in the arena; a slot's owner tag makes a sibling-owned decreaseKey(id) / remove(id) fail
+ * closed. SHARED-ARENA meld is O(1) (concatenate two circular root lists + a union alias, INDEPENDENT
+ * of |other|) and CONSUMES `other` (empty, size 0, DEAD). `decreaseKey` operates TOWARD the extreme;
+ * a move away fails closed. kind 'min' | 'max' is frozen at construction. Keys are finite numbers
+ * (typeof-guarded before coercion). forEach / iterator yield ids in UNSPECIFIED (forest) order.
+ * Honesty: textbook-optimal asymptotics, but OFTEN SLOWER wall-clock than Pairing / Binary; the MAX
+ * single popMin / decreaseKey spikes are DISCLOSED, not gated. Every hot op allocates zero bytes.
+ */
+export class FibonacciHeap {
+    /** @param capacity arena-wide node budget (and the id domain [0, capacity)); integer in [1, 2^31-1]. @param kind frozen polarity (default 'min'). */
+    constructor(capacity: number, kind?: 'min' | 'max');
+
+    /** Build `count` empty heaps sharing ONE backing arena (pool + columns + reverse map + degree-bucket scratch), so any two can meld in O(1). */
+    static arena(capacity: number, kind: 'min' | 'max', count: number): FibonacciHeap[];
+
+    /** Live entry count (0 once consumed by a meld). */
+    readonly size: number;
+    /** The fixed arena-wide capacity this heap draws from. */
+    readonly capacity: number;
+    /** The frozen heap polarity. */
+    readonly kind: 'min' | 'max';
+
+    /** Insert id (unique arena-wide) with priority key. Throws on non-finite key, out-of-range id, a live-anywhere id, a full arena, or a consumed heap. */
+    push(id: number, key: number): void;
+    /** Remove and return the id at the extreme key, or undefined if empty. Consumed heap throws. */
+    popMin(): number | undefined;
+    /** The id at the extreme key, or undefined if empty. Consumed heap throws. */
+    peekMin(): number | undefined;
+    /** The extreme key, or undefined if empty. Consumed heap throws. */
+    peekMinKey(): number | undefined;
+    /** Reprioritize `id` TOWARD the heap's extreme. Throws on non-finite key, out-of-range/non-member id, a sibling-owned id, a move away from the extreme, or a consumed heap. */
+    decreaseKey(id: number, newKey: number): void;
+    /** Remove `id` from this heap; true if present, false if absent. Throws on out-of-range id, a sibling-owned id, or a consumed heap. */
+    remove(id: number): boolean;
+    /** True iff `id` is currently in THIS heap. Out-of-range id / consumed heap throw. */
+    has(id: number): boolean;
+    /** The key of `id` in THIS heap, or undefined if absent / sibling-owned. Out-of-range id / consumed heap throw. */
+    keyOf(id: number): number | undefined;
+    /** Meld `other` into this heap in O(1); CONSUMES other. Non-FibonacciHeap arg, self, cross-arena, kind mismatch, or a consumed operand throw. */
+    meld(other: FibonacciHeap): this;
+    /** Empty this heap, returning only its own nodes to the shared pool. Consumed heap throws. */
+    clear(): this;
+    /** Visit every live (id, key) pair in unspecified (forest) order (NOT sorted). */
+    forEach(fn: (id: number, key: number, heap: FibonacciHeap) => void): void;
+    /** Iterate live entity ids in unspecified (forest) order (NOT sorted). */
+    [Symbol.iterator](): IterableIterator<number>;
+}

@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -292,6 +292,23 @@ export const BINOMIALHEAP_POPMIN_SLOPE_HI = 62.75; // median 44.821 * 1.4
 export const PAIRINGHEAP_POPMIN_SLOPE_LO = 13.08; // median 21.799 * 0.6
 export const PAIRINGHEAP_POPMIN_SLOPE_HI = 30.52; // median 21.799 * 1.4
 
+// --- FibonacciHeap (v0.11.0): shared R^2 floor, OWN popMin slope band (D-FH5 / 0013) ---
+// FibonacciHeap's gated op is popMin (delete-extreme -- splice the min root's children into the
+// root list, then CONSOLIDATE the root list by degree, then rescan for the new extreme). A
+// Fibonacci popMin does the most pointer-chasing per level of any heap in the family (a lazy forest
+// consolidated on demand, larger constant factors than the pairing two-pass), so its per-level
+// slope is the family's steepest -- expected, which is why only the R^2 floor is shared and this op
+// declares its OWN band. Band = median x [0.6, 1.4], anchored on the calibration median-of-15
+// fit-run slope. Centered on the MEDIAN (never a high sample) so a legitimately faster future run
+// is not false-failed; the shared R^2 floor independently rejects any non-log shape. The band
+// values below are CALIBRATED on this machine (see decisions/0013 for the honest R^2 spread).
+// Calibration (this machine): the median-of-15 fit-run slope = 45.296 ns/level (samples 43.24
+// 44.40 44.46 44.32 44.93 45.30 45.27 45.59 45.28 45.56 45.71 45.62 46.08 46.14 45.84). Band =
+// median x [0.6, 1.4]. The Fibonacci popMin is the FAMILY's STEEPEST per-level slope (a lazy
+// forest consolidated on demand -- the largest constant factors of any heap here), as expected.
+export const FIBONACCIHEAP_POPMIN_SLOPE_LO = 27.18; // median 45.296 * 0.6
+export const FIBONACCIHEAP_POPMIN_SLOPE_HI = 63.41; // median 45.296 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -373,6 +390,20 @@ const PH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // it reliably. Odd so the median is a real sample. Measurement-quality only (the 0.958 floor and
 // the slope band are untouched).
 const PH_FIT_RUNS = 5;
+// FibonacciHeap's gated popMin sweep: EXACT powers of two 2^11..2^17 (the same pointer-chasing
+// window the other forest heaps use -- a Fibonacci popMin chases scattered forest slots through a
+// degree-consolidation and its cost is DRAM-latency-sensitive, so it needs a cache-resident
+// exact-power window). Its O(n) foil (a linear min-scan-and-splice extract-min over an unordered
+// array) stays on the small O(n^2) sweep.
+const FH_POP_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const FH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// FibonacciHeap gates on the MEDIAN of FH_FIT_RUNS independent sweep-fits, exactly like PairingHeap:
+// the lazy forest + degree consolidation gives the full-drain average even MORE run-to-run SHAPE
+// variance than the pairing two-pass, so a single fit's R^2 dips below the floor in a sizeable
+// minority of runs; the median fit clears it reliably. Odd so the median is a real sample.
+// Measurement-quality only (the frozen 0.958 floor and the slope band are untouched; a genuine
+// O(n) shape fails every fit). See decisions/0013-fibonacciheap.md for the honest R^2 spread.
+const FH_FIT_RUNS = 7;
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -1185,6 +1216,94 @@ function measurePairingHeapFoil(n) {
     return elapsed / count;
 }
 
+// --- FibonacciHeap measurement (popMin hot op + its O(n) foil + MAX single popMin / decreaseKey) ---
+// The heap is built OUTSIDE timing (n pushes), then a FULL popMin drain is timed, accumulated across
+// rebuilds until ~4e6 pops are timed (a stable mean, height ~ log2(n)). The rebuild is excluded from
+// the timed window. Same discipline as PairingHeap -- popMin is the Fibonacci heap's tallest honest
+// walk (splice children, consolidate the root list). AMORTIZED member: the MAX single popMin (a long
+// consolidation) AND the MAX single decreaseKey (a long cascading cut) are DISCLOSED below, not gated.
+let FIBONACCIHEAP_MAX_POP_NS = 0;
+let FIBONACCIHEAP_MAX_DK_NS = 0;
+
+function measureFibonacciHeap(n) {
+    const reps = Math.max(4, Math.ceil(4e6 / n));
+    const ids = new Uint32Array(n);
+    const keys = new Float64Array(n);
+    const rnd = mulberry32(0x1234 ^ n);
+    for (let i = 0; i < n; i++) { ids[i] = i; keys[i] = rnd(); }
+    { const h = new FibonacciHeap(n, 'min'); for (let i = 0; i < n; i++) h.push(ids[i], keys[i]); while (h.size > 0) h.popMin(); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const h = new FibonacciHeap(n, 'min');
+        for (let i = 0; i < n; i++) h.push(ids[i], keys[i]);
+        const t0 = nowNs();
+        while (h.size > 0) sink += h.popMin();
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    sampleFibonacciMaxOps(n);
+    return elapsed / count;
+}
+
+// Build a Fibonacci heap of n keys, then time EVERY individual popMin over a fresh drain, keeping the
+// tallest. Then, on a fresh heap, drive a decreaseKey wave (cutting subtrees toward the min, forcing
+// cascading cuts) and time EVERY individual decreaseKey, keeping the tallest. Both are AMORTIZED
+// O(log n) / O(1): a single op can do an O(n) consolidation or an O(n) cascade even while the mean
+// holds the fitted line. DISCLOSURE, not gated.
+function sampleFibonacciMaxOps(n) {
+    const rnd = mulberry32(0xF00D ^ n);
+    const h = new FibonacciHeap(n, 'min');
+    for (let i = 0; i < n; i++) h.push(i, rnd());
+    let sink = 0;
+    while (h.size > 0) {
+        const t0 = nowNs();
+        sink += h.popMin();
+        const e = nowNs() - t0;
+        if (e > FIBONACCIHEAP_MAX_POP_NS) FIBONACCIHEAP_MAX_POP_NS = e;
+    }
+    // decreaseKey wave: refill, pop a chunk to build depth via consolidation, then decrease scattered
+    // ids toward the min so genuine cuts + cascades fire; time each decreaseKey.
+    const h2 = new FibonacciHeap(n, 'min');
+    for (let i = 0; i < n; i++) h2.push(i, rnd() * 1e6);
+    const half = n >> 1;
+    for (let i = 0; i < half; i++) h2.popMin(); // consolidate -> deep marked trees
+    let dk = 0;
+    for (let i = 0; i < n; i++) {
+        if (!h2.has(i)) continue;
+        const cur = h2.keyOf(i);
+        const t0 = nowNs();
+        h2.decreaseKey(i, cur - (1 + rnd() * 1000));
+        const e = nowNs() - t0;
+        if (e > FIBONACCIHEAP_MAX_DK_NS) FIBONACCIHEAP_MAX_DK_NS = e;
+        dk++;
+    }
+    if (sink < 0 || dk < 0) throw new Error('unreachable'); // keep live
+}
+
+// The O(n) foil: a linear MIN-SCAN-AND-SPLICE extract-min over an unordered array (the naive way to
+// serve a min without a heap). O(n) per extraction, O(n^2) total drain, so on the log2(n) axis its
+// per-op cost is EXPONENTIAL and a straight-line fit MUST MISS the R^2 floor. (Same foil the other
+// heap members use.) Sweep stays small.
+function measureFibonacciHeapFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const src = new Float64Array(n);
+    const rnd = mulberry32(0x9E37 ^ n);
+    for (let i = 0; i < n; i++) src[i] = rnd();
+    const arr = new Float64Array(n);
+    { arr.set(src); let len = n; while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; arr[mi] = arr[len - 1]; len--; } } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        arr.set(src); let len = n;
+        const t0 = nowNs();
+        while (len > 0) { let mi = 0; for (let j = 1; j < len; j++) if (arr[j] < arr[mi]) mi = j; sink += arr[mi]; arr[mi] = arr[len - 1]; len--; }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- the member registry ----------------------------------------------------
 // Each member session appends { name, op, sweep, foilSweep, r2Floor, slopeLo,
 // slopeHi, run(n), foil(n) } here.
@@ -1361,10 +1480,32 @@ export const MEMBERS = [
         // regression fails EVERY fit, so no teeth are lost. Scoped to this lane (fitRuns).
         fitRuns: PH_FIT_RUNS,
     },
+    {
+        name: 'FibonacciHeap',
+        op: 'popMin',
+        sweep: FH_POP_SWEEP,
+        foilSweep: FH_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,               // shared floor (0013 inherits D-08)
+        slopeLo: FIBONACCIHEAP_POPMIN_SLOPE_LO,     // own band
+        slopeHi: FIBONACCIHEAP_POPMIN_SLOPE_HI,
+        run: measureFibonacciHeap,
+        foil: measureFibonacciHeapFoil,
+        foilName: 'linear min-scan-and-splice (O(n) per extract-min)',
+        // MEDIAN-OF-FITS (D-FH5, measurement-quality only): a Fibonacci-heap full-drain average has
+        // even MORE run-to-run SHAPE variance than the pairing two-pass (the lazy forest is only
+        // consolidated on demand, so the per-drain work distribution swings hard), so a SINGLE fit's
+        // R^2 dips below the 0.958 floor in a sizeable minority of runs even though the slope stays
+        // in-band. Gating on the MEDIAN of FH_FIT_RUNS independent sweep-fits makes the R^2 RELIABLY
+        // clear the floor. Same robust-estimator discipline as PairingHeap; raises QUALITY only and
+        // does NOT touch the frozen floor or the band. A genuine O(n) shape fails every fit, so no
+        // teeth are lost. Scoped to this lane (fitRuns). The honest single-fit-vs-median R^2 spread
+        // is recorded in decisions/0013-fibonacciheap.md -- no "every run >= floor" claim is made.
+        fitRuns: FH_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.10.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.11.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -1459,6 +1600,19 @@ async function main() {
         process.stdout.write(
             'PairingHeap MAX single popMin observed = ' + PAIRINGHEAP_MAX_POP_NS.toFixed(0) +
             ' ns (amortized O(log n) -- disclosed, not gated)\n');
+    }
+    // FibonacciHeap honesty prints: the MAX single popMin (a long degree consolidation) AND the MAX
+    // single decreaseKey (a long cascading cut). AMORTIZED member: a single op can do O(n) work even
+    // while the mean holds the fitted line. Both are DISCLOSURES, not gates.
+    if (FIBONACCIHEAP_MAX_POP_NS > 0) {
+        process.stdout.write(
+            'FibonacciHeap MAX single popMin observed = ' + FIBONACCIHEAP_MAX_POP_NS.toFixed(0) +
+            ' ns (amortized O(log n) -- disclosed, not gated)\n');
+    }
+    if (FIBONACCIHEAP_MAX_DK_NS > 0) {
+        process.stdout.write(
+            'FibonacciHeap MAX single decreaseKey observed = ' + FIBONACCIHEAP_MAX_DK_NS.toFixed(0) +
+            ' ns (amortized O(1); cascading-cut spike -- disclosed, not gated)\n');
     }
     // Scapegoat amortized-trace assertion (D-S5): the cumulative ascending-insert cost/op --
     // the REBUILD-HEAVY worst case -- must track a LOG curve, NOT the linear curve a rebuild-less

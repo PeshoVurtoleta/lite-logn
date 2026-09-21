@@ -1,9 +1,9 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.10.0 ten members have
+avoid, and how to measure the logarithm yourself. At v0.11.0 eleven members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap, SplayTree, BinomialHeap and PairingHeap -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree, BinomialHeap, PairingHeap and FibonacciHeap -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -66,8 +66,12 @@ START -- what do you need?
 |   priority queues into one in O(log n) (not O(n) rebuild)?   -> BinomialHeap (wc) [v0.9.0]
 |
 +-- Repeated min (or max) + insert, AND you must DECREASE-KEY /
-    remove an arbitrary element by id, AND/OR MELD in O(1)
-    (e.g. a Dijkstra / Prim relaxation loop)?                  -> PairingHeap (am)  [v0.10.0]
+|   remove an arbitrary element by id, AND/OR MELD in O(1)
+|   (e.g. a Dijkstra / Prim relaxation loop)?                  -> PairingHeap (am)  [v0.10.0]
+|
++-- Same as PairingHeap, but you want the textbook-optimal
+    O(1)-amortized decrease-key bound ON PAPER (a teaching /
+    analysis reference) and accept slower real wall-clock?     -> FibonacciHeap (am) [v0.11.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -90,6 +94,16 @@ graph-algorithm case); pick BinomialHeap over PairingHeap when you never reprior
 and want a smaller per-node footprint (no reverse map / owner / alias). `decreaseKey`
 moves TOWARD the extreme only (decrease for 'min', increase for 'max'); a move away
 fails closed. A `decreaseKey` / `remove` on a **sibling** heap's id fails closed.
+**FibonacciHeap** is the arc's FINALE: the SAME addressable + mergeable surface as
+PairingHeap (decrease-key / remove by arena-wide-unique id, an O(1) meld), reaching
+the tightest textbook amortized bounds (O(1)-amortized push/meld/decreaseKey via
+cascading cuts + a mark bit, O(log n)-amortized popMin/remove via degree
+consolidation). But it is **often SLOWER wall-clock than PairingHeap or BinaryHeap**
+on real hardware -- large constant factors, long consolidation/cascade spikes (the
+benchmark shows it losing plainly). Pick **FibonacciHeap** only when the ASYMPTOTIC
+bound is the point (a teaching reference, or an analysis that needs the O(1)-amortized
+decrease-key on paper); pick **PairingHeap** for the same surface at the best
+real-world speed. It is shipped for completeness, not because it wins.
 
 Ordered-map tiebreak: **SkipList** for a plain ordered map (get / set / successor
 / range) with the flattest surface; **Treap** when you ALSO need `rank(x)` (how
@@ -128,10 +142,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | Ordered map with SKEWED / hot-key access (self-adjusting) | SplayTree | amortized O(log n) get/set/delete (a read splays) | 0.8.0 |
 | Priority queue you must MELD with another in O(log n) | BinomialHeap | O(1)-amortized push, O(log n) popMin/meld, O(1) peekMin | 0.9.0 |
 | Priority queue with DECREASE-KEY / remove by id, and/or O(1) MELD (graph algorithms) | PairingHeap | O(1) push/meld, amortized O(log n) popMin/decreaseKey/remove | 0.10.0 |
+| Same addressable + mergeable surface, textbook-optimal bounds ON PAPER (teaching / analysis; slower wall-clock) | FibonacciHeap | O(1)-amortized push/meld/decreaseKey, O(log n)-amortized popMin/remove | 0.11.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's and PairingHeap's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's and FibonacciHeap's are below).
 
 ---
 
@@ -545,6 +560,56 @@ disclosure, never gated. `node --expose-gc test/torture.mjs` proves push / popMi
 remove / meld / arena-churn / forEach at 0 B/op (the two-pass combine is pointer-free, no temp
 array), and asserts conservation ACROSS MELD and across the addressable decreaseKey / remove paths
 -- nodes move between root lists but never between pools.
+
+---
+
+## FibonacciHeap -- the textbook-optimal ADDRESSABLE mergeable priority queue (the arc's finale)
+
+**Reach for it when** the ASYMPTOTIC bound is the point: a teaching reference, or an analysis that
+needs the O(1)-amortized `decreaseKey` on paper. FibonacciHeap (Fredman & Tarjan 1984) has the SAME
+addressable + mergeable surface as PairingHeap -- `decreaseKey` / `remove` / `has` / `keyOf` by an
+arena-wide-unique id, an O(1) `meld` -- and reaches the tightest textbook amortized bounds:
+`push` / `meld` / `decreaseKey` O(1) amortized (a cascading cut governed by a per-node mark bit),
+`popMin` / `remove` O(log n) amortized (a degree consolidation). ids are UNIQUE ARENA-WIDE; the
+reverse map is shared across every heap in the arena; `decreaseKey` moves TOWARD the extreme;
+`kind` is frozen at construction. To meld, both heaps must share ONE arena
+(`FibonacciHeap.arena(capacity, kind, count)`); a standalone `new FibonacciHeap(...)` owns its own arena.
+
+**The honest headline:** FibonacciHeap is textbook-optimal in ASYMPTOTICS but **often SLOWER
+wall-clock than PairingHeap or BinaryHeap** on real hardware -- large constant factors, and long
+consolidation / cascade spikes. The benchmark shows it losing plainly; it is shipped for
+completeness and teaching, NOT because it wins. In practice, **PairingHeap is the one to reach for**
+for the same addressable mergeable surface at the best real-world speed.
+
+**Avoid it when:**
+
+- You want the fastest addressable mergeable heap. Use **PairingHeap** -- same surface, a lean
+  two-pass combine instead of a lazy-forest consolidation, and it usually wins wall-clock.
+- You never decrease-key / remove by id AND never meld. Use **BinaryHeap** or **MinMaxHeap** (a flat
+  array beats a pointer-chased forest by a wide margin).
+- You meld but never reprioritize, and want a smaller per-node footprint. Use **BinomialHeap** (no
+  reverse map / owner / alias / mark / degree columns).
+- You need order statistics (`rank` / `select`) or an ordered scan. A heap answers only the extreme
+  -- use **Treap** / **Scapegoat** or **SkipList**.
+- You reuse a melded-away heap, or touch a sibling heap's id. `a.meld(b)` CONSUMES `b` (empty, dead
+  -- every later op throws); `decreaseKey` / `remove` on a live sibling's id fails closed.
+
+**Measure it yourself:** `npm run witness` fits `popMin` (splice the min root's children into the
+root list, then CONSOLIDATE by degree -- the Fibonacci heap's tallest honest walk) against `nsPerOp
+= intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and sit inside its own band
+(`popMin [27.18, 63.41]` ns/level -- the FAMILY's STEEPEST per-level slope, a lazy forest
+consolidated on demand; 15-sample median 45.296; see
+[`decisions/0013-fibonacciheap.md`](./decisions/0013-fibonacciheap.md)), over the cache-resident
+`[2^11, 2^17]` sweep. Because the full-drain average has genuine run-to-run SHAPE variance, this lane
+gates on the MEDIAN of 7 independent sweep-fits (a single fit is flaky ~0.981-0.988 and can dip below
+the floor across meta-runs) -- measurement-quality only, the frozen floor + band are untouched.
+AMORTIZED member: a single popMin can do an O(n) consolidation and a single decreaseKey an O(n)
+cascade, so the witness prints BOTH the MAX single popMin AND the MAX single decreaseKey as
+disclosures, never gated. `node --expose-gc test/torture.mjs` proves push / popMin / decreaseKey /
+remove / meld / arena-churn / forEach at 0 B/op (the cascade is iterative, no recursion; the degree
+bucket is preallocated and cleared per call, never reallocated), and asserts conservation ACROSS MELD
+and across the addressable decreaseKey / remove paths -- nodes move between root lists but never
+between pools.
 
 ---
 

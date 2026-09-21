@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -290,3 +290,47 @@ ph.select(0);
 
 // @ts-expect-error -- PairingHeap is not an ordered map: no successor.
 ph.successor(3);
+
+// --- FibonacciHeap ---------------------------------------------------------
+const fh = new FibonacciHeap(1024, 'min');
+const fhDefault = new FibonacciHeap(1024); // kind defaults to 'min'
+void fhDefault;
+fh.push(3, 2.5);
+const fhMin: number | undefined = fh.popMin();
+const fhPeek: number | undefined = fh.peekMin();
+const fhPeekKey: number | undefined = fh.peekMinKey();
+fh.decreaseKey(3, 1.0);
+const fhRemoved: boolean = fh.remove(3);
+const fhHas: boolean = fh.has(3);
+const fhKeyOf: number | undefined = fh.keyOf(3);
+const fhSize: number = fh.size;
+const fhCap: number = fh.capacity;
+const fhKind: 'min' | 'max' = fh.kind;
+const fhClear: FibonacciHeap = fh.clear(); // fluent -> this
+fh.forEach((id, key) => { void id; void key; });
+for (const id of fh) { void id; }
+const fhArena: FibonacciHeap[] = FibonacciHeap.arena(1024, 'min', 3);
+const fhMelded: FibonacciHeap = fhArena[0].meld(fhArena[1]); // meld -> this, consumes the arg
+void fhMin; void fhPeek; void fhPeekKey; void fhRemoved; void fhHas; void fhKeyOf;
+void fhSize; void fhCap; void fhKind; void fhClear; void fhMelded;
+
+// @ts-expect-error -- push key must be a number.
+fh.push(1, 'x');
+
+// @ts-expect-error -- decreaseKey newKey must be a number.
+fh.decreaseKey(1, 'x');
+
+// @ts-expect-error -- kind must be 'min' | 'max'.
+new FibonacciHeap(8, 'biggest');
+
+// @ts-expect-error -- FibonacciHeap has no changeKey (use decreaseKey).
+fh.changeKey(3, 1.0);
+
+// @ts-expect-error -- FibonacciHeap is not an ordered map: no rank.
+fh.rank(3);
+
+// @ts-expect-error -- FibonacciHeap is not an ordered map: no select.
+fh.select(0);
+
+// @ts-expect-error -- FibonacciHeap is not an ordered map: no successor.
+fh.successor(3);

@@ -6,6 +6,90 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-21
+
+### Added
+
+- **FibonacciHeap** -- the eleventh member and the mergeable-heap arc's FINALE: the textbook-optimal
+  ADDRESSABLE mergeable priority queue (Fredman & Tarjan 1984). `push` / `meld` / `decreaseKey` are
+  O(1) AMORTIZED; `popMin` / `remove` are O(log n) AMORTIZED. Where PairingHeap (0012) reaches the
+  same amortized bounds with a lean two-pass combine (and usually WINS wall-clock), FibonacciHeap
+  reaches them by the full textbook machine: a lazy forest of heap-ordered trees on CIRCULAR
+  doubly-linked lists, a CASCADING-cut `decreaseKey` governed by a per-node MARK bit, and a
+  degree-CONSOLIDATING `popMin`. Surface: `push` / `popMin` / `peekMin` / `peekMinKey` /
+  `decreaseKey` / `remove` / `has` / `keyOf` / `meld` / `clear` / `forEach` / `[Symbol.iterator]`,
+  `size` / `capacity` / `kind` getters, and the static `FibonacciHeap.arena(capacity, kind, count)`
+  factory. Keys are finite numbers (typeof-guarded before coercion; key checked FIRST).
+- **HONESTY (the load-bearing claim).** This member is textbook-optimal in ASYMPTOTICS but OFTEN
+  SLOWER wall-clock than Pairing / Binary on real hardware (large constant factors, long spikes).
+  It is shipped for completeness and teaching, NOT because it is the fastest on this machine -- the
+  benchmark says so plainly and the witness DISCLOSES (never gates) the spikes.
+- **ADDRESSABLE, ARENA-WIDE-UNIQUE ids (D-FH1, reused from PairingHeap).** Caller ids are UNIQUE
+  integers in [0, capacity); the reverse map `_pos` (id -> slot, sentinel -1) is SHARED across every
+  heap drawing the arena; a per-slot `_owner` tag makes `decreaseKey(id)` / `remove(id)` on a
+  sibling-owned id an O(1)-detected `[lite-logn]` throw; pushing an id live ANYWHERE in the arena
+  throws. Eight pointer-free columns (`_key` Float64, `_id` / `_left` / `_right` / `_child` /
+  `_parent` / `_degree` Uint32, `_mark` Uint8) + the arena-wide `_pos` Int32 + a per-slot `_owner` +
+  a union-find `_alias` + the per-arena `_bucket` consolidation scratch, over a private free-list
+  (NodePool); NIL = 0 reserves slot 0. `kind` 'min' | 'max' frozen at ctor. `decreaseKey` operates
+  TOWARD the extreme; a move away fails closed.
+- **Cascading cut + a MARK BIT as a Uint8 column (D-FH2).** `decreaseKey` cuts a heap-order-violating
+  node's subtree to the root and CASCADES up its former parent chain (a marked parent is cut too; the
+  first unmarked non-root parent is marked and the walk stops). The mark is a dedicated `_mark` Uint8
+  COLUMN -- a packed bitset buys no GC and costs hot-body mask/shift bytes (hot-path law). The cascade
+  is ITERATIVE (a native loop, no recursion) so decreaseKey stays 0 B/op.
+- **Circular lists + degree consolidation; the degree bucket is sized to the GOLDEN-RATIO bound
+  (D-FH3).** `popMin` splices the min root's children into the root list then CONSOLIDATES by degree
+  via the preallocated per-arena `_bucket` (Uint32), cleared PER CALL in O(maxDegree) (only touched
+  slots reset, NEVER stale -- a stale entry would silently corrupt the forest). The bucket is sized
+  to the Fibonacci degree bound D(n) <= floor(log_phi n) ~ 1.44 * log2 n, NOT the naive ceil(log2
+  cap): a bucket one level short would let a consolidation write past its end (a silent typed-array
+  no-op whose read of `undefined` corrupts the link loop). See `decisions/0013-fibonacciheap.md`.
+- **SHARED-ARENA, O(1) meld WITHOUT an O(|b|) retag (D-FH4).** `a.meld(b)` concatenates the two
+  circular root lists + a union `_alias` redirect of b's heap id to a's + a cached-extreme update,
+  INDEPENDENT of |b|. The alias is EXACTLY how PairingHeap avoids re-tagging b's nodes (a per-node
+  `_owner` retag would make meld O(|b|), the rejected alternative). `a.meld(b)` CONSUMES b (empty,
+  size 0, DEAD -- every later op throws); a melded-in id stays reprioritizable via the survivor.
+  Cross-arena is column identity (`a._key !== b._key`); a kind mismatch, a non-FibonacciHeap arg, a
+  self-meld, or a consumed operand each throw. Conservation across meld is a hard invariant: nodes
+  MOVE root lists but NEVER pools (torture-tested every soak cycle, incl. the addressable paths).
+
+### Verified
+
+- **Witness (D-FH5).** `FibonacciHeap.popMin` is the gated O(log n) witness op. It inherits the
+  FROZEN family R^2 floor 0.958 and calibrates its OWN slope band by the shared ADR-0004 method:
+  median-of-15 popMin fit-runs = 45.296 ns/level (samples 43.24 44.40 44.46 44.32 44.93 45.30 45.27
+  45.59 45.28 45.56 45.71 45.62 46.08 46.14 45.84), band = median x `[0.6, 1.4]` = `[27.18, 63.41]`,
+  gated over EXACT powers 2^11..2^17. This is the FAMILY's STEEPEST per-level slope (a lazy forest
+  consolidated on demand -- the largest constant factors of any heap here), as expected. AMORTIZED
+  member: the MAX single popMin (a long consolidation) AND the MAX single decreaseKey (a cascading-
+  cut spike) are DISCLOSED, not gated. The O(n) foil is a linear min-scan-and-splice (OFF the line).
+- **Witness RELIABILITY (median-of-fits, honest R^2 spread).** A Fibonacci-heap full-drain average
+  has even MORE run-to-run SHAPE variance than the pairing two-pass, so a SINGLE sweep-fit's R^2 is
+  FLAKY -- a batch of 15 single fits ranged ~0.981..0.988 on this machine, and across meta-runs a
+  single fit CAN dip below the 0.958 floor even while the slope stays in-band. The lane therefore
+  gates on the MEDIAN of 7 independent sweep-fits (the `fitRuns` hook) -- measurement-quality only
+  (the frozen 0.958 floor + slope band are UNTOUCHED; a real O(n) shape fails all fits). NO
+  unreproducible "every run >= floor" is claimed; the TRUE, weaker claim is that the median-of-7
+  clears the floor reliably (`node test/witness.mjs` re-run several times back-to-back was ON-LINE
+  every time; the observed median R^2 range is recorded in `decisions/0013-fibonacciheap.md`).
+- **Zero-GC.** `node --expose-gc test/torture.mjs` -- 0 B/op on the push / popMin / decreaseKey /
+  remove / read / meld / arena-churn / forEach lanes, gc major = 0, the deliberately-allocating
+  control lane still non-zero (teeth), the free-list conservation invariant holds ACROSS MELD (nodes
+  move root lists, not pools) AND across the addressable decreaseKey/remove paths, arrayBuffers do
+  not grow across fill/clear soak cycles. `npm run test:perf` -- 0 scavenges + `grows === 0` on every
+  FibonacciHeap scenario (push/popMin, decreaseKey, remove, read, meld).
+
+### Notes
+
+- `LogN.js` gains `FH_MAX_CAPACITY` (`0x7FFFFFFF`, named distinctly from the identically-valued
+  `BH_MAX_CAPACITY` / `PH_MAX_CAPACITY`) + `FH_LOG2_PHI` + the `FibonacciHeap` class, appended after
+  PairingHeap; the prior TEN classes stay BYTE-IDENTICAL (only the `VERSION` const changes above the
+  append point -- a two-hunk diff). The mergeable-heap arc is now COMPLETE: BinomialHeap (lean) /
+  PairingHeap (addressable, fast) / FibonacciHeap (addressable, textbook-optimal-but-slower). Version
+  bumped to 0.11.0 across `package.json`, `LogN.js`, and `llms.txt`. See
+  `decisions/0013-fibonacciheap.md`.
+
 ## [0.10.0] - 2026-09-21
 
 ### Added

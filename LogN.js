@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.10.0';
+export const VERSION = '0.11.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -4293,5 +4293,653 @@ export class PairingHeap {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] PairingHeap arena full (capacity ' + this._cap + ')');
+    }
+}
+
+/**
+ * Max FibonacciHeap capacity: `0x7FFFFFFF` (2^31 - 1). Every node is addressed by a slot
+ * INDEX stored in `Uint32Array` link columns, so an index must fit an unsigned 32-bit word;
+ * `NIL = 0` reserves slot 0, so live slots run [1, capacity]. The arena-wide reverse map
+ * `_pos` is an `Int32Array(capacity)` (id -> slot, sentinel -1 = absent), so a caller id must
+ * fit [0, capacity). The index arithmetic (Uint32 slot indices + `NIL = 0` + the Int32 reverse
+ * map), not the byte count, is the hard ceiling -- the same "the arithmetic caps it" reasoning
+ * as the other pointer-free members. Named distinctly to avoid a module-scope redeclaration of
+ * the identically-valued BinaryHeap / PairingHeap constant.
+ */
+const FH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * log2 of the golden ratio phi = (1 + sqrt 5) / 2 -- the base of the Fibonacci-heap degree
+ * bound. A node of degree k roots a subtree of at least F(k + 2) >= phi^k nodes (the mark /
+ * cascading-cut invariant), so the MAX degree with n nodes is D(n) <= floor(log_phi n) ~
+ * 1.4404 * log2 n -- LARGER than log2 n by ~44%. The consolidation degree-bucket must be sized
+ * to this golden-ratio bound, NOT the naive ceil(log2 cap): a bucket one entry short would let a
+ * consolidation write past its end (a silent no-op on a typed array -> a read of `undefined`,
+ * `undefined !== 0`, an infinite/ corrupt link loop). See decisions/0013-fibonacciheap.md.
+ */
+const FH_LOG2_PHI = 0.6942419136306173; // Math.log2((1 + Math.sqrt(5)) / 2)
+
+/**
+ * A FIBONACCI HEAP: the mergeable-heap arc's FINALE -- the textbook-optimal addressable +
+ * mergeable priority queue whose push / meld / decreaseKey are O(1) AMORTIZED and popMin /
+ * remove O(log n) AMORTIZED. Where a PairingHeap reaches those SAME amortized bounds with a
+ * lean two-pass combine (and usually WINS wall-clock), a Fibonacci heap reaches them by a
+ * more elaborate machine -- a lazy forest of heap-ordered trees, a `decreaseKey` that CUTS a
+ * subtree to the root with a CASCADING cut governed by a per-node MARK bit, and a `popMin` that
+ * CONSOLIDATES the root list by degree. It is the member the textbooks name for the tightest
+ * asymptotic Dijkstra / Prim bound; it is ALSO, honestly, the member the benchmark shows OFTEN
+ * SLOWER wall-clock than Pairing / Binary (its constant factors are large and its spikes long).
+ * Shipped for completeness and teaching, not because it is the fastest on this hardware.
+ *
+ * ADDRESSABLE + MERGEABLE, arena-wide-unique ids (REUSES the PairingHeap contract, D-FH1):
+ * caller ids are UNIQUE integers in [0, capacity); the reverse map `_pos` (id -> slot, sentinel
+ * -1 = absent) is shared across EVERY heap drawing the arena; each slot carries an `_owner` tag
+ * (the owning heap's small integer id). An id live anywhere in the arena cannot be pushed again
+ * (a full-arena dup throws). `decreaseKey(id)` / `remove(id)` on an id owned by a DIFFERENT live
+ * sibling heap is O(1)-detected (via the union-find `_alias`, path-halved) and throws
+ * `[lite-logn]` (fail closed), never a silent cross-heap cut.
+ *
+ * CASCADING CUT + MARK BIT (D-FH2): `decreaseKey` lowers the key toward the extreme, then if the
+ * heap order with the parent breaks it `_cut`s the node's subtree to the root list (clearing its
+ * mark) and `_cascade`s UP its former parent chain -- a MARKED parent is cut too and the walk
+ * continues; the first UNMARKED non-root parent is marked and the walk stops. The mark is a
+ * dedicated `_mark` Uint8 COLUMN (a packed bitset would buy no GC and cost hot bytes to
+ * unpack). The cascade is ITERATIVE (a native while loop, NO recursion) so decreaseKey stays
+ * 0 B/op. A move AWAY from the extreme is unsupported by a cut-and-link and fails closed.
+ *
+ * CIRCULAR LISTS + DEGREE CONSOLIDATION (D-FH3): the root list AND every child list are CIRCULAR
+ * doubly-linked (`_left` / `_right`), and every node carries a `_degree`. `popMin` splices the
+ * min root's children into the root list (clearing their `_parent` + mark), then CONSOLIDATES
+ * via the preallocated per-arena `_bucket` (Uint32, degree -> root) -- repeatedly linking two
+ * roots of equal degree until every degree is unique -- then rescans the survivors for the new
+ * cached extreme. The bucket is cleared PER CALL in O(maxDegree) (only the touched slots are
+ * reset, never reallocated and never left stale -- a stale entry would silently corrupt the
+ * forest) and is sized to the GOLDEN-RATIO degree bound (see FH_LOG2_PHI), not the naive
+ * ceil(log2 cap). The cached extreme is maintained inline on push / meld / decreaseKey.
+ *
+ * SHARED-ARENA meld in O(1) (D-FH4): `a.meld(b)` CONCATENATES the two circular root lists (a
+ * handful of link writes, INDEPENDENT of |b|) + a union `_alias` redirect of b's heap id to a's
+ * + a cached-extreme update. It CONSUMES b (b.size -> 0, DEAD via a consumed flag; every later
+ * op on b throws). The alias is exactly how the PairingHeap avoids re-tagging b's nodes -- a
+ * per-heap map would make meld O(|b|), the rejected alternative. Cross-arena is detected by
+ * COLUMN IDENTITY (`this._key !== other._key`); a kind mismatch, a non-FibonacciHeap arg, a
+ * self-meld, or a consumed operand each throw.
+ *
+ * Storage (allocated once per arena, sized to capacity + 1; slot 0 reserved NIL):
+ *   - `_key` Float64Array   -- the priority key at each node slot.
+ *   - `_id`  Uint32Array    -- the caller entity id at each node slot.
+ *   - `_left` / `_right` Uint32Array -- the CIRCULAR doubly-linked list at this node's level.
+ *   - `_child` Uint32Array  -- an arbitrary child (NIL = 0); its siblings ring it circularly.
+ *   - `_parent` Uint32Array -- the parent (NIL = 0 for a root).
+ *   - `_degree` Uint32Array -- the child count of this node.
+ *   - `_mark` Uint8Array    -- 1 iff this node has lost a child since it last became a child.
+ *   - `_pos` Int32Array(capacity) -- ARENA-WIDE reverse map id -> slot; -1 == absent.
+ *   - `_owner` Uint32Array  -- per-slot owning-heap id (0 = free slot).
+ *   - `_alias` Int32Array   -- union-find over heap ids (meld redirects b's id to a's).
+ *   - `_bucket` Uint32Array -- per-ARENA degree-bucket consolidation scratch (popMin is one at a
+ *     time, so one shared scratch suffices), sized to the golden-ratio degree bound.
+ *   - `_pool` NodePool      -- the shared free-list handing out slots [1, capacity].
+ * Per-heap scalars: `_hid` (this heap's arena id), `_min` (cached extreme root, NIL = 0), `_n`
+ * (size), `_consumed` (dead-after-meld flag). Conservation: activeSlots + freeList === capacity.
+ *
+ * kind 'min' | 'max' is FROZEN at construction (a ctor-cached `_isMin` boolean drives the hot
+ * compare); both operands of a meld must share kind. Keys are FINITE numbers (typeof-guarded
+ * BEFORE coercion -- the KEY door FIRST, then the id, then consumed / dup / full). Every peek /
+ * popMin on an EMPTY heap returns `undefined` and never throws. forEach / [Symbol.iterator]
+ * yield live ids in UNSPECIFIED (forest) order -- NOT sorted, NOT pop order. Fixed capacity: a
+ * full arena throws, never silently drops. Every hot op allocates ZERO bytes after construction.
+ * AMORTIZED honesty: the MAX single popMin (a long consolidation) AND the MAX single decreaseKey
+ * (a long cascading cut) are DISCLOSED by the witness, never gated. See decisions/0013.
+ */
+export class FibonacciHeap {
+    /**
+     * @param {number} capacity  exact max live entries across the whole arena; integer in [1, 2^31-1].
+     * @param {'min'|'max'} [kind]  frozen heap polarity (default 'min').
+     */
+    constructor(capacity, kind) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > FH_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] FibonacciHeap capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        const k = kind === undefined ? 'min' : kind;
+        if (k !== 'min' && k !== 'max') {
+            throw new RangeError(
+                '[lite-logn] FibonacciHeap kind must be "min" or "max", got ' + String(kind));
+        }
+        const slots = capacity + 1;
+        this._cap = capacity;                          // shared-arena node budget
+        this._key = new Float64Array(slots);           // key at each node slot
+        this._id = new Uint32Array(slots);             // caller entity id at each node slot
+        this._left = new Uint32Array(slots);           // circular prev; self = singleton
+        this._right = new Uint32Array(slots);          // circular next; self = singleton
+        this._child = new Uint32Array(slots);          // an arbitrary child; NIL = 0
+        this._parent = new Uint32Array(slots);         // parent; NIL = 0 (root)
+        this._degree = new Uint32Array(slots);         // child count
+        this._mark = new Uint8Array(slots);            // lost-a-child bit (1 = marked)
+        this._pos = new Int32Array(capacity);          // ARENA-WIDE id -> slot; -1 == absent
+        this._pos.fill(-1);                            // slot 0 is a valid slot: null is not zero
+        this._owner = new Uint32Array(slots);          // per-slot owning-heap id (0 = free)
+        this._pool = new NodePool(capacity);           // shared free-list over slots [1, capacity]
+        this._alias = new Int32Array(2);               // union-find over heap ids (hid 1 only)
+        this._alias[1] = 1;
+        // Degree-bucket scratch sized to the GOLDEN-RATIO bound (D-FH3): D(n) <= floor(log_phi n),
+        // ~1.44 * log2 n, so ceil(log2 cap) would undersize it. +2 slack covers the ceil + the
+        // one-past terminal slot the link loop writes.
+        this._bucket = new Uint32Array(Math.ceil(Math.log2(capacity + 1) / FH_LOG2_PHI) + 2);
+        this._isMin = (k === 'min');                   // ctor-cached hot-compare polarity
+        this._kind = k;                                // frozen 'min' | 'max'
+        this._hid = 1;                                 // this heap's arena id (standalone = 1)
+        this._min = 0;                                 // cached extreme root, NIL = 0 (empty)
+        this._n = 0;                                   // live entry count
+        this._consumed = false;                        // dead-after-meld: reuse fails closed
+    }
+
+    /**
+     * Build `count` EMPTY heaps that SHARE one backing arena (pool + columns + arena-wide `_pos`
+     * reverse map + `_owner` tags + the `_alias` union-find + the `_bucket` consolidation scratch),
+     * so any two of them can `meld` in O(1). A standalone `new FibonacciHeap(capacity, kind)` is the
+     * count === 1 case (its own arena). The `capacity` is the arena-WIDE node budget (and the
+     * arena-wide id domain [0, capacity)) shared across all returned heaps. Fails closed on a bad
+     * capacity / kind (via the constructor) or a non-integer / < 1 count.
+     * @param {number} capacity  arena-wide node budget; integer in [1, 2^31-1].
+     * @param {'min'|'max'} kind  frozen polarity shared by every heap in the arena.
+     * @param {number} count      how many arena-sharing heaps to return; integer >= 1.
+     * @returns {FibonacciHeap[]}
+     */
+    static arena(capacity, kind, count) {
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+            throw new RangeError(
+                '[lite-logn] FibonacciHeap.arena count must be an integer >= 1, got ' + String(count));
+        }
+        const first = new FibonacciHeap(capacity, kind); // validates capacity + kind, allocates arena
+        const alias = new Int32Array(count + 1);         // union-find over heap ids 1..count
+        for (let h = 1; h <= count; h++) alias[h] = h;   // each heap starts as its own root
+        first._alias = alias;
+        const heaps = new Array(count);
+        heaps[0] = first;
+        for (let i = 1; i < count; i++) heaps[i] = FibonacciHeap._view(first, i + 1);
+        return heaps;
+    }
+
+    /** @private build an EMPTY heap VIEW sharing `src`'s arena (pool + columns + maps + scratch), hid `hid`. */
+    static _view(src, hid) {
+        const h = Object.create(FibonacciHeap.prototype);
+        h._cap = src._cap;
+        h._key = src._key; h._id = src._id;
+        h._left = src._left; h._right = src._right;
+        h._child = src._child; h._parent = src._parent; h._degree = src._degree; h._mark = src._mark;
+        h._pos = src._pos; h._owner = src._owner;
+        h._pool = src._pool; h._alias = src._alias; h._bucket = src._bucket;
+        h._isMin = src._isMin; h._kind = src._kind;
+        h._hid = hid;
+        h._min = 0; h._n = 0; h._consumed = false;
+        return h;
+    }
+
+    /** Live entry count (0 once consumed by a meld). O(1). */
+    get size() { return this._n; }
+
+    /** The fixed arena-wide capacity this heap draws from. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen heap polarity ('min' | 'max'). O(1). */
+    get kind() { return this._kind; }
+
+    /**
+     * Insert entity `id` with priority `key`. O(1) (a singleton splice into the root list). Fails
+     * closed: a non-finite / non-number key (checked FIRST), a non-integer / out-of-range id, an id
+     * already live ANYWHERE in the arena (arena-wide uniqueness -- no silent overwrite), a full
+     * arena, or a consumed heap each throw `[lite-logn]` as a no-op (size unchanged).
+     * @param {number} id   integer in [0, capacity), UNIQUE arena-wide
+     * @param {number} key  a finite number
+     */
+    push(id, key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        if (this._pos[id] !== -1) return this._dup(id);   // arena-wide: id live anywhere
+        const slot = this._pool.alloc();
+        if (slot === 0) return this._full();
+        this._key[slot] = key; this._id[slot] = id;
+        this._child[slot] = 0; this._parent[slot] = 0; this._degree[slot] = 0; this._mark[slot] = 0;
+        this._left[slot] = slot; this._right[slot] = slot; // singleton circular list
+        this._pos[id] = slot; this._owner[slot] = this._hid;
+        this._n++;
+        this._addRoot(slot);
+    }
+
+    /**
+     * Remove and return the id at the extreme key (min for a 'min' heap, max for a 'max' heap), or
+     * `undefined` if empty (never throws on empty). AMORTIZED O(log n): splice the min root's
+     * children into the root list, release the old slot, CONSOLIDATE the root list by degree, and
+     * rescan for the new cached extreme. Consumed heap throws.
+     * @returns {number|undefined}
+     */
+    popMin() {
+        if (this._consumed) return this._badConsumed();
+        const z = this._min;
+        if (z === 0) return undefined; // empty
+        const outId = this._id[z];
+        const c = this._child[z];
+        if (c !== 0) {
+            // clear each child's parent + mark, then splice the whole child ring into the root list
+            let x = c;
+            do { this._parent[x] = 0; this._mark[x] = 0; x = this._right[x]; } while (x !== c);
+            const zr = this._right[z], cl = this._left[c];
+            this._right[z] = c; this._left[c] = z;
+            this._right[cl] = zr; this._left[zr] = cl;
+            this._child[z] = 0;
+        }
+        // unlink z from the root list
+        const zl = this._left[z], zr = this._right[z];
+        this._pos[outId] = -1; this._owner[z] = 0;
+        this._degree[z] = 0; this._mark[z] = 0; this._parent[z] = 0; this._child[z] = 0;
+        this._pool.free(z);
+        this._n--;
+        if (zr === z) {
+            // z was the only root -> heap now empty
+            this._left[z] = z; this._right[z] = z;
+            this._min = 0;
+        } else {
+            this._right[zl] = zr; this._left[zr] = zl;
+            this._left[z] = z; this._right[z] = z;
+            this._min = zr;      // provisional; consolidate finds the true extreme
+            this._consolidate();
+        }
+        return outId;
+    }
+
+    /** The id at the extreme key, or `undefined` if empty. Read-only. O(1). Consumed heap throws. */
+    peekMin() {
+        if (this._consumed) return this._badConsumed();
+        return this._min === 0 ? undefined : this._id[this._min];
+    }
+
+    /** The extreme key, or `undefined` if empty. O(1). Consumed heap throws. */
+    peekMinKey() {
+        if (this._consumed) return this._badConsumed();
+        return this._min === 0 ? undefined : this._key[this._min];
+    }
+
+    /**
+     * Reprioritize a present entity TOWARD the heap's extreme (decrease for a 'min' heap, increase
+     * for a 'max' heap). AMORTIZED O(1): lower the key; if the heap order with the parent breaks,
+     * cut the node's subtree to the root and CASCADE up its former parent chain (marked parents cut
+     * too, the first unmarked non-root marked). Fails closed: a non-finite key (checked FIRST), an
+     * out-of-range id, a non-member id, an id owned by a DIFFERENT live sibling heap (arena cross-
+     * heap guard), a move AWAY from the extreme, or a consumed heap each throw `[lite-logn]`.
+     * @param {number} id      integer in [0, capacity), currently present in THIS heap
+     * @param {number} newKey  a finite number, toward the heap's extreme
+     */
+    decreaseKey(id, newKey) {
+        if (typeof newKey !== 'number' || !Number.isFinite(newKey)) return this._badKey(newKey);
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return this._notMember(id);
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return this._badOwner(id);
+        const cur = this._key[slot];
+        // Toward-extreme only: a move away cannot be served by a cut-and-link -- fail closed.
+        if (this._isMin ? newKey > cur : newKey < cur) return this._badDir(id);
+        this._key[slot] = newKey;
+        const p = this._parent[slot];
+        if (p !== 0 && (this._isMin ? newKey < this._key[p] : newKey > this._key[p])) {
+            this._cut(slot);       // detach the subtree, splice at root, clear mark
+            this._cascade(p);      // walk up: cut marked ancestors iteratively
+        }
+        // s is now a root iff it was cut (or already a root); catch a new cached extreme.
+        if (this._parent[slot] === 0 &&
+            (this._isMin ? newKey < this._key[this._min] : newKey > this._key[this._min])) {
+            this._min = slot;
+        }
+    }
+
+    /**
+     * Remove entity `id` from THIS heap, returning true if it was present, false if it was absent
+     * from the arena. AMORTIZED O(log n): cut its subtree to the root, cascade, then make it the
+     * cached extreme and popMin it (splices its children, consolidates). Fails closed: an out-of-
+     * range id, an id owned by a DIFFERENT live sibling heap, or a consumed heap each throw
+     * `[lite-logn]`.
+     * @param {number} id  integer in [0, capacity)
+     * @returns {boolean}
+     */
+    remove(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return false;               // absent from the arena
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return this._badOwner(id);
+        const p = this._parent[slot];
+        if (p !== 0) { this._cut(slot); this._cascade(p); }
+        this._min = slot;                            // force this node to be the extreme removed
+        this.popMin();
+        return true;
+    }
+
+    /** True iff `id` is currently in THIS heap. O(1). Out-of-range id throws; consumed heap throws. */
+    has(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return false;
+        return this._resolve(this._owner[slot]) === this._resolve(this._hid);
+    }
+
+    /**
+     * The key currently associated with `id` in THIS heap, or `undefined` if id is absent or owned
+     * by a sibling heap. O(1). Out-of-range id throws; consumed heap throws.
+     * @param {number} id
+     * @returns {number|undefined}
+     */
+    keyOf(id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(id);
+        }
+        if (this._consumed) return this._badConsumed();
+        const slot = this._pos[id];
+        if (slot === -1) return undefined;
+        if (this._resolve(this._owner[slot]) !== this._resolve(this._hid)) return undefined;
+        return this._key[slot];
+    }
+
+    /**
+     * MELD `other` INTO this heap in O(1): CONCATENATE the two circular root lists (a handful of
+     * link writes, INDEPENDENT of |other|) plus a union alias redirecting `other`'s heap id to this
+     * and a cached-extreme update. CONSUMES `other`: it becomes empty (size 0) and DEAD -- any later
+     * op on it throws, so a reused operand can never re-enter the shared nodes. Fails closed: a
+     * non-FibonacciHeap arg, a self-meld, a cross-arena operand (column identity `this._key !==
+     * other._key`), a kind mismatch, or a consumed operand each throw `[lite-logn]`.
+     * @param {FibonacciHeap} other  an arena-sibling heap of the same kind (consumed)
+     * @returns {this}
+     */
+    meld(other) {
+        if (!(other instanceof FibonacciHeap)) {
+            throw new TypeError('[lite-logn] FibonacciHeap.meld needs a FibonacciHeap argument');
+        }
+        if (other === this) {
+            throw new Error('[lite-logn] FibonacciHeap.meld cannot meld a heap with itself');
+        }
+        if (this._consumed || other._consumed) {
+            throw new Error('[lite-logn] FibonacciHeap.meld operand was consumed by a prior meld');
+        }
+        if (this._key !== other._key) {
+            throw new Error(
+                '[lite-logn] FibonacciHeap.meld requires two heaps sharing an arena (from FibonacciHeap.arena)');
+        }
+        if (this._isMin !== other._isMin) {
+            throw new Error(
+                '[lite-logn] FibonacciHeap.meld requires both heaps to share kind (min vs max)');
+        }
+        const om = other._min;
+        this._n += other._n;
+        // Union alias: redirect other's heap id to THIS heap's root id, so other's nodes
+        // (owner = other._hid) resolve to this in O(1) -- NO per-node re-tag (that would be O(|b|)).
+        this._alias[other._hid] = this._resolve(this._hid);
+        other._min = 0; other._n = 0; other._consumed = true;
+        if (om !== 0) {
+            if (this._min === 0) {
+                this._min = om;
+            } else {
+                // concatenate the two circular root lists (a's entry = _min, b's entry = om)
+                const a = this._min, aR = this._right[a], bL = this._left[om];
+                this._right[a] = om; this._left[om] = a;
+                this._right[bL] = aR; this._left[aR] = bL;
+                if (this._isMin ? this._key[om] < this._key[a] : this._key[om] > this._key[a]) {
+                    this._min = om;
+                }
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Empty THIS heap, returning ONLY its own nodes to the shared pool (an arena sibling's nodes are
+     * untouched). O(n) cold forest walk, allocation-free. A consumed heap throws.
+     * @returns {this}
+     */
+    clear() {
+        if (this._consumed) return this._badConsumed();
+        this._freeForest(this._min);
+        this._min = 0; this._n = 0;
+        return this;
+    }
+
+    /**
+     * Visit every live (id, key) pair in UNSPECIFIED (forest) order -- NOT sorted, NOT pop order.
+     * O(n) cold walk, allocation-free (pass a hoisted callback). Consumed heap throws.
+     * @param {(id:number, key:number, heap:FibonacciHeap)=>void} fn
+     */
+    forEach(fn) {
+        if (this._consumed) return this._badConsumed();
+        this._forEach(this._min, fn);
+    }
+
+    /**
+     * Iterate live entity ids in UNSPECIFIED (forest) order -- NOT sorted. The one documented
+     * per-protocol allocator (a {value, done} per step + a sub-iterator per child ring); use forEach
+     * for the alloc-free scan. Consumed heap throws.
+     */
+    [Symbol.iterator]() {
+        if (this._consumed) return this._badConsumed();
+        return this._iterNode(this._min);
+    }
+
+    // ---- private hot bodies (add-root / cut / cascade / consolidate / link) ----
+
+    /**
+     * @private splice a self-circular node `s` into the root list (adjacent to the cached extreme)
+     * and update the cached extreme if `s` beats it. O(1).
+     */
+    _addRoot(s) {
+        const m = this._min;
+        if (m === 0) { this._min = s; return; } // s is already self-circular
+        const r = this._right[m];
+        this._right[m] = s; this._left[s] = m; this._right[s] = r; this._left[r] = s;
+        if (this._isMin ? this._key[s] < this._key[m] : this._key[s] > this._key[m]) this._min = s;
+    }
+
+    /**
+     * @private cut node `s` from its parent's child ring in O(1): unlink it from the ring, fix the
+     * parent's `_child` handle + degree, clear its parent + mark, then splice it into the root list.
+     */
+    _cut(s) {
+        const p = this._parent[s];
+        if (this._right[s] === s) {
+            this._child[p] = 0;                          // s was the only child
+        } else {
+            const l = this._left[s], r = this._right[s];
+            this._right[l] = r; this._left[r] = l;
+            if (this._child[p] === s) this._child[p] = r; // move the parent's handle off s
+        }
+        this._degree[p]--;
+        this._parent[s] = 0; this._mark[s] = 0;
+        this._left[s] = s; this._right[s] = s;
+        this._addRoot(s);
+    }
+
+    /**
+     * @private the CASCADING cut (D-FH2): walk UP from `y`. Stop at a root. A MARKED non-root parent
+     * is cut too and the walk continues to ITS parent; the first UNMARKED non-root parent is marked
+     * and the walk stops. ITERATIVE (a native loop, no recursion) so decreaseKey stays 0 B/op.
+     */
+    _cascade(y) {
+        while (y !== 0) {
+            const z = this._parent[y];
+            if (z === 0) break;                 // y is a root: done
+            if (this._mark[y] === 0) { this._mark[y] = 1; break; } // first unmarked: mark + stop
+            this._cut(y);                       // marked: cut y to the root list
+            y = z;                              // continue up to y's former parent
+        }
+    }
+
+    /**
+     * @private CONSOLIDATE the root list by degree (D-FH3): repeatedly link two roots of equal
+     * degree via the degree-bucket `_bucket` until every surviving root has a unique degree, then
+     * rescan for the new cached extreme. The bucket is cleared PER CALL in O(maxDegree) (only the
+     * touched slots are reset -- NEVER reallocated, NEVER left stale). Iterating the ORIGINAL root
+     * list `cnt` times (saving `next` before each node can be re-linked) is the standard alloc-free
+     * traversal of a list that mutates as it links.
+     */
+    _consolidate() {
+        const A = this._bucket, K = this._key, R = this._right;
+        const start = this._min;
+        let cnt = 1;
+        { let x = R[start]; while (x !== start) { cnt++; x = R[x]; } } // count roots (O(#roots))
+        let cur = start, maxd = 0;
+        for (let i = 0; i < cnt; i++) {
+            const next = R[cur];                 // save BEFORE cur can be re-linked as a child
+            let x = cur, d = this._degree[x];
+            while (A[d] !== 0) {                  // NIL = 0 is the empty-bucket sentinel
+                let y = A[d];
+                if (this._isMin ? K[x] > K[y] : K[x] < K[y]) { const t = x; x = y; y = t; }
+                this._link(y, x);                // y (the loser) becomes a child of x (the winner)
+                A[d] = 0;
+                d++;
+            }
+            A[d] = x;
+            if (d > maxd) maxd = d;
+            cur = next;
+        }
+        // rescan the buckets for the new cached extreme, clearing every touched slot.
+        this._min = 0;
+        for (let d = 0; d <= maxd; d++) {
+            const r = A[d];
+            if (r !== 0) {
+                if (this._min === 0 ||
+                    (this._isMin ? K[r] < K[this._min] : K[r] > K[this._min])) this._min = r;
+                A[d] = 0;                        // clear the touched slot: never leave it stale
+            }
+        }
+    }
+
+    /**
+     * @private link two roots: `y` (removed from the root list) becomes a child of `x`. Increments
+     * x's degree, clears y's mark. O(1).
+     */
+    _link(y, x) {
+        const yl = this._left[y], yr = this._right[y];
+        this._right[yl] = yr; this._left[yr] = yl;   // unlink y from the root list
+        this._parent[y] = x;
+        const c = this._child[x];
+        if (c === 0) {
+            this._child[x] = y; this._left[y] = y; this._right[y] = y;
+        } else {
+            const cr = this._right[c];
+            this._right[c] = y; this._left[y] = c; this._right[y] = cr; this._left[cr] = y;
+        }
+        this._degree[x]++;
+        this._mark[y] = 0;
+    }
+
+    /**
+     * @private resolve a heap id to its union-find root (the canonical live owner), with path
+     * halving so a long meld chain stays ~O(1). Meld redirects a consumed operand's id to its
+     * melder, so a node owned by a melded-in heap resolves to the surviving heap. NOTE: the path
+     * halving WRITES the shared `_alias`, so the read-only-looking has() / keyOf() (and decreaseKey /
+     * remove) can mutate `_alias` -- a benign, 0-alloc, idempotent compaction that never touches
+     * node columns, conservation, or forEach.
+     */
+    _resolve(h) {
+        const A = this._alias;
+        while (A[h] !== h) { A[h] = A[A[h]]; h = A[h]; }
+        return h;
+    }
+
+    /** @private recursive forest free (a circular ring at each level; children recursed). */
+    _freeForest(entry) {
+        if (entry === 0) return;
+        const R = this._right, C = this._child, I = this._id;
+        let x = entry;
+        do {
+            const nxt = R[x];
+            const c = C[x];
+            this._pos[I[x]] = -1; this._owner[x] = 0;
+            this._child[x] = 0; this._parent[x] = 0; this._degree[x] = 0; this._mark[x] = 0;
+            this._left[x] = x; this._right[x] = x;
+            this._pool.free(x);
+            if (c !== 0) this._freeForest(c);
+            x = nxt;
+        } while (x !== entry);
+    }
+
+    /** @private recursive forest visit (a circular ring at each level; children recursed). */
+    _forEach(entry, fn) {
+        if (entry === 0) return;
+        const R = this._right, C = this._child, I = this._id, K = this._key;
+        let x = entry;
+        do {
+            fn(I[x], K[x], this);
+            if (C[x] !== 0) this._forEach(C[x], fn);
+            x = R[x];
+        } while (x !== entry);
+    }
+
+    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
+    *_iterNode(entry) {
+        if (entry === 0) return;
+        const R = this._right, C = this._child, I = this._id;
+        let x = entry;
+        do {
+            yield I[x];
+            yield* this._iterNode(C[x]);
+            x = R[x];
+        } while (x !== entry);
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badId(id) {
+        throw new RangeError(
+            '[lite-logn] FibonacciHeap id must be an integer in [0, capacity), got ' + String(id));
+    }
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] FibonacciHeap key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _dup(id) {
+        throw new Error('[lite-logn] FibonacciHeap id ' + id + ' is already live in the arena (ids are unique arena-wide)');
+    }
+
+    /** @private */
+    _notMember(id) {
+        throw new Error('[lite-logn] FibonacciHeap decreaseKey on a non-member id ' + id);
+    }
+
+    /** @private */
+    _badOwner(id) {
+        throw new Error('[lite-logn] FibonacciHeap id ' + id + ' is owned by a different live heap in the arena (fail closed)');
+    }
+
+    /** @private */
+    _badDir(id) {
+        throw new RangeError(
+            '[lite-logn] FibonacciHeap.decreaseKey on id ' + id + ' must move the key TOWARD the ' +
+            this._kind + ' extreme (a move away is unsupported)');
+    }
+
+    /** @private */
+    _badConsumed() {
+        throw new Error('[lite-logn] FibonacciHeap was consumed by a prior meld (reuse fails closed)');
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] FibonacciHeap arena full (capacity ' + this._cap + ')');
     }
 }

@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.10.0
+Version: 0.11.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -20,8 +20,9 @@ line on that same axis, one added level per doubling of n).
 
 v0.1.0 shipped BinaryHeap; v0.2.0 adds Fenwick; v0.3.0 adds SegmentTree; v0.4.0
 adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
-v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap. The roster
-(one member per session, each landing append-only):
+v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap; v0.11.0
+adds FibonacciHeap (the mergeable-heap arc's FINALE). The roster (one member per
+session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -156,6 +157,35 @@ v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap. The r
   construction. Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN /
   +-Infinity fail closed). forEach / [Symbol.iterator] yield ids in UNSPECIFIED (forest) order.
   Zero allocation on every hot op.
+
+- FibonacciHeap (v0.11.0) -- the mergeable-heap arc's FINALE: the textbook-optimal ADDRESSABLE
+  mergeable priority queue. push / meld / decreaseKey are O(1) AMORTIZED; popMin / remove are
+  O(log n) AMORTIZED. Same ADDRESSABLE, ARENA-WIDE-UNIQUE-id + shared-`_pos` reverse-map + per-slot
+  `_owner` + union-find `_alias` contract as PairingHeap (a sibling-owned decreaseKey/remove fails
+  closed; a live-anywhere id cannot be re-pushed). Where PairingHeap reaches the amortized bounds
+  with a lean two-pass combine (and usually WINS wall-clock), FibonacciHeap reaches them by the full
+  textbook machine: a lazy forest of heap-ordered trees on CIRCULAR doubly-linked `_left`/`_right`
+  lists (root list AND each child list circular), a `decreaseKey` that CUTS a node's subtree to the
+  root and CASCADES up its former parent chain (a marked parent is cut too; the first unmarked
+  non-root parent is marked and the walk stops) governed by a per-node `_mark` Uint8 column, and a
+  `popMin` that splices the min root's children into the root list then CONSOLIDATES by degree via a
+  preallocated per-arena degree bucket (`_bucket` Uint32, sized to the GOLDEN-RATIO degree bound
+  D(n) <= log_phi n ~ 1.44 log2 n -- ceil(log2 cap) would undersize it -- and cleared per call in
+  O(maxDegree), never left stale). Eight pointer-free columns (`_key` Float64, `_id` / `_left` /
+  `_right` / `_child` / `_parent` / `_degree` Uint32, `_mark` Uint8) + the arena-wide `_pos` Int32 +
+  per-slot `_owner` + union-find `_alias` + the `_bucket` scratch, over a private free-list
+  (NodePool); NIL = 0 reserves slot 0. SHARED-ARENA meld is O(1): concatenate the two circular root
+  lists + a union alias redirecting the donor's heap id to the melder's (INDEPENDENT of |donor|, no
+  per-node retag) + a cached-extreme update; `a.meld(b)` CONSUMES b (empty, size 0, DEAD). The
+  cascade is ITERATIVE (a native loop, no recursion) so decreaseKey stays 0 B/op. HONESTY: this
+  member is textbook-optimal in ASYMPTOTICS but OFTEN SLOWER wall-clock than Pairing/Binary on real
+  hardware (large constant factors); the witness DISCLOSES the MAX single popMin AND the MAX single
+  decreaseKey (the cascading-cut spike) and does NOT gate them. Its witness R^2 (popMin) gates on
+  the MEDIAN of independent sweep-fits: a single fit's R^2 can dip below the 0.958 floor in a
+  minority of runs, the median clears it reliably -- no unreproducible "every run" claim is made.
+  kind 'min' | 'max' frozen at construction; keys are finite numbers (typeof-guarded before
+  coercion). forEach / [Symbol.iterator] yield ids in UNSPECIFIED (forest) order. Zero allocation
+  on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -414,6 +444,37 @@ v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap. The r
   - `size` / `capacity` / `kind` getters; `clear()` -> this (frees only THIS heap's own nodes to
     the shared pool); `forEach(fn)` and `[Symbol.iterator]()` yield live ids in UNSPECIFIED
     (forest) order -- NOT sorted / pop order. Consumed heap throws on clear / forEach / iterate.
+- `FibonacciHeap` -- class. The mergeable-heap arc's FINALE: the textbook-optimal ADDRESSABLE
+  mergeable priority queue -- O(1)-amortized push/meld/decreaseKey (cascading cuts + a per-node mark
+  bit), O(log n)-amortized popMin/remove (degree consolidation). Same ADDRESSABLE, arena-wide-unique
+  id contract as PairingHeap. HONESTY: textbook-optimal asymptotics, but OFTEN slower wall-clock than
+  Pairing/Binary here; shipped for completeness + teaching.
+  - `new FibonacciHeap(capacity, kind = 'min')` -- capacity an integer in [1, 2^31-1] (also the
+    arena-wide id domain); kind 'min' | 'max' frozen at construction. Owns its OWN arena.
+  - `FibonacciHeap.arena(capacity, kind, count)` -> FibonacciHeap[]. Builds `count` EMPTY heaps that
+    SHARE one backing arena (pool + columns + arena-wide reverse map + degree-bucket scratch), so any
+    two of them meld in O(1). Fails closed on a bad capacity / kind / count (count integer >= 1).
+  - `push(id, key)` -> void. O(1) AMORTIZED (a singleton splice into the root list). Fails closed:
+    non-finite key (checked FIRST), out-of-range id, an id live ANYWHERE in the arena, a full arena,
+    or a consumed heap.
+  - `popMin()` -> id | undefined. AMORTIZED O(log n) (splice the min root's children into the root
+    list, then CONSOLIDATE by degree, 0 B/op). undefined if empty (no throw). Consumed heap throws.
+  - `peekMin()` -> id | undefined; `peekMinKey()` -> key | undefined. O(1) via the cached extreme.
+    undefined if empty. Consumed heap throws.
+  - `decreaseKey(id, newKey)` -> void. AMORTIZED O(1): lower the key; if heap order breaks, cut the
+    subtree to the root and CASCADE up (marked ancestors cut too). Moves TOWARD the heap's extreme; a
+    move away fails closed. Fails closed: non-finite key (FIRST), out-of-range / non-member id, a
+    sibling-owned id (O(1) owner guard), or a consumed heap.
+  - `remove(id)` -> boolean. AMORTIZED O(log n): cut + cascade + splice-children consolidation. true
+    if present, false if absent. Fails closed: out-of-range id, a sibling-owned id, or a consumed heap.
+  - `has(id)` -> boolean; `keyOf(id)` -> key | undefined. O(1) over the arena-wide reverse map.
+    Out-of-range id / consumed heap throw.
+  - `meld(other)` -> this. O(1): concatenate the two circular root lists + a union alias (INDEPENDENT
+    of |other|, no per-node retag) + a cached-extreme update. CONSUMES `other` (empty, size 0, DEAD).
+    Fails closed: non-FibonacciHeap arg, self-meld, cross-arena, kind mismatch, or a consumed operand.
+  - `size` / `capacity` / `kind` getters; `clear()` -> this (frees only THIS heap's own nodes to the
+    shared pool); `forEach(fn)` and `[Symbol.iterator]()` yield live ids in UNSPECIFIED (forest)
+    order -- NOT sorted / pop order. Consumed heap throws on clear / forEach / iterate.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

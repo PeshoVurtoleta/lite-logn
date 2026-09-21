@@ -24,9 +24,9 @@
 export const NA = 'n/a';
 
 /** The ten shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap'];
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap'];
 
-/** The thirteen gated D1 witness op-rows (member.op), in build order. */
+/** The fourteen gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -38,6 +38,7 @@ export const OP_ROWS = [
     'SplayTree.get',
     'BinomialHeap.popMin',
     'PairingHeap.popMin',
+    'FibonacciHeap.popMin',
 ];
 
 /** The eight measurement dimensions. */
@@ -67,6 +68,7 @@ export const BASELINE = {
     SplayTree: 'linear-scan',
     BinomialHeap: 'linear-min-scan-and-splice',
     PairingHeap: 'linear-min-scan-and-splice',
+    FibonacciHeap: 'linear-min-scan-and-splice',
 };
 
 /**
@@ -103,6 +105,10 @@ export const COUNTER_FOIL = {
     // neither the extreme, decreaseKey, nor meld, so there is no "faster but order-blind" O(1)
     // rival -- NA (the string, never 0).
     PairingHeap: NA,
+    // FibonacciHeap is an ADDRESSABLE mergeable priority queue like PairingHeap; a Map serves
+    // neither the extreme, decreaseKey, nor meld, so there is no "faster but order-blind" O(1)
+    // rival -- NA (the string, never 0).
+    FibonacciHeap: NA,
 };
 
 /**
@@ -188,6 +194,14 @@ export const RATIONALE = {
             'binomial heap declines to carry. No Map order-tax counterpoint (a Map serves neither the ' +
             'extreme, decreaseKey, nor meld).',
     },
+    FibonacciHeap: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear min-scan-and-splice extract over an unordered array (O(n) per extract-min) is the ' +
+            'honest default before the heap; the Fibonacci heap buys O(1)-amortized push/meld/decreaseKey ' +
+            'and O(log n)-amortized popMin/remove -- the textbook-optimal mergeable + addressable bounds. ' +
+            'HONESTLY it is OFTEN slower wall-clock than Pairing/Binary here (large constants); it is shipped ' +
+            'for completeness. No Map order-tax counterpoint (a Map serves neither the extreme, decreaseKey, nor meld).',
+    },
 };
 
 /**
@@ -238,7 +252,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (9 x 8 = 72 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (11 x 8 = 88 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -326,6 +340,15 @@ export const OP_CLASS = Object.freeze({
     'PairingHeap.popMin': OLOGN_AMORTIZED,      // unlink root + TWO-PASS combine the child list (the gated row)
     'PairingHeap.decreaseKey': OLOGN_AMORTIZED, // cut the subtree + link at the root
     'PairingHeap.remove': OLOGN_AMORTIZED,      // cut + two-pass-combine children + link at root
+    // FibonacciHeap: popMin / remove are AMORTIZED O(log n) (a single degree-consolidation can be
+    // O(n), amortizing to O(log n)); decreaseKey is AMORTIZED O(1) (a single cascading cut can be
+    // O(n), amortizing to O(1)) -- DETERMINISTIC, no RNG. push and meld are strict O(1), so (like the
+    // O(1) getters and the PairingHeap O(1) ops) they are deliberately NOT in this O(log n) honesty
+    // table; their O(1) nature is stated in llms/README/decisions instead. decreaseKey IS listed here
+    // as its amortized-O(1)-with-an-O(n)-spike bound is the load-bearing honesty claim.
+    'FibonacciHeap.popMin': OLOGN_AMORTIZED,      // splice children + CONSOLIDATE the root list by degree (the gated row)
+    'FibonacciHeap.decreaseKey': OLOGN_AMORTIZED, // cut the subtree + CASCADING cut up the parent chain
+    'FibonacciHeap.remove': OLOGN_AMORTIZED,      // cut + cascade + splice-children consolidation
 });
 
 // ===========================================================================
@@ -344,7 +367,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

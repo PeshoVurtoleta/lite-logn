@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -182,6 +182,20 @@ async function main() {
             pha.popMin();
             pha.peekMin();
             tracker.track(pha, noopRelease, 9 * CYCLES + i, { audit: true });
+            // A fresh FibonacciHeap ARENA per cycle (two arena-sharing heaps melded, decreaseKey'd,
+            // removed, then drained), dropped. Same held-value contract: a FibonacciHeap owns only
+            // its typed-array columns + arena-wide maps + degree-bucket scratch + a private NodePool
+            // (no external resource), so the no-op cleanup never defeats finalization -- and the
+            // O(1) meld keeps both alive to be reclaimed together (the arena is one graph of arrays).
+            const [fha, fhb] = FibonacciHeap.arena(64, (i & 1) ? 'max' : 'min', 2);
+            for (let k = 0; k < 20; k++) fha.push(k, (k * 2654435761) & 0xffff);
+            for (let k = 20; k < 40; k++) fhb.push(k, (k * 40503) & 0xffff);
+            fha.meld(fhb);    // consumes fhb; O(1) circular-list concat
+            fha.decreaseKey(30, (i & 1) ? 0x1ffff : -5); // reprioritize a melded-in id toward the extreme
+            fha.remove(10);
+            fha.popMin();
+            fha.peekMin();
+            tracker.track(fha, noopRelease, 10 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -656,6 +670,64 @@ async function main() {
     function phForEachCb(id, key) { phfeAcc = (phfeAcc + (id | 0) + (key | 0)) | 0; }
     const stepPhForEach = () => { ph.forEach(phForEachCb); };
 
+    // FibonacciHeap: one out-of-loop standalone heap prefilled to capacity (its own arena). Each lane
+    // is a real hot op that MUST allocate zero bytes -- the eight columns + arena-wide _pos/_owner
+    // maps + union-find alias + degree-bucket scratch + private NodePool are fixed at construction;
+    // the consolidation (popMin), the cascading cut (decreaseKey/remove), and the O(1) meld all
+    // rewrite slot links only, never a heap object. ids are UNIQUE arena-wide, so the churn lanes
+    // cycle within [0, CAP).
+    const fh = new FibonacciHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) fh.push(i, (i * 2654435761) & 0xffff);
+
+    let fhk = (VERSION.length | 0), fhacc = 0;
+    // push/popMin churn: pop the extreme id, push it back with a fresh key -> steady full heap.
+    // Exercises the degree consolidation (popMin) AND the O(1) root splice (push).
+    const stepFhPopMin = () => {
+        const id = fh.popMin();
+        fh.push(id, (fhk * 2654435761) & 0xffff);
+        fhk = (fhk + 1) | 0;
+    };
+    // decreaseKey churn: reprioritize a resident cycling id toward the min with an ever-smaller key
+    // (a descending counter keeps every move a genuine decrease -- the cut + cascading cut).
+    let fhdk = 0;
+    const stepFhDecreaseKey = () => {
+        fh.decreaseKey(fhdk & MASK, -(fhdk + 1));
+        fhdk = (fhdk + 1) | 0;
+    };
+    // remove + re-push churn: addressable delete then re-insert of the SAME id -> steady full heap,
+    // exercising the cut + cascade + splice-children consolidation + free-list free/alloc.
+    const stepFhRemove = () => {
+        const id = fhk & MASK;
+        if (fh.remove(id)) fh.push(id, (fhk * 2246822519) & 0xffff);
+        fhk = (fhk + 1) | 0;
+    };
+    // read mix: peekMin / peekMinKey / has / keyOf folded into an accumulator (O(1) reads).
+    const stepFhRead = () => {
+        const id = fhk & MASK;
+        fhacc = (fhacc + fh.peekMin() + (fh.peekMinKey() | 0) + (fh.has(id) ? 1 : 0) + (fh.keyOf(id) | 0)) | 0;
+        fhk = (fhk + 1) | 0;
+    };
+
+    // FibonacciHeap MELD + arena-churn: a fixed two-heap arena, driven steady-state. meld CONSUMES its
+    // donor (dead-after-meld fails closed), so to drive the O(1) meld hot body REPEATEDLY the donor is
+    // REFRESHED in place (white-box scalar + alias resets -- alloc-free) then reloaded. The measured
+    // body is the public O(1) meld (a circular-list concat + alias write) + the drain, which MUST
+    // allocate zero bytes; no ctor runs in the lane, so a non-zero reading is a real regression.
+    const [accF, donorF] = FibonacciHeap.arena(CAP, 'min', 2);
+    let mfk = 0;
+    const stepFhMeld = () => {
+        donorF._consumed = false; donorF._min = 0; donorF._n = 0; donorF._alias[donorF._hid] = donorF._hid;
+        for (let k = 0; k < 8; k++) donorF.push((mfk + k) & MASK, ((mfk + k) * 40503) & 0xffff);
+        accF.meld(donorF);              // consumes donorF; O(1) circular-list concat + alias write
+        for (let k = 0; k < 8; k++) fhacc = (fhacc + accF.popMin()) | 0; // drain back -> steady empty accF
+        mfk = (mfk + 8) | 0;
+    };
+
+    // forEach: the O(n) forest walk through a HOISTED callback -- no per-call closure alloc.
+    let fhfeAcc = 0;
+    function fhForEachCb(id, key) { fhfeAcc = (fhfeAcc + (id | 0) + (key | 0)) | 0; }
+    const stepFhForEach = () => { fh.forEach(fhForEachCb); };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -678,7 +750,8 @@ async function main() {
         stepMmhPopMin, stepMmhPopMax, stepMmhMixed, stepMmhRead,
         stepSpGet, stepSpWorkingSet, stepSpSet, stepSpDelete, stepSpSuccessor,
         stepBinhPopMin, stepBinhRead, stepBinhMeld,
-        stepPhPopMin, stepPhDecreaseKey, stepPhRemove, stepPhRead, stepPhMeld]) {
+        stepPhPopMin, stepPhDecreaseKey, stepPhRemove, stepPhRead, stepPhMeld,
+        stepFhPopMin, stepFhDecreaseKey, stepFhRemove, stepFhRead, stepFhMeld]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -690,7 +763,7 @@ async function main() {
     // so it shares that smaller budget. The gate is identical: 0 B/op or the whole
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
-        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach, stepPhForEach]) {
+        stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach, stepPhForEach, stepFhForEach]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -713,6 +786,8 @@ async function main() {
     if (bhfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep bhfeAcc live
     if (phacc === 0x7fffffff) throw new Error('unreachable'); // keep phacc live
     if (phfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep phfeAcc live
+    if (fhacc === 0x7fffffff) throw new Error('unreachable'); // keep fhacc live
+    if (fhfeAcc === 0x7fffffff) throw new Error('unreachable'); // keep fhfeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -820,6 +895,22 @@ async function main() {
             pa.meld(pb); // consumes pb; O(1) root relink
             while (pa.size > 0) sink = (sink + pa.popMin()) | 0;
         }
+        // FibonacciHeap churn every op: popMin then push a fresh id/key back (steady full heap),
+        // exercising the degree consolidation (popMin) + the O(1) root splice (push). A decreaseKey
+        // every 8th (cut + cascading cut) and a remove+re-push every 64th (cut + splice-children
+        // consolidation). A meld+arena-churn round fires SPARSELY (every 8192nd) on a fresh tiny
+        // arena: meld two arena-siblings then drain -- proving the O(1) meld runs inside the GC window
+        // with NO major collection (the transient arenas stay in new space). Steady, zero alloc.
+        { const id = fh.popMin(); fh.push(id, (i * 2654435761) & 0xffff); sink = (sink + id) | 0; }
+        if ((i & 7) === 0) fh.decreaseKey(i & MASK, -((i >>> 3) + 1));
+        if ((i & 63) === 0) { const rid = i & MASK; if (fh.remove(rid)) fh.push(rid, i & 0xffff); }
+        if ((i & 8191) === 0) {
+            const [fa, fb] = FibonacciHeap.arena(128, 'min', 2);
+            for (let k = 0; k < 64; k++) fa.push(k, (k * 2654435761) & 0xffff);
+            for (let k = 0; k < 64; k++) fb.push(k + 64, (k * 40503) & 0xffff);
+            fa.meld(fb); // consumes fb; O(1) circular-list concat
+            while (fa.size > 0) sink = (sink + fa.popMin()) | 0;
+        }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -843,12 +934,15 @@ async function main() {
     const abSp = new SplayTree(1024);
     const abBinh = new BinomialHeap(1024, 'min');
     const abPh = new PairingHeap(1024, 'min');
+    const abFh = new FibonacciHeap(1024, 'min');
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
     const [abMeldAcc, abMeldDonor] = BinomialHeap.arena(1024, 'min', 2);
     // The same conservation-ACROSS-MELD soak for PairingHeap's O(1) meld (one backing store).
     const [abPhMeldAcc, abPhMeldDonor] = PairingHeap.arena(1024, 'min', 2);
+    // The same conservation-ACROSS-MELD soak for FibonacciHeap's O(1) meld (one backing store).
+    const [abFhMeldAcc, abFhMeldDonor] = FibonacciHeap.arena(1024, 'min', 2);
     globalThis.gc();
     await new Promise((r) => setTimeout(r, 50));
     globalThis.gc();
@@ -978,6 +1072,40 @@ async function main() {
         if (phMelded !== 512) conservationOk = false;                                          // every node drained
         if (abPhMeldAcc._pool.activeSlots !== 0) conservationOk = false;                       // every slot returned
         if (abPhMeldAcc._pool.activeSlots + abPhMeldAcc._pool.freeListLength !== abPhMeldAcc._pool.capacity) conservationOk = false;
+        // FibonacciHeap (standalone): same free-list conservation contract, PLUS the addressable
+        // decreaseKey/remove paths. A full fill (each push is an O(1) root splice, frees no slots),
+        // then a decreaseKey round on half (cut + cascade, frees nothing), then a real remove() round
+        // on half (cut + cascade + splice-children consolidation + slot free), then a refill, then
+        // clear() -> a forest walk that frees every own node -- the invariant must hold after each phase.
+        for (let i = 0; i < 1024; i++) abFh.push(i, (i * 2654435761) & 0xffff);
+        if (abFh._pool.activeSlots + abFh._pool.freeListLength !== abFh._pool.capacity || abFh._pool.activeSlots !== 1024) conservationOk = false;
+        for (let i = 0; i < 512; i++) abFh.decreaseKey(i, -(i + 1)); // cut + cascade, no pool churn
+        if (abFh._pool.activeSlots !== 1024) conservationOk = false;
+        for (let i = 0; i < 512; i++) abFh.remove(i);
+        if (abFh._pool.activeSlots + abFh._pool.freeListLength !== abFh._pool.capacity || abFh._pool.activeSlots !== 512) conservationOk = false;
+        for (let i = 0; i < 512; i++) abFh.push(i, (i * 40503) & 0xffff);
+        if (abFh._pool.activeSlots + abFh._pool.freeListLength !== abFh._pool.capacity) conservationOk = false;
+        abFh.clear();
+        if (abFh._pool.activeSlots + abFh._pool.freeListLength !== abFh._pool.capacity || abFh._pool.activeSlots !== 0) conservationOk = false;
+        // CONSERVATION ACROSS MELD for FibonacciHeap's O(1) meld: fill two arena-siblings, meld, and
+        // assert nodes MOVE root lists but NEVER pools -- activeSlots unchanged, size the exact sum,
+        // the melded-in ids reprioritizable via the surviving heap (the addressable contract), and a
+        // full drain returns every slot. The donor is refreshed in place (alloc-free) each round.
+        abFhMeldDonor._consumed = false; abFhMeldDonor._min = 0; abFhMeldDonor._n = 0; abFhMeldDonor._alias[abFhMeldDonor._hid] = abFhMeldDonor._hid;
+        for (let i = 0; i < 256; i++) abFhMeldAcc.push(i, (i * 2654435761) & 0xffff);
+        for (let i = 256; i < 512; i++) abFhMeldDonor.push(i, (i * 40503) & 0xffff);
+        const beforeFhMeldActive = abFhMeldAcc._pool.activeSlots; // 512 nodes across the two heaps
+        if (beforeFhMeldActive !== 512) conservationOk = false;
+        abFhMeldAcc.meld(abFhMeldDonor); // consumes donor; circular-list concat + alias, pools untouched
+        if (abFhMeldAcc._pool.activeSlots !== beforeFhMeldActive) conservationOk = false;     // no pool churn
+        if (abFhMeldAcc._pool.activeSlots + abFhMeldAcc._pool.freeListLength !== abFhMeldAcc._pool.capacity) conservationOk = false;
+        if (abFhMeldAcc.size !== 512 || abFhMeldDonor.size !== 0) conservationOk = false;      // size conserved; donor emptied
+        abFhMeldAcc.decreaseKey(400, -1); // a melded-in id is now the acc's -> reprioritizable
+        if (abFhMeldAcc.peekMin() !== 400) conservationOk = false;                             // reached the extreme
+        let fhMelded = 0; while (abFhMeldAcc.size > 0) { abFhMeldAcc.popMin(); fhMelded++; }
+        if (fhMelded !== 512) conservationOk = false;                                          // every node drained
+        if (abFhMeldAcc._pool.activeSlots !== 0) conservationOk = false;                       // every slot returned
+        if (abFhMeldAcc._pool.activeSlots + abFhMeldAcc._pool.freeListLength !== abFhMeldAcc._pool.capacity) conservationOk = false;
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -995,7 +1123,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

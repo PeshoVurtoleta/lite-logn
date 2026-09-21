@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -960,6 +960,145 @@ const phMeldChurn = {
     statsOf(s) { return { grows: phGrows(s) }; },
 };
 
+/** FibonacciHeap's zero-alloc counter: its eight typed-array columns, the arena-wide reverse map
+ *  (_pos) + owner tags, the union-find alias, the degree-bucket scratch, plus the private pool's
+ *  free-stack -- all fixed at construction, so the delta across the window must be 0 (the
+ *  consolidation, the cascading cut, and the O(1) meld rewrite slot links only). */
+function fhGrows(s) {
+    const h = s.fh;
+    return h._key.buffer.byteLength + h._id.buffer.byteLength +
+        h._left.buffer.byteLength + h._right.buffer.byteLength +
+        h._child.buffer.byteLength + h._parent.buffer.byteLength +
+        h._degree.buffer.byteLength + h._mark.buffer.byteLength +
+        h._pos.buffer.byteLength + h._owner.buffer.byteLength +
+        h._alias.buffer.byteLength + h._bucket.buffer.byteLength +
+        h._pool._free.buffer.byteLength;
+}
+
+/** A standalone FibonacciHeap prefilled to capacity (ids 0..CAP-1 resident, integer keys). */
+function fhFill() {
+    const h = new FibonacciHeap(CAP, 'min');
+    for (let i = 0; i < CAP; i++) h.push(i, (i * 2654435761) & 0xffff);
+    return h;
+}
+
+const FHMASK = CAP - 1; // ids 0..CAP-1 resident (capacity == id domain)
+
+/**
+ * push/popMin churn at steady capacity: the heap starts FULL, each op pops the extreme (a degree
+ * consolidation, freeing one slot) then pushes that same id back (an O(1) root splice). Heap never
+ * overflows or empties; zero allocation.
+ */
+const fhPopMinChurn = {
+    name: 'FibonacciHeap push + popMin churn',
+    setup() { return { fh: fhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.fh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = h.popMin();
+            h.push(id, (t * 2654435761) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fhGrows(s) }; },
+};
+
+/**
+ * decreaseKey churn: a full heap seeded with high keys, each op reprioritizes a resident cycling id
+ * TOWARD the min with a fresh strictly-smaller key -- the cut + cascading cut. A descending counter
+ * keeps every move toward the min (monotone) and the key never underflows in this window.
+ */
+const fhDecreaseKeyChurn = {
+    name: 'FibonacciHeap decreaseKey churn (cut + cascading cut)',
+    setup() {
+        const h = new FibonacciHeap(CAP, 'min');
+        for (let i = 0; i < CAP; i++) h.push(i, 1e12 + i); // high keys so any decrease is toward the min
+        return { fh: h, tick: 0 };
+    },
+    hot(s, n) {
+        const h = s.fh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & FHMASK;
+            h.decreaseKey(id, -(t + 1));
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fhGrows(s) }; },
+};
+
+/**
+ * remove + re-push churn: addressable delete of a resident cycling id (cut + cascade + splice-
+ * children consolidation) then re-insert the SAME id -> steady full heap. Zero allocation.
+ */
+const fhRemoveChurn = {
+    name: 'FibonacciHeap remove + re-push churn',
+    setup() { return { fh: fhFill(), tick: 0 }; },
+    hot(s, n) {
+        const h = s.fh;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & FHMASK;
+            if (h.remove(id)) h.push(id, (t * 2246822519) & 0xffff);
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fhGrows(s) }; },
+};
+
+/**
+ * peekMin / peekMinKey / has / keyOf read mix over a full heap, folded into an int32 accumulator.
+ * All O(1) reads (cached extreme + arena-wide reverse map); no allocation.
+ */
+const fhReadMix = {
+    name: 'FibonacciHeap peekMin/peekMinKey/has/keyOf read mix',
+    setup() { return { fh: fhFill(), acc: 0, tick: 0 }; },
+    hot(s, n) {
+        const h = s.fh;
+        let acc = s.acc | 0, t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            const id = t & FHMASK;
+            acc = (acc + h.peekMin() + (h.peekMinKey() | 0) + (h.has(id) ? 1 : 0) + (h.keyOf(id) | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.acc = acc | 0; s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fhGrows(s) }; },
+};
+
+/**
+ * meld + arena-churn: a fixed two-heap arena. meld CONSUMES its donor (a dead-after-meld heap fails
+ * closed on reuse), so to drive the O(1) meld hot body REPEATEDLY the donor is refreshed in place
+ * (white-box scalar + alias resets -- alloc-free) then reloaded; the melded result is drained back
+ * so the arena returns to empty. The measured body is the public O(1) meld (a circular-list concat +
+ * alias write) + the drain, which allocates zero bytes.
+ */
+const fhMeldChurn = {
+    name: 'FibonacciHeap meld + arena-churn',
+    setup() {
+        const [acc, donor] = FibonacciHeap.arena(CAP, 'min', 2);
+        return { fh: acc, donor, tick: 0 };
+    },
+    hot(s, n) {
+        const acc = s.fh, donor = s.donor;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            // alloc-free refresh of the (consumed) donor: reset scalars AND its alias entry to a root.
+            donor._consumed = false; donor._min = 0; donor._n = 0; donor._alias[donor._hid] = donor._hid;
+            for (let k = 0; k < 8; k++) donor.push(((t + k) & FHMASK), ((t + k) * 40503) & 0xffff);
+            acc.meld(donor);                          // consumes donor; O(1) circular-list concat + alias
+            for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc, slots released
+            t = (t + 8) | 0;
+        }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: fhGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -998,6 +1137,7 @@ zgcSuite({
         mmhPopMinChurn, mmhPopMaxChurn, mmhMixedChurn, mmhReadMix,
         spGetChurn, spSetChurn, spDeleteChurn, spSuccessorChurn,
         binhPopMinChurn, binhReadMix, binhMeldChurn,
-        phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn],
+        phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn,
+        fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn],
     mustFail: [teethMustFailAlloc],
 });

@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -232,6 +232,20 @@ function kPairingHeapPopMin(n) {
     };
 }
 
+function kFibonacciHeapPopMin(n) {
+    // A full Fibonacci heap of n ids; each op pops the extreme id and re-pushes it with a fresh key
+    // -- the amortized O(log n) degree-consolidation (popMin) + O(1) root-splice (push) pair, size
+    // steady at n. SINK is kept a 32-bit Smi (`| 0`) to avoid boxing a HeapNumber per op (D6 hygiene).
+    const h = new FibonacciHeap(n, 'min');
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) h.push(k, rng());
+    let t = 1;
+    return {
+        obj: h,
+        op: () => { const id = h.popMin(); t = (t * 1103515245 + 12345) & 0x7fffffff; h.push(id, t); SINK = (SINK + id) | 0; },
+    };
+}
+
 function kSplayGet(n) {
     // A full ordered map of n keys; each op searches a random resident key. A splay-get
     // RESTRUCTURES (moves the touched key to the root), so cost is AMORTIZED O(log n). The
@@ -277,6 +291,7 @@ export function makeOpKernel(member, op, n) {
         case 'SplayTree.get': return kSplayGet(n);
         case 'BinomialHeap.popMin': return kBinomialHeapPopMin(n);
         case 'PairingHeap.popMin': return kPairingHeapPopMin(n);
+        case 'FibonacciHeap.popMin': return kFibonacciHeapPopMin(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -293,6 +308,7 @@ export function makeSubject(member, n) {
     if (member === 'SplayTree') return kSplaySet(n);
     if (member === 'BinomialHeap') return kBinomialHeapPopMin(n);
     if (member === 'PairingHeap') return kPairingHeapPopMin(n);
+    if (member === 'FibonacciHeap') return kFibonacciHeapPopMin(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -481,6 +497,14 @@ export function memberBytes(member, obj) {
             obj._sibling.buffer.byteLength + obj._pos.buffer.byteLength +
             obj._owner.buffer.byteLength + obj._pool._free.buffer.byteLength;
     }
+    if (member === 'FibonacciHeap') {
+        return obj._key.buffer.byteLength + obj._id.buffer.byteLength +
+            obj._left.buffer.byteLength + obj._right.buffer.byteLength +
+            obj._child.buffer.byteLength + obj._parent.buffer.byteLength +
+            obj._degree.buffer.byteLength + obj._mark.buffer.byteLength +
+            obj._pos.buffer.byteLength + obj._owner.buffer.byteLength +
+            obj._bucket.buffer.byteLength + obj._pool._free.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -496,6 +520,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'SplayTree') return 16;   // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'BinomialHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
     if (member === 'PairingHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
+    if (member === 'FibonacciHeap') return 12; // key (Float64, 8) + id (Uint32, 4) per live entry
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -516,6 +541,7 @@ function fillMember(member, obj, count) {
     if (member === 'SplayTree') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
     if (member === 'BinomialHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     if (member === 'PairingHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
+    if (member === 'FibonacciHeap') { obj.clear(); for (let k = 0; k < count; k++) obj.push(k, k); return; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -538,7 +564,7 @@ function fillMember(member, obj, count) {
  * fixed length, so their "content" is the residual accumulated total (0 == cleared).
  */
 function clearContent(member, obj) {
-    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap') return obj.size;
+    if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap') return obj.size;
     if (member === 'Fenwick') return obj.prefix(obj.length - 1);      // sum of all cells
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -554,6 +580,7 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'SplayTree') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
     if (member === 'BinomialHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'PairingHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
+    if (member === 'FibonacciHeap') { for (let k = 0; k < n; k++) obj.push(k, k); return n; }
     if (member === 'Fenwick') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, 1); return L; }
     if (member === 'SegmentTree') { const L = obj.length; for (let i = 0; i < L; i++) obj.update(i, (i & 0xffff) + 1); return L; }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
@@ -614,6 +641,7 @@ export function D3(member, opts = {}) {
     else if (member === 'SplayTree') obj = new SplayTree(n);
     else if (member === 'BinomialHeap') obj = new BinomialHeap(n, 'min');
     else if (member === 'PairingHeap') obj = new PairingHeap(n, 'min');
+    else if (member === 'FibonacciHeap') obj = new FibonacciHeap(n, 'min');
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -711,6 +739,8 @@ function randomLookupOp(member, obj, n, rng) {
     // PairingHeap IS addressable by id (has(id) is O(1) over the arena-wide reverse map). Probe a
     // random resident id -- the addressable random-read analogue. PROXY-only.
     if (member === 'PairingHeap') return () => { if (obj.has(rng() % n)) SINK++; };
+    // FibonacciHeap IS addressable by id like PairingHeap: probe a random resident id. PROXY-only.
+    if (member === 'FibonacciHeap') return () => { if (obj.has(rng() % n)) SINK++; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -729,6 +759,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'BinomialHeap') return () => { const v = obj.peekMin(); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     // PairingHeap IS addressable by id: sequential has(id) probe (its addressable read). PROXY-only.
     if (member === 'PairingHeap') return () => { if (obj.has(i)) SINK++; i++; if (i >= n) i = 0; };
+    // FibonacciHeap IS addressable by id: sequential has(id) probe (its addressable read). PROXY-only.
+    if (member === 'FibonacciHeap') return () => { if (obj.has(i)) SINK++; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -745,6 +777,7 @@ function buildFull(member, n) {
     else if (member === 'SplayTree') { obj = new SplayTree(n); for (let k = 0; k < n; k++) obj.set(k, k); }
     else if (member === 'BinomialHeap') { obj = new BinomialHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else if (member === 'PairingHeap') { obj = new PairingHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
+    else if (member === 'FibonacciHeap') { obj = new FibonacciHeap(n, 'min'); for (let k = 0; k < n; k++) obj.push(k, k); }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -975,6 +1008,12 @@ function buildOrderNs(member, n, order) {
             for (let i = 0; i < n; i++) ph.push(i, keys[i]);
             elapsed += performance.now() - t0;
             SINK += ph.size;
+        } else if (member === 'FibonacciHeap') {
+            const fh = new FibonacciHeap(n, 'min');
+            const t0 = performance.now();
+            for (let i = 0; i < n; i++) fh.push(i, keys[i]);
+            elapsed += performance.now() - t0;
+            SINK += fh.size;
         } else { // SkipList
             const sl = new SkipList(n, 0x13 >>> 0);
             const t0 = performance.now();
@@ -1010,7 +1049,7 @@ export function D7(member, opts = {}) {
     const nearFullNs = loadOpNs(member, n, 0.99);
 
     // Insertion order: applicable only to the comparison/order-sensitive members.
-    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap');
+    const orderSensitive = (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap');
     const on = opts.orderN ?? Math.min(n, 1 << 14);
     const insertionOrder = orderSensitive
         ? {
@@ -1108,7 +1147,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
     if (member === 'BinaryHeap' || member === 'Fenwick' ||
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
-        member === 'BinomialHeap' || member === 'PairingHeap') mode = 0;
+        member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);
