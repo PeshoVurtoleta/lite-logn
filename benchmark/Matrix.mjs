@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The twelve shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D'];
+/** The fourteen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray'];
 
-/** The eighteen gated D1 witness op-rows (member.op), in build order. */
+/** The nineteen gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -41,6 +41,7 @@ export const OP_ROWS = [
     'FibonacciHeap.popMin',
     'Fenwick2D.update', 'Fenwick2D.rectSum',
     'SegmentTree2D.update', 'SegmentTree2D.query',
+    'SortedArray.get',
 ];
 
 /** The eight measurement dimensions. */
@@ -73,6 +74,7 @@ export const BASELINE = {
     FibonacciHeap: 'linear-min-scan-and-splice',
     Fenwick2D: '2d-prefix-rebuild/rect-scan',
     SegmentTree2D: '2d-grid-rebuild/rect-scan',
+    SortedArray: 'linear-scan',
 };
 
 /**
@@ -119,6 +121,10 @@ export const COUNTER_FOIL = {
     // SegmentTree2D is a 2D range-fold structure, not an ordered map; a Map cannot answer a
     // rectangle min/max/sum/gcd at all, so there is no "faster but order-blind" O(1) rival -- NA.
     SegmentTree2D: NA,
+    // SortedArray is the family's contiguous ordered map with the same Map order-tax as SkipList/Treap/
+    // Scapegoat/SplayTree, but the counter-foil is the one-time family illustration carried by SkipList;
+    // SortedArray reads NA to avoid a redundant Map comparison.
+    SortedArray: NA,
 };
 
 /**
@@ -227,6 +233,14 @@ export const RATIONALE = {
             'the general min/max/sum/gcd folds a 2D BIT cannot do (at ~4x the space). No Map order-tax ' +
             'counterpoint (a Map cannot answer a rectangle fold at all).',
     },
+    SortedArray: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a naive linear scan for a key over a plain array is the O(n) default before the ' +
+            'binary-search trick -- the honest rival that motivates O(log n) get / rank. SortedArray ' +
+            'IS the sorted-array foil the pointer-based ordered maps were measured against, now a member: ' +
+            'it buys the fastest reads + iteration (contiguous storage) at the disclosed cost of O(n) ' +
+            'writes. No Map order-tax counterpoint (the one-time family illustration is carried by SkipList).',
+    },
 };
 
 /**
@@ -270,7 +284,7 @@ export function supportsKeyType(member, keyType) {
 export function supportsWorkload(member, workload) {
     if (!SUBJECTS.includes(member)) return false;
     if (workload === 'churn') return true;
-    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'SplayTree';
+    if (workload === 'ordered') return member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'SplayTree' || member === 'SortedArray';
     return false;
 }
 
@@ -389,6 +403,13 @@ export const OP_CLASS = Object.freeze({
     // hook as Fenwick2D: the second dimension is not free, so OLOGN2_WORST, never single-log.
     'SegmentTree2D.update': OLOGN2_WORST,  // climb the leaf row's col-tree, then the whole row-tree
     'SegmentTree2D.query': OLOGN2_WORST,   // outer row descent x inner col descent (the gated row)
+    // SortedArray: get is a DETERMINISTIC lower-bound BINARY SEARCH over the contiguous sorted key
+    // column -> WORST-CASE O(log n) (the gated row), the exact analogue of Scapegoat.get. set / delete
+    // are O(n) (a copyWithin tail shift), NOT an O(log n) class, so they are deliberately NOT in this
+    // O(log n) honesty table -- their O(n) write cost is the DISCLOSED max-single-op bar stated in
+    // llms / README / decisions (the "worst-case O(log n) reads, O(n) writes disclosed" pattern),
+    // never gated and never smuggled in here as a log op.
+    'SortedArray.get': OLOGN_WORST,        // lower-bound binary search over the sorted key column (the gated row)
 });
 
 // ===========================================================================
@@ -407,7 +428,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

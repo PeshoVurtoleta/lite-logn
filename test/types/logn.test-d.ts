@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -334,3 +334,33 @@ fh.select(0);
 
 // @ts-expect-error -- FibonacciHeap is not an ordered map: no successor.
 fh.successor(3);
+
+// --- SortedArray -----------------------------------------------------------
+const sa = new SortedArray(1024);
+const saSet: SortedArray = sa.set(3, 2.5);          // fluent -> this
+const saGet: number | undefined = sa.get(3);
+const saHas: boolean = sa.has(3);
+const saDel: boolean = sa.delete(3);
+const saRank: number = sa.rank(3);
+const saSel: number | undefined = sa.select(0);
+const saKeyAt: number | undefined = sa.keyAt(0);
+const saValAt: number | undefined = sa.valueAt(0);
+const saSucc: number | undefined = sa.successor(3);
+const saPred: number | undefined = sa.predecessor(3);
+const saMin: number | undefined = sa.min();
+const saMax: number | undefined = sa.max();
+const saSize: number = sa.size;
+const saCap: number = sa.capacity;
+const saClear: SortedArray = sa.clear();            // fluent -> this
+sa.forEach((key, value, self) => { void key; void value; void self; });
+for (const key of sa.rangeIter(0, 10)) { void key; }
+const saBuilt: SortedArray = SortedArray.build([3, 1, 2], [30, 10, 20]);
+void saSet; void saGet; void saHas; void saDel; void saRank; void saSel; void saKeyAt;
+void saValAt; void saSucc; void saPred; void saMin; void saMax; void saSize; void saCap;
+void saClear; void saBuilt;
+
+// @ts-expect-error -- set value must be a number.
+sa.set(1, 'x');
+
+// @ts-expect-error -- SortedArray constructor takes a single capacity argument.
+new SortedArray(8, 'min');

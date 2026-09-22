@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -214,6 +214,18 @@ async function main() {
             st2.query(1, 1, 10, 10);
             st2.at(7, 7);
             tracker.track(st2, noopRelease, 12 * CYCLES + i, { audit: true });
+            // A fresh SortedArray per cycle, exercised (scattered inserts -> shift-heavy, a
+            // delete, reads) then dropped. Same held-value contract: a SortedArray owns only its
+            // two Float64Arrays (no external resource), so the no-op cleanup never defeats
+            // finalization.
+            const sa = new SortedArray(64);
+            for (let k = 0; k < 40; k++) sa.set((k * 2654435761) & 63, k); // scattered -> tail shifts
+            sa.get(7);
+            sa.rank(20);
+            sa.select(3);
+            sa.successor(3);
+            sa.delete(5);
+            tracker.track(sa, noopRelease, 13 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -816,6 +828,58 @@ async function main() {
     function st2ForEachCb(value, r, c) { st2feAcc = (st2feAcc + (value | 0) + r + c) | 0; }
     const stepSt2ForEach = () => { st2.forEach(st2ForEachCb); };
 
+    // SortedArray: one out-of-loop map prefilled to half capacity (a warmed, stable sorted column).
+    // Each lane is a real hot op that MUST allocate zero RETAINED bytes -- the two Float64Arrays are
+    // fixed at construction, the binary search + index reads use only local scalars, the set / delete
+    // shift in place via copyWithin (NO temp, NO spread -> 0 B/op even on the O(n) write), and the
+    // rangeIter generator's per-step {value, done} objects are TRANSIENT (dropped each call).
+    const sa = new SortedArray(CAP);
+    for (let i = 0; i < HALF; i++) sa.set(i, (i * 2654435761) & 0xffff);
+
+    let sak = 0, saacc = 0;
+    // get: a hit on a resident cycling key (O(log n) binary search), folded into an accumulator.
+    const stepSaGet = () => {
+        saacc = (saacc + (sa.get(sak & HMASK) | 0)) | 0;
+        sak = (sak + 1) | 0;
+    };
+    // rank / select: an O(log n) lower-bound search + an O(1) index read, folded in.
+    const stepSaRankSelect = () => {
+        saacc = (saacc + (sa.rank(sak & HMASK) | 0)) | 0;
+        const v = sa.select(sak & (HMASK >> 1));
+        saacc = (saacc + (v === undefined ? 0 : v | 0)) | 0;
+        sak = (sak + 1) | 0;
+    };
+    // set (in-place value update of a resident key): no shift, the pure O(log n) update path.
+    const stepSaSet = () => {
+        sa.set(sak & HMASK, sak & 0xffff);
+        sak = (sak + 1) | 0;
+    };
+    // SHIFT-HEAVY insert/delete: delete a resident key (O(n) shift DOWN via copyWithin) then re-insert
+    // the SAME key (O(n) shift UP) -> steady size, both copyWithin shifts exercised. This is the lane
+    // that PROVES the O(n) in-place shift is 0 B/op (no temp array, no spread).
+    const stepSaDeleteInsert = () => {
+        const key = sak & HMASK;
+        if (sa.delete(key)) sa.set(key, (sak * 2246822519) & 0xffff);
+        sak = (sak + 1) | 0;
+    };
+    // successor: a strictly-greater lookup on a cycling key, folded in.
+    const stepSaSuccessor = () => {
+        const v = sa.successor(sak & HMASK);
+        saacc = (saacc + (v === undefined ? 0 : v | 0)) | 0;
+        sak = (sak + 1) | 0;
+    };
+    // forEach: the O(n) CONTIGUOUS ascending scan through a HOISTED callback -- no per-call alloc.
+    let safeAcc = 0;
+    function saForEachCb(key, value) { safeAcc = (safeAcc + (key | 0) + (value | 0)) | 0; }
+    const stepSaForEach = () => { sa.forEach(saForEachCb); };
+    // rangeIter: fully consume a small fixed-width window; the generator is transient (dropped each
+    // call), so retained growth is 0.
+    const stepSaRangeIter = () => {
+        const lo = sak & (HMASK >> 1);
+        for (const key of sa.rangeIter(lo, lo + 8)) saacc = (saacc + (key | 0)) | 0;
+        sak = (sak + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -841,7 +905,8 @@ async function main() {
         stepPhPopMin, stepPhDecreaseKey, stepPhRemove, stepPhRead, stepPhMeld,
         stepFhPopMin, stepFhDecreaseKey, stepFhRemove, stepFhRead, stepFhMeld,
         stepF2Update, stepF2RectSum, stepF2Prefix, stepF2At, stepF2Set,
-        stepSt2Update, stepSt2Query, stepSt2At]) {
+        stepSt2Update, stepSt2Query, stepSt2At,
+        stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -854,7 +919,8 @@ async function main() {
     // verdict fails.
     for (const step of [stepForEach, stepSegForEach, stepSlRangeIter, stepTrForEach, stepTrRangeIter,
         stepScForEach, stepScRangeIter, stepSpForEach, stepSpRangeIter, stepBinhForEach, stepPhForEach, stepFhForEach,
-        stepF2ForEach, stepSt2ForEach]) {
+        stepF2ForEach, stepSt2ForEach,
+        stepSaDeleteInsert, stepSaForEach, stepSaRangeIter]) {
         const r = measureAllocs(step, { iterations: 3000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -883,6 +949,8 @@ async function main() {
     if (f2feAcc === 0x7fffffff) throw new Error('unreachable'); // keep f2feAcc live
     if (st2acc === 0x7fffffff) throw new Error('unreachable'); // keep st2acc live
     if (st2feAcc === 0x7fffffff) throw new Error('unreachable'); // keep st2feAcc live
+    if (saacc === 0x7fffffff) throw new Error('unreachable'); // keep saacc live
+    if (safeAcc === 0x7fffffff) throw new Error('unreachable'); // keep safeAcc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1016,6 +1084,18 @@ async function main() {
         // Nested iterative descents/climbs; steady grid, zero alloc.
         st2.update(i & F2MASK, (i >> 6) & F2MASK, i & 0xffff);
         { const r = i & (F2MASK >> 1), c = (i >> 3) & (F2MASK >> 1); sink = (sink + (st2.query(r, c, r + 20, c + 20) | 0)) | 0; }
+        // SortedArray churn every op: an in-place value set and a get (O(log n) binary search), plus a
+        // rank+select every 8th and a delete+re-insert every 64th -- the SHIFT-HEAVY O(n) copyWithin
+        // path (both a shift-down and a shift-up), kept hot inside the GC window to prove the O(n) write
+        // is 0 B/op. Steady size, zero alloc.
+        sa.set(i & HMASK, i & 0xffff);
+        sink = (sink + (sa.get(i & HMASK) | 0)) | 0;
+        if ((i & 7) === 0) {
+            sink = (sink + (sa.rank(i & HMASK) | 0)) | 0;
+            const sv = sa.select(i & (HMASK >> 1));
+            sink = (sink + (sv === undefined ? 0 : sv | 0)) | 0;
+        }
+        if ((i & 63) === 0) { const key = i & HMASK; if (sa.delete(key)) sa.set(key, i & 0xffff); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1042,6 +1122,7 @@ async function main() {
     const abFh = new FibonacciHeap(1024, 'min');
     const abF2 = new Fenwick2D(32, 32); // 1024 cells; one flat Float64Array, reused across the soak
     const abSt2 = new SegmentTree2D(32, 32, 'sum'); // 4096 cells; one flat Float64Array, reused
+    const abSa = new SortedArray(1024); // two Float64Arrays, reused across the soak (copyWithin in place)
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1113,6 +1194,14 @@ async function main() {
         // arrayBuffers must not grow across soak cycles.
         for (let rr = 0; rr < 32; rr++) for (let cc = 0; cc < 32; cc++) abSt2.update(rr, cc, (rr * 32 + cc) & 0xffff);
         abSt2.clear();
+        // SortedArray: two fixed Float64Arrays, no free-list. A SCATTERED fill (each insert is an O(n)
+        // copyWithin shift), then a scattered delete round on half (O(n) shift down), then a refill,
+        // then bulk clear -- all IN PLACE, so arrayBuffers must not grow across soak cycles (a botched
+        // shift that reallocated the backing store would grow it here).
+        for (let i = 0; i < 1024; i++) abSa.set((i * 2654435761) & 1023, i); // scattered -> shift-heavy
+        for (let i = 0; i < 512; i++) abSa.delete((i * 2654435761) & 1023);
+        for (let i = 0; i < 512; i++) abSa.set((i * 2654435761) & 1023, i);
+        abSa.clear();
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
         // half the slots, then a refill (splaying), then clear -- the invariant must hold
@@ -1239,7 +1328,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

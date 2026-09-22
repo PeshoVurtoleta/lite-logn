@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.13.0 ships thirteen members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge), Scapegoat (a DETERMINISTIC weight-balanced augmented ordered map: worst-case-O(log n) get, amortized-O(log n) set / delete, zero-GC rebuild), MinMaxHeap (an array-embedded double-ended priority queue: O(1) peekMin / peekMax, O(log n) push / popMin / popMax), SplayTree (a self-adjusting ordered map: amortized-O(log n) get / set / delete via top-down splay, hot keys ride near the root), BinomialHeap (a mergeable priority queue: O(log n) meld of two heaps over a shared arena, O(1)-amortized push, O(log n) popMin), PairingHeap (an ADDRESSABLE mergeable priority queue: O(1) push / meld over a shared arena, amortized-O(log n) popMin / decreaseKey / remove by arena-wide-unique id), FibonacciHeap (the textbook-optimal ADDRESSABLE mergeable priority queue: O(1)-amortized push / meld / decreaseKey, O(log n)-amortized popMin / remove), Fenwick2D (the family's FIRST 2D structure: O(log^2 n) point-update AND rectangle-sum over a flat 2D Binary Indexed Tree), and SegmentTree2D (the general 2D rectangle FOLD a 2D BIT cannot do: O(log^2 n) point-update AND rectangle min / max / sum / gcd over a flat segment tree of segment trees) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` (or `slope*(log2 n)^2` for Fenwick2D / SegmentTree2D) and shows the straight log line while an O(n) foil leaves it.
+> Zero-GC, O(log n) data structures that PROVE their logarithm. The O(log n) sibling of `@zakkster/lite-o1`: where lite-o1 holds the constant (a flat ops/ms line), lite-logn holds the logarithm (a straight line on a log-x axis -- one added level per doubling of n). v0.14.0 ships fourteen members: BinaryHeap (array-embedded O(log n) push / pop min|max heap), Fenwick / BIT (O(log n) point-update AND prefix-sum via the `i & -i` walk), SegmentTree (O(log n) associative range-query -- min / max / sum / gcd -- plus point-update over a flat 2n array), SkipList (pointer-free expected-O(log n) ordered map over a private free-list node pool), Treap (a randomized-balanced augmented ordered map with O(log n) rank / select / split / merge), Scapegoat (a DETERMINISTIC weight-balanced augmented ordered map: worst-case-O(log n) get, amortized-O(log n) set / delete, zero-GC rebuild), MinMaxHeap (an array-embedded double-ended priority queue: O(1) peekMin / peekMax, O(log n) push / popMin / popMax), SplayTree (a self-adjusting ordered map: amortized-O(log n) get / set / delete via top-down splay, hot keys ride near the root), BinomialHeap (a mergeable priority queue: O(log n) meld of two heaps over a shared arena, O(1)-amortized push, O(log n) popMin), PairingHeap (an ADDRESSABLE mergeable priority queue: O(1) push / meld over a shared arena, amortized-O(log n) popMin / decreaseKey / remove by arena-wide-unique id), FibonacciHeap (the textbook-optimal ADDRESSABLE mergeable priority queue: O(1)-amortized push / meld / decreaseKey, O(log n)-amortized popMin / remove), Fenwick2D (the family's FIRST 2D structure: O(log^2 n) point-update AND rectangle-sum over a flat 2D Binary Indexed Tree), SegmentTree2D (the general 2D rectangle FOLD a 2D BIT cannot do: O(log^2 n) point-update AND rectangle min / max / sum / gcd over a flat segment tree of segment trees), and SortedArray (the read-optimized ordered map: O(log n) get / rank / successor / predecessor and O(1) select / keyAt / valueAt / min / max over two parallel sorted arrays, with O(n) in-place-shift writes disclosed) -- each zero-GC, each shipped with a log-linear Witness that fits `nsPerOp = intercept + slope*log2(n)` (or `slope*(log2 n)^2` for Fenwick2D / SegmentTree2D) and shows the straight log line while an O(n) foil leaves it.
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-logn.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-logn)
 [![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
@@ -19,7 +19,7 @@ Almost no JavaScript data-structure library ships the evidence that its Big-O cl
 
 lite-logn is the O(log n) sibling of [`@zakkster/lite-o1`](https://www.npmjs.com/package/@zakkster/lite-o1). lite-o1 proves a FLAT ops/ms line on a log-x axis (the constant -- slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one added level per doubling of `n` -- slope > 0, within a per-member band). The gate SHAPE differs; the discipline is identical: zero allocation on every hot path and a witness that turns "trust me, it is O(log n)" into a straight line you can see, with a foil that leaves it.
 
-**v0.13.0 ships thirteen members: BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D and SegmentTree2D.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
+**v0.14.0 ships fourteen members: BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D and SortedArray.** Members land one per session, each append-only so prior members stay byte-identical. The planned roster below fills in per release.
 
 ```bash
 npm install @zakkster/lite-logn
@@ -69,6 +69,7 @@ Every hot op allocates zero bytes after construction, and `npm run witness` prov
   - [FibonacciHeap](#fibonacciheap)
   - [Fenwick2D](#fenwick2d)
   - [SegmentTree2D](#segmenttree2d)
+  - [SortedArray](#sortedarray)
 - [Zero-GC design notes](#zero-gc-design-notes)
 - [Testing](#testing)
 - [What this is not](#what-this-is-not)
@@ -93,7 +94,7 @@ lite-logn ships the O(log n) structures that matter with the allocation removed 
 
 ## The roster
 
-One member per session, each landing append-only (prior members stay byte-identical). At v0.13.0, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D and SegmentTree2D are shipped.
+One member per session, each landing append-only (prior members stay byte-identical). At v0.14.0, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D and SortedArray are shipped.
 
 | Member | Version | Status | Shape | Hot ops |
 | --- | --- | --- | --- | --- |
@@ -110,8 +111,9 @@ One member per session, each landing append-only (prior members stay byte-identi
 | **FibonacciHeap** | 0.11.0 | shipped | textbook-optimal ADDRESSABLE mergeable PQ: a lazy forest on CIRCULAR lists, eight flat columns (`_key`/`_id`/`_left`/`_right`/`_child`/`_parent`/`_degree`/`_mark`) + arena-wide `_pos` + `_owner` + `_alias` + a per-arena degree bucket, over a shared-arena free-list | `push`/`meld`/`decreaseKey` O(1) amortized (cascading cuts + mark bit), `popMin`/`remove` O(log n) amortized (degree consolidation), `peekMin`/`peekMinKey`/`has`/`keyOf` O(1); ADDRESSABLE by arena-wide-unique id (NO rank/select/changeKey); textbook-optimal but OFTEN slower wall-clock than Pairing/Binary |
 | **Fenwick2D** | 0.12.0 | shipped | 2D Binary Indexed Tree: a single flat `Float64Array((rows+1)*(cols+1))`, nested lowest-set-bit walk (`i & -i` on both dims), row 0 / col 0 the identity sentinels | `update` / `prefix` / `rectSum` / `at` / `set` O(log^2 n) = O(log rows * log cols); `rows` / `cols` O(1); SUM-ONLY + index-addressed (NO 2D min/max/gcd, NO changeKey/rank/select) |
 | **SegmentTree2D** | 0.13.0 | shipped | 2D segment tree of segment trees: a single flat `Float64Array(4*rows*cols)` (2R x 2C), associative fold (min/max/sum/gcd) chosen at construction; the general rectangle fold a 2D BIT cannot do | `query` / `update` O(log^2 n) = O(log rows * log cols); `at` O(1); `rows` / `cols` / `kind` O(1); index-addressed range FOLD (NO changeKey/rank/select, NO lazy range-update, commutative folds only) |
+| **SortedArray** | 0.14.0 | shipped | DYNAMIC read-optimized ordered map (key -> value) over two parallel SORTED `Float64Array` columns (`_key` ascending / `_value`); CONTIGUOUS storage, one shared lower-bound search | `get` / `has` / `rank` / `successor` / `predecessor` O(log n); `select` / `keyAt` / `valueAt` / `min` / `max` O(1); `set` / `delete` O(n) in-place `copyWithin` shift (0 B/op); the fastest `forEach` (a cache-friendly scan); unique keys (NO duplicate, NO changeKey) |
 
-Later tiers (OrderStatTree, IndexedHeap, SortedArray, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
+Later tiers (OrderStatTree, IndexedHeap, and presets) are queued in [`ROADMAP.md`](./ROADMAP.md).
 
 ## The O(log n) Witness
 
@@ -121,7 +123,12 @@ The family anchor. Time a fixed batch of the hot op at each `n` in a geometric s
 - `slope` inside the member's band (the per-level cost, ns/level), AND
 - the FOIL leaves the line (low `R^2` -- the O(n) default a working programmer reaches for, shown losing as `n` grows).
 
-For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.13.0 the witness gates eighteen ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99 median-of-7 fits, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`), Scapegoat `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.41, 5.63]`), MinMaxHeap `popMin` (R^2 ~ 0.99, slope ~ 10.3 ns/level, band `[6.18, 14.42]`), SplayTree `get` (R^2 ~ 0.98, slope ~ 27 ns/level, band `[16.39, 38.24]`, sweep `[2^12, 2^17]`), BinomialHeap `popMin` (R^2 ~ 0.98, slope ~ 44.8 ns/level, band `[26.89, 62.75]`, sweep `[2^11, 2^17]`), PairingHeap `popMin` (R^2 ~ 0.99 median-of-5 fits, slope ~ 21.4 ns/level, band `[13.08, 30.52]`, sweep `[2^11, 2^17]`), FibonacciHeap `popMin` (R^2 ~ 0.98 median-of-7 fits, slope ~ 45 ns/level, band `[27.18, 63.41]`, sweep `[2^11, 2^17]`), and -- on the family's FIRST squared-log axis (`nsPerOp = intercept + slope*(log2 n)^2`) -- Fenwick2D `update` (R^2 ~ 0.998 median-of-7 fits, slope ~ 3.3 ns/level^2, band `[2.13, 4.96]`, square sides `[2^5, 2^11]`) and `rectSum` (R^2 ~ 0.9998, slope ~ 4.4 ns/level^2, band `[2.90, 6.77]`), and -- the SECOND member on that squared-log axis -- SegmentTree2D `update` (R^2 ~ 0.995, slope ~ 5.6 ns/level^2, band `[3.38, 7.89]`, square sides `[2^5, 2^11]`) and `query` (R^2 ~ 0.9999, slope ~ 5.1 ns/level^2, band `[3.06, 7.15]`; both single-fit, rock-steady, no median-of-fits needed) all ON the line. FibonacciHeap is the mergeable arc's FINALE -- the textbook-optimal ADDRESSABLE heap: `push`/`meld`/`decreaseKey` are O(1) AMORTIZED (a cascading cut governed by a per-node mark bit) and `popMin`/`remove` are O(log n) AMORTIZED (a degree consolidation), and because a single popMin can do an O(n) consolidation and a single decreaseKey an O(n) cascade the witness prints BOTH the MAX single popMin AND the MAX single decreaseKey as disclosures, never gated. It carries the FAMILY's STEEPEST per-level slope (a lazy forest consolidated on demand -- the largest constant factors of any heap here); honestly, it is textbook-optimal in asymptotics but OFTEN slower wall-clock than Pairing/Binary on real hardware. Its full-drain average has even more run-to-run SHAPE variance than the pairing two-pass, so a single sweep-fit's R^2 is flaky (~0.981-0.988, and can dip below the floor across meta-runs); this lane gates on the MEDIAN of 7 independent sweep-fits -- measurement-quality only, the frozen 0.958 floor and slope band are untouched, and no unreproducible "every run" is claimed. PairingHeap is the mergeable arc's ADDRESSABLE heap: its `popMin` is AMORTIZED O(log n) (a TWO-PASS combine of the root's child list -- pointer-free, 0 B/op), and because a single pop can fold a long child list the witness prints the MAX single popMin as a disclosure, never gated; its per-level slope sits between the array-embedded heaps and BinomialHeap (a single multi-way tree, not a forest). A pairing-heap full-drain average has genuine run-to-run SHAPE variance, so a single sweep-fit's R^2 is flaky (~0.945-0.985, dipping below the floor in a minority of runs); this lane gates on the MEDIAN of 5 independent sweep-fits (rejecting the occasional tilted sweep) -- measurement-quality only, the frozen 0.958 floor and slope band are untouched. BinomialHeap is the family's first MERGEABLE heap: its `popMin` is WORST-case O(log n) (unlink the extreme root, reverse its child list, union back, rescan the roots -- no max-single-op line), and its per-level slope sits well above the array-embedded heaps because it chases scattered forest slots (which is why it is gated over the cache-resident exact-power window, not the [1e4, 1e6] band). SplayTree is DETERMINISTIC and SELF-ADJUSTING: its `get` is AMORTIZED O(log n) (a read SPLAYS the touched key to the root -- the slope sits well above a read-only BST descent because rotations rewrite links every op), measured over a uniform-random working set of size n so the amortized line shows (a skewed pattern would flatten it -- the member's speedup, not what a straight-log witness measures); because a single cold access can splay an O(n) chain, the witness also prints the MAX single get as a disclosure, never gated. Scapegoat is DETERMINISTIC, so its `get` is WORST-case (not expected) O(log n); its rebuild spike lives on the AMORTIZED `set` path and is proven not by a per-op line but by an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio ~1.5x over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would degenerate to an O(n)-amortized chain and blow the ratio to ~64x. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
+<details>
+<summary>Per-op witness numbers -- all 19 gated lanes (R^2, slope, band, sweep) and the max-single-op disclosures.</summary>
+
+For amortized / randomized members the witness also prints the MAX single-op time -- the honesty hook: a rebuild spike or a degenerate tail shows as a tall bar even when the mean still fits the line. The `R^2` floor (0.958) is frozen family-wide in BinaryHeap; each member then calibrates its OWN per-op slope band (median-of-15 fit-runs x `[0.6, 1.4]`), because a cheaper op honestly has a lower per-level slope (see [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). At v0.14.0 the witness gates nineteen ops: BinaryHeap `pop` (R^2 ~ 0.99, slope ~ 8-10 ns/level), Fenwick `update` (R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level) and `prefix` (R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level), SegmentTree `update` (R^2 ~ 0.99 median-of-7 fits, slope ~ 3.2 ns/level, band `[2.29, 5.35]`) and `query` (R^2 ~ 0.99, slope ~ 7 ns/level, band `[4.30, 10.04]`), SkipList `get` (R^2 ~ 0.97-0.99, slope ~ 9 ns/level, band `[5.27, 12.30]`) and `set` (R^2 ~ 0.97-0.99, slope ~ 14 ns/level, band `[8.36, 19.50]`), Treap `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.55, 5.95]`), Scapegoat `get` (R^2 ~ 0.99, slope ~ 4 ns/level, band `[2.41, 5.63]`), MinMaxHeap `popMin` (R^2 ~ 0.99, slope ~ 10.3 ns/level, band `[6.18, 14.42]`), SplayTree `get` (R^2 ~ 0.98, slope ~ 27 ns/level, band `[16.39, 38.24]`, sweep `[2^12, 2^17]`), BinomialHeap `popMin` (R^2 ~ 0.98, slope ~ 44.8 ns/level, band `[26.89, 62.75]`, sweep `[2^11, 2^17]`), PairingHeap `popMin` (R^2 ~ 0.99 median-of-5 fits, slope ~ 21.4 ns/level, band `[13.08, 30.52]`, sweep `[2^11, 2^17]`), FibonacciHeap `popMin` (R^2 ~ 0.98 median-of-7 fits, slope ~ 45 ns/level, band `[27.18, 63.41]`, sweep `[2^11, 2^17]`), and -- on the family's FIRST squared-log axis (`nsPerOp = intercept + slope*(log2 n)^2`) -- Fenwick2D `update` (R^2 ~ 0.998 median-of-7 fits, slope ~ 3.3 ns/level^2, band `[2.13, 4.96]`, square sides `[2^5, 2^11]`) and `rectSum` (R^2 ~ 0.9998, slope ~ 4.4 ns/level^2, band `[2.90, 6.77]`), and -- the SECOND member on that squared-log axis -- SegmentTree2D `update` (R^2 ~ 0.995, slope ~ 5.6 ns/level^2, band `[3.38, 7.89]`, square sides `[2^5, 2^11]`) and `query` (R^2 ~ 0.9999, slope ~ 5.1 ns/level^2, band `[3.06, 7.15]`; both single-fit, rock-steady, no median-of-fits needed), and -- back on the DEFAULT log2(n) axis -- SortedArray `get` (R^2 ~ 0.98 median-of-7 fits, slope ~ 1.0 ns/level, band `[0.59, 1.38]`, sweep `[2^12, 2^18]`) all ON the line. SortedArray is the family's READ-OPTIMIZED ordered map: its `get` is a WORST-CASE O(log n) contiguous lower-bound binary search (the deterministic Scapegoat.get analogue, no RNG), the family's SHALLOWEST per-level slope because a contiguous search touches fewer cache lines per level than a pointer-chasing BST descent -- so this being the fastest lane, its ~6 ns fit span needs the widest + highest n-sweep and a 1e6-iteration measurement to keep per-point noise off the fit; the median-of-7 fit is measurement-quality insurance against the scheduler/thermal residue of the post-torture run (the frozen 0.958 floor and slope band are untouched). Because a genuine insert is an O(n) tail shift, the witness also prints the MAX single insert as a disclosure, never gated. FibonacciHeap is the mergeable arc's FINALE -- the textbook-optimal ADDRESSABLE heap: `push`/`meld`/`decreaseKey` are O(1) AMORTIZED (a cascading cut governed by a per-node mark bit) and `popMin`/`remove` are O(log n) AMORTIZED (a degree consolidation), and because a single popMin can do an O(n) consolidation and a single decreaseKey an O(n) cascade the witness prints BOTH the MAX single popMin AND the MAX single decreaseKey as disclosures, never gated. It carries the FAMILY's STEEPEST per-level slope (a lazy forest consolidated on demand -- the largest constant factors of any heap here); honestly, it is textbook-optimal in asymptotics but OFTEN slower wall-clock than Pairing/Binary on real hardware. Its full-drain average has even more run-to-run SHAPE variance than the pairing two-pass, so a single sweep-fit's R^2 is flaky (~0.981-0.988, and can dip below the floor across meta-runs); this lane gates on the MEDIAN of 7 independent sweep-fits -- measurement-quality only, the frozen 0.958 floor and slope band are untouched, and no unreproducible "every run" is claimed. PairingHeap is the mergeable arc's ADDRESSABLE heap: its `popMin` is AMORTIZED O(log n) (a TWO-PASS combine of the root's child list -- pointer-free, 0 B/op), and because a single pop can fold a long child list the witness prints the MAX single popMin as a disclosure, never gated; its per-level slope sits between the array-embedded heaps and BinomialHeap (a single multi-way tree, not a forest). A pairing-heap full-drain average has genuine run-to-run SHAPE variance, so a single sweep-fit's R^2 is flaky (~0.945-0.985, dipping below the floor in a minority of runs); this lane gates on the MEDIAN of 5 independent sweep-fits (rejecting the occasional tilted sweep) -- measurement-quality only, the frozen 0.958 floor and slope band are untouched. BinomialHeap is the family's first MERGEABLE heap: its `popMin` is WORST-case O(log n) (unlink the extreme root, reverse its child list, union back, rescan the roots -- no max-single-op line), and its per-level slope sits well above the array-embedded heaps because it chases scattered forest slots (which is why it is gated over the cache-resident exact-power window, not the [1e4, 1e6] band). SplayTree is DETERMINISTIC and SELF-ADJUSTING: its `get` is AMORTIZED O(log n) (a read SPLAYS the touched key to the root -- the slope sits well above a read-only BST descent because rotations rewrite links every op), measured over a uniform-random working set of size n so the amortized line shows (a skewed pattern would flatten it -- the member's speedup, not what a straight-log witness measures); because a single cold access can splay an O(n) chain, the witness also prints the MAX single get as a disclosure, never gated. Scapegoat is DETERMINISTIC, so its `get` is WORST-case (not expected) O(log n); its rebuild spike lives on the AMORTIZED `set` path and is proven not by a per-op line but by an amortized-trace assertion -- the cumulative ascending-insert (rebuild-heavy) cost/op tracks a LOG curve (last/first ratio ~1.5x over `[2^11, 2^17]`, gated `< 4x`) where a rebuild-less BST would degenerate to an O(n)-amortized chain and blow the ratio to ~64x. Treap's descent touches one node per level, so its per-level slope is lower than SkipList's tower search -- expected, which is why only the R^2 floor is shared and each op calibrates its own band. SkipList's two ops are gated over DIFFERENT sweeps -- each measured where its logarithm is visible, not where the cache wall is: `get` (a clean search with no per-op randomness) over `[2^11, 2^17]` for dynamic range; `set` (a heavier insert+delete churn whose per-insert tower height is random) over the smaller, fully cache-resident `[2^9, 2^14]` so the fit sees the structural level count, not DRAM latency. Because SkipList is EXPECTED (not worst-case) O(log n), the witness also prints the MAX single insert over a realistic randomized build trace -- the unlucky-tower tail a mean hides. Each op's O(n) foil fits well below the floor: the sorted-array insert (BinaryHeap / SkipList) foil runs R^2 ~ 0.77-0.87, the Fenwick foils (prefix-array rebuild, naive re-sum) and SkipList's linear-scan search foil hold at R^2 ~ 0.75-0.82, and SegmentTree's foils (whole-tree rebuild per update, scan-fold per query) fit at R^2 ~ 0.72-0.85 -- all foil families sit comfortably under the 0.958 floor.
+
+</details>
 
 ## Benchmarks
 
@@ -171,6 +178,7 @@ Each op fits `nsPerOp = intercept + slope*log2(n)`. ON-LINE = `R^2 >= 0.958` (th
 | `Fenwick2D.rectSum` | 0.99 | 4.8 | `[2.90, 6.77]` | ON | dense rectangle rescan | 0.80 | off |
 | `SegmentTree2D.update` | 0.995 | 5.6 | `[3.38, 7.89]` | ON | 2D grid rebuild | 0.80 | off |
 | `SegmentTree2D.query` | 0.9999 | 5.1 | `[3.06, 7.15]` | ON | dense rectangle rescan | 0.80 | off |
+| `SortedArray.get` | 0.98 (median-of-7 fits) | 1.0 | `[0.59, 1.38]` | ON | linear scan | 0.78 | off |
 
 **Fenwick2D squared-log axis (the family's FIRST).** Fenwick2D's ops are O(log^2 n), not O(log n), so its two witness lanes fit `nsPerOp = intercept + slope*(log2 n)^2` -- the slope column above for `Fenwick2D.update` / `Fenwick2D.rectSum` is therefore ns per `(log2 n)^2` UNIT (not per level), gated over exact power-of-two square sides `2^5..2^11`. The per-lane `xOf` axis hook that makes this possible defaults to `Math.log2`, so every prior lane's fit is byte-identical. Each O(n^2)-per-op foil (a dense rectangle rescan) leaves the squared-log line. Fenwick2D is WORST-case (no MAX-single-op disclosure).
 
@@ -217,9 +225,12 @@ All sixteen gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep, wit
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'0.13.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'0.14.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
+
+<details>
+<summary><strong>BinaryHeap</strong> -- Indexed binary heap / addressable priority queue -- push / pop / changeKey / remove O(log n), peek / topKey / keyOf / has O(1).</summary>
 
 An **indexed binary heap** (an addressable priority queue): a min|max binary heap over three parallel, pointer-free typed arrays -- `_key` (`Float64Array`, the priority at each heap slot), `_id` (`Uint32Array`, the entity id at each slot), and `_pos` (`Int32Array`, the reverse map entity-id -> slot, sentinel `-1` == absent). A plain binary heap gives O(log n) `push` / `pop` but cannot find an arbitrary element to reprioritize; the reverse-index map buys O(log n) `changeKey` / `remove` by a caller-supplied entity id. Children of slot `i` are `2i+1` / `2i+2`. Entity ids are integers in `[0, capacity)`; keys are finite numbers. Every hot op allocates zero bytes after construction (hole-punching sift -- one write per level, no 3-write swap).
 
@@ -258,7 +269,12 @@ heap.pop();       // -> 2   (the id whose key 9.0 is the max)
 | `size` / `capacity` / `kind` | getters | O(1) | Live count / fixed capacity / `'min'` \| `'max'`. |
 | `BinaryHeap.build` | `build(kind, ids, keys, capacity) -> BinaryHeap` | O(n) | Floyd bulk build from parallel arrays; fails closed on duplicate/out-of-range id, non-finite key, or `count > capacity`. |
 
+</details>
+
 ### Fenwick
+
+<details>
+<summary><strong>Fenwick</strong> -- Fenwick / BIT -- point-update AND prefix-sum O(log n) via the i & -i walk; rangeSum / at / set, O(n) build.</summary>
 
 A **Fenwick tree** (Binary Indexed Tree): BOTH point-update AND prefix-sum in O(log n) over a single flat `Float64Array`, using nothing but the lowest-set-bit walk (`i & -i`). It answers the most delightfully non-obvious complexity question in the family -- "how can update AND query both be logarithmic on a plain array?" -- and the witness proves it with TWO straight log lines. Public indices are **0-based** in `[0, length)`; internally the tree is 1-based, so `_t[0]` is the unused identity sentinel and is never read as data (null is not zero). `update` climbs by `i & -i` (one `_t` touch per level); `prefix` descends by `i & -i` (one read per level); `rangeSum` and `at` are pairs of inlined prefix walks. Values are finite numbers (negatives allowed); NaN / +-Infinity / non-number fail closed. Every hot op allocates zero bytes after construction.
 
@@ -293,7 +309,12 @@ g.rangeSum(1, 3);       // -> 9
 | `length` | getter | O(1) | Element count this tree was sized for. |
 | `Fenwick.build` | `build(values) -> Fenwick` | O(n) | LINEAR bulk build (each cell adds itself to its parent in one forward pass); fails closed on a non-array-like or any non-finite value. |
 
+</details>
+
 ### SegmentTree
+
+<details>
+<summary><strong>SegmentTree</strong> -- Associative range-query (min / max / sum / gcd) + point-update, both O(log n); fold frozen at construction.</summary>
 
 A **segment tree**: an associative range-query AND a point-update, BOTH O(log n), over a SINGLE flat `Float64Array(2n)` -- no nodes, no pointers, no recursion on the hot path. It is the complement to Fenwick: Fenwick's `rangeSum` works only because subtraction inverts addition, so it is a SUM machine; SegmentTree folds ANY associative + commutative operation over a range -- **min / max / sum / gcd** -- because it stores a fold of each subtree at its internal node rather than a prefix. The fold is chosen ONCE at construction and cached as a small-int combined by an INLINE switch on the hot path (no function ref, no closure, no megamorphic call site). Leaves live at `_t[n + i]`; internal node `p` holds the fold of its children `_t[2p]` / `_t[2p+1]`, so `_t[1]` is the fold of the whole array and `_t[0]` is unused (null is not zero). `update` sets a leaf and climbs to the root recomputing each ancestor (one write per level); `query` walks the two boundaries up the tree, folding each node that lies fully inside `[lo, hi]` into one accumulator. Every hot op allocates zero bytes after construction.
 
@@ -329,7 +350,12 @@ The iterative `2n` layout is **order-agnostic** -- `query` mixes left- and right
 | `length` / `kind` | getters | O(1) | Element count / the frozen fold `'min'` \| `'max'` \| `'sum'` \| `'gcd'`. |
 | `SegmentTree.build` | `build(values, kind) -> SegmentTree` | O(n) | Bottom-up bulk build (seed leaves, then fold each internal node once deepest-first -- NOT n incremental updates); fails closed on a non-array-like, any non-finite value, or (gcd) any negative / non-integer. |
 
+</details>
+
 ### SkipList
+
+<details>
+<summary><strong>SkipList</strong> -- Pointer-free ordered map -- get / set / delete / successor / predecessor / rangeIter, expected O(log n).</summary>
 
 A **skip list**: a pointer-free **ordered map** (key -> value) whose `get` / `set` / `delete` / `successor` / `predecessor` are **expected O(log n)** via a probabilistic tower of forward links -- the family's first randomized member and its first pointer-based one. Where the array-embedded members bury a fixed-shape tree in index arithmetic, a skip list's shape is random, so it needs real per-node links; the trick that keeps it zero-GC is storing those links as slot **indices** in flat `Uint32Array` columns over a private free-list (`NodePool`), never as heap objects. `NIL = 0`, slot 0 is the head sentinel, and level generation is one step of the repo's Numerical-Recipes LCG whose high bits draw a geometric height (`1 + clz32(word)`) -- deterministic from an instance-local seed, no `Math.random`. Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed); values are finite numbers; `set` on an existing key updates the value in place (no new node). Every hot op allocates zero bytes after construction.
 
@@ -363,7 +389,12 @@ sl.delete(50);         // -> true (idempotent: false if absent)
 | `clear` | `clear() -> this` | O(capacity) | Empties the list, keeps capacity, resets the PRNG to its initial seed. |
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 
+</details>
+
 ### Treap
+
+<details>
+<summary><strong>Treap</strong> -- Randomized-balanced order-statistic map -- adds rank / select / split / merge, expected O(log n).</summary>
 
 A **treap**: a randomized, self-balancing **binary search tree** that is also an **order-statistic tree** -- an AUGMENTED ordered map (key -> value) -- the family's balanced BST. It holds two orders at once: a **BST order** on the key and a **max-heap order** on a per-node random priority; a random-priority heap over a BST is provably balanced **in expectation**, so `get` / `set` / `delete` are **expected O(log n)**. A third invariant, a subtree-size column maintained in the SAME pass as every link rewrite, adds `rank(x)` (how many keys are `< x`), `select(k)` (the k-th smallest key), and O(log n) `split` / `merge`. Nodes are slot **indices** in six flat columns (`_key` / `_value` `Float64`; `_left` / `_right` / `_prio` / `_size` `Uint32`, `NIL = 0`) over the SAME private free-list (`NodePool`) SkipList uses -- design-parity, never a heap object per op. Priority is one instance-local Numerical-Recipes LCG draw per insert (deterministic from a seed; ties break by key). Keys and values are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed); `set` on an existing key updates the value in place. Every hot op allocates zero bytes after construction.
 
@@ -402,7 +433,12 @@ const whole = Treap.merge(lo, hi);// fuse back (all lo keys < all hi keys); both
 | `merge` (static) | `Treap.merge(a, b) -> Treap` | expected O(log n) | Fuse two arena-sharing treaps where every key of `a` < every key of `b`; CONSUMES both. Non-Treap inputs, cross-arena treaps, or an overlapping range throw. |
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 
+</details>
+
 ### Scapegoat
+
+<details>
+<summary><strong>Scapegoat</strong> -- Deterministic weight-balanced order-statistic map -- worst-case O(log n) get, amortized O(log n) set / delete.</summary>
 
 A **scapegoat tree**: a **DETERMINISTIC**, weight-balanced **binary search tree** that is also an **order-statistic tree** -- an AUGMENTED ordered map (key -> value) -- the honest **pair to Treap**. Where a treap randomizes its shape to be balanced *in expectation*, a scapegoat keeps a hard **worst-case height bound** (`height <= log_{1/alpha}(n) + 1`), so `get` is **worst-case O(log n)** (never merely expected). It pays for that with **amortized O(log n)** `set` / `delete`: after a mutation makes the tree too deep (or, on delete, too sparse), an occasional **subtree rebuild** restores balance in bulk. A subtree-size column (maintained in the same pass as every link rewrite and every rebuild) adds `rank(x)` / `select(k)`, O(log n). **No priorities, no RNG anywhere** -- the shape is a deterministic function of the insert / delete order. Nodes are slot **indices** in five flat columns (`_key` / `_value` `Float64`; `_left` / `_right` / `_size` `Uint32`, `NIL = 0`) over the SAME private free-list (`NodePool`) SkipList and Treap use. Keys and values are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed); `set` on an existing key updates the value in place. Every hot op allocates zero bytes after construction.
 
@@ -440,7 +476,12 @@ sg.successor(20);      // -> 50   (smallest key strictly greater)
 
 Member signatures for later members are appended here as each ships.
 
+</details>
+
 ### MinMaxHeap
+
+<details>
+<summary><strong>MinMaxHeap</strong> -- Double-ended priority queue (DEPQ) -- peekMin / peekMax O(1), push / popMin / popMax O(log n).</summary>
 
 A **min-max heap**: a **double-ended priority queue (DEPQ)** held in ONE array-embedded binary heap whose levels **alternate min / max** (Atkinson, Sack, Santoro & Strothotte 1986). Even depth (the root is depth 0) is a **MIN** level, odd depth a **MAX** level, so the global minimum is the root and the global maximum is the **larger of the root's up-to-two children**. That single alternating heap answers BOTH ends: `peekMin` / `peekMax` / `peekMinKey` / `peekMaxKey` are **O(1)**; `push` / `popMin` / `popMax` are all **worst-case O(log n)** -- no second heap, no paired-heap correspondence to maintain. It uses the BinaryHeap **id + key** idiom (two parallel pointer-free columns: `_id` `Uint32Array`, `_key` `Float64Array`), so it carries an opaque payload per entry with no object nodes. Keys are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed -- the key is checked FIRST, then the id, then a full heap). Every hot op allocates zero bytes after construction.
 
@@ -473,7 +514,12 @@ h.popMax();            // -> 3   (the id at the maximum key)      -- worst-case 
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 | `MinMaxHeap.build` | `build(ids, keys, capacity) -> MinMaxHeap` | O(n) | Floyd bulk build from parallel arrays (deepest-first, level-aware sift-down); fails closed on non-array-like / length mismatch, count > capacity, out-of-range id, or non-finite key. |
 
+</details>
+
 ### SplayTree
+
+<details>
+<summary><strong>SplayTree</strong> -- Self-adjusting ordered map -- amortized O(log n) get / set / delete via top-down splay; hot keys ride near the root.</summary>
 
 A **splay tree**: a **self-adjusting** BST ordered map (key -> value) whose every access **SPLAYS** -- a chain of rotations that walks the touched node (or, for an absent key, the last node on the search path) to the **root** (Sleator & Tarjan 1985). Recently / frequently used keys ride near the top, giving **amortized O(log n)** per op and genuinely **faster-than-log** behaviour on skewed / working-set access. It keeps **no balance metadata**: four parallel pointer-free columns (`_key` / `_value` `Float64Array`, `_left` / `_right` `Uint32Array`) over the same private free-list (NodePool). The splay is **iterative and top-down**: slot 0 (the NIL sentinel) doubles as the splay's dummy header and two fixed scratch hands grow the two assembly trees, so there is **no parent column, no path stack, and no recursion** -- every hot op is 0 B/op and no degenerate chain can overflow the native stack. Keys and values are finite numbers (typeof-guarded before coercion; Symbol / BigInt / NaN / +-Infinity fail closed, key checked FIRST).
 
@@ -506,7 +552,12 @@ sp.delete(3);       // -> true (splay to root, then join the subtrees)
 | `clear` | `clear() -> this` | O(capacity) | Empties the tree, keeps capacity. |
 | `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
 
+</details>
+
 ### BinomialHeap
+
+<details>
+<summary><strong>BinomialHeap</strong> -- Mergeable priority queue -- O(log n) meld over a shared arena, O(1)-amortized push, O(log n) popMin.</summary>
 
 A **binomial heap**: the family's first **mergeable** priority queue -- a **forest** of heap-ordered binomial trees whose defining op is **`meld`** (union two heaps) in **O(log n)** worst-case, via a **binary carry** over the two order-sorted root lists (the structural analogue of adding two binary numbers; Vuillemin 1978). `push` is **O(1) amortized** (O(log n) worst), `popMin` is **O(log n)** worst (unlink the extreme root, reverse its child list into a new root list, union back, rescan the O(log n) roots), and `peekMin` is **O(1)** via a cached extreme root maintained inline. Six parallel pointer-free columns (`_key` `Float64Array`, `_id` / `_parent` / `_child` / `_sibling` / `_order` `Uint32Array`) over a private free-list (NodePool); `NIL = 0`.
 
@@ -546,7 +597,12 @@ a.popMin();       // -> 20    (key 3, the global minimum)
 | `clear` | `clear() -> this` | O(n) | Frees ONLY this heap's own nodes back to the shared pool (an arena sibling is untouched). |
 | `size` / `capacity` / `kind` | getters | O(1) | Live entry count / arena-wide capacity / frozen polarity. |
 
+</details>
+
 ### PairingHeap
+
+<details>
+<summary><strong>PairingHeap</strong> -- Addressable mergeable priority queue -- O(1) push / meld, amortized O(log n) popMin / decreaseKey / remove by id.</summary>
 
 A **pairing heap**: the mergeable-heap arc's **addressable** priority queue -- a single multi-way heap-ordered tree (left-child / right-sibling) whose defining ops are a cut-and-link **`decreaseKey`** (amortized **O(log n)**) and an **O(1) `meld`** (Fredman, Sedgewick, Sleator, Tarjan 1986). `push` / `peekMin` / `peekMinKey` / `meld` are **O(1)**; `popMin` / `decreaseKey` / `remove` are **amortized O(log n)**. `popMin` unlinks the root then does a **two-pass combine** of the root's child list (pair left-to-right, then fold right-to-left) -- iterative and pointer-free, the `_sibling` links **are** the work list, so no temporary array (0 B/op). Five parallel pointer-free columns (`_key` `Float64Array`, `_id` / `_child` / `_sibling` / `_parent` `Uint32Array` -- `_parent` is a dual-role PREV pointer for O(1) cut) over a private free-list (NodePool); `NIL = 0`.
 
@@ -589,7 +645,12 @@ a.peekMin();             // -> 20
 | `clear` | `clear() -> this` | O(n) | Frees ONLY this heap's own nodes back to the shared pool (an arena sibling is untouched). |
 | `size` / `capacity` / `kind` | getters | O(1) | Live entry count / arena-wide capacity / frozen polarity. |
 
+</details>
+
 ### FibonacciHeap
+
+<details>
+<summary><strong>FibonacciHeap</strong> -- Textbook-optimal addressable mergeable heap -- O(1)-amortized push / meld / decreaseKey, O(log n) popMin / remove.</summary>
 
 A **Fibonacci heap**: the mergeable-heap arc's **finale** -- the textbook-optimal **addressable** mergeable priority queue (Fredman & Tarjan 1984). `push` / `meld` / `decreaseKey` are **O(1) amortized**; `popMin` / `remove` are **O(log n) amortized**. It shares PairingHeap's **addressable, arena-wide-unique id** contract (a shared reverse map + per-slot owner tag; a sibling-owned `decreaseKey`/`remove` fails closed; a live-anywhere id cannot be re-pushed). Where PairingHeap reaches the amortized bounds with a lean two-pass combine (and usually **wins** wall-clock), FibonacciHeap reaches them by the full textbook machine: a lazy forest of heap-ordered trees on **circular** doubly-linked lists (root list AND each child list circular), a **`decreaseKey`** that cuts a node's subtree to the root and **cascades** up its former parent chain (a marked parent is cut too; the first unmarked non-root parent is marked and the walk stops) governed by a per-node **`_mark` Uint8 column**, and a **`popMin`** that consolidates the root list by degree via a preallocated per-arena degree bucket. Eight pointer-free columns (`_key` `Float64Array`; `_id` / `_left` / `_right` / `_child` / `_parent` / `_degree` `Uint32Array`; `_mark` `Uint8Array`) + the arena-wide `_pos` reverse map + per-slot `_owner` + union-find `_alias` + the degree `_bucket`, over a private free-list (NodePool); `NIL = 0`.
 
@@ -635,7 +696,12 @@ a.peekMin();             // -> 20
 | `clear` | `clear() -> this` | O(n) | Frees ONLY this heap's own nodes back to the shared pool (an arena sibling is untouched). |
 | `size` / `capacity` / `kind` | getters | O(1) | Live entry count / arena-wide capacity / frozen polarity. |
 
+</details>
+
 ### Fenwick2D
+
+<details>
+<summary><strong>Fenwick2D</strong> -- 2D Fenwick / BIT -- point-update AND rectangle-sum O(log^2 n); sum-only, index-addressed.</summary>
 
 A **2D Fenwick tree** (2D Binary Indexed Tree): the family's **first 2D / multi-dimensional** member, lifting the 1D Fenwick's lowest-set-bit walk (`i & -i`) to a rectangle. BOTH point-`update` AND 2D-`prefix` -- and therefore arbitrary axis-aligned **rectangle** sums via inclusion-exclusion -- in **O(log^2 n)** = O(log rows * log cols) over a **single** flat `Float64Array((rows+1)*(cols+1))`. Public coords are **0-based** in `[0, rows) x [0, cols)`; internally the tree is 1-based, so row 0 and col 0 are the unused identity sentinels (never read as data -- null is not zero). `update` climbs BOTH dims by the lowest set bit (an outer rows loop, an inner cols loop, one `_t` touch per `(i, j)` level pair); `prefix` descends both; `rectSum` inlines the 2D inclusion-exclusion `P(r2,c2) - P(r1-1,c2) - P(r2,c1-1) + P(r1-1,c1-1)` (when `r1 == 0` / `c1 == 0` the `P(-1, .)` terms vanish by a `k = 0` loop-skip -- never a `prefix(-1)` / `_t[-1]` read). Dims are frozen at construction; `(rows+1)*(cols+1)` is capped at `F2D_MAX_CELLS` (`2^31-1`) by a **float multiply** (never `| 0`, which would wrap a large product to a small int and fail OPEN). Values are finite numbers (negatives allowed); NaN / +-Infinity / non-number fail closed. Every hot op allocates zero bytes after construction.
 
@@ -672,11 +738,109 @@ fromMatrix.rectSum(0, 0, 1, 2);            // 21
 
 Member signatures for later members are appended here as each ships.
 
+</details>
+
+### SegmentTree2D
+
+<details>
+<summary><strong>SegmentTree2D</strong> -- 2D segment tree of segment trees -- rectangle min / max / sum / gcd + point-update O(log^2 n); the fold a 2D BIT cannot do.</summary>
+
+A **2D segment tree** -- a segment tree OF segment trees (a tree of trees): the general 2D rectangle **fold** a 2D BIT cannot do. BOTH point-`update` AND rectangle-`query` (min / max / sum / gcd) over any axis-aligned rectangle in **O(log^2 n)** = O(log rows * log cols) over a **single** flat `Float64Array(4 * rows * cols)` -- the exact iterative `2R x 2C` embedding of the 1D SegmentTree's `2n` layout in both dimensions. `SegmentTree2D : Fenwick2D :: SegmentTree (1D) : Fenwick (1D)` -- it lifts the exact rectangle MIN / MAX / GCD that Fenwick2D lists as its not-for. The fold is chosen ONCE at construction (a small-int `_k` combined by an inline switch -- no per-op closure, no megamorphic call site). `update` writes the leaf, climbs the leaf ROW's col-tree at column `c`, THEN climbs the ROW-tree -- at each row-ancestor it recomputes the changed leaf column from its two row-children FIRST, then fixes that row-node's col-tree up column `c`'s path (the inner-then-outer order is the correctness site). `query` descends the OUTER row dim half-open, collecting O(log rows) boundary row-nodes and folding an INNER col-range over each (double `l & 1` / `r & 1` picks in both dims) into one identity-seeded accumulator. Public coords are 0-based in `[0, rows) x [0, cols)`. Every hot op allocates zero bytes after construction.
+
+**General fold, commutative + associative only.** Correct for min / max / sum / gcd (the iterative `2n` layout is order-agnostic); a non-commutative fold (matrix product, affine composition) would need a pow2 layout and is out of scope, as is lazy range-update (point-update only). The identity fills cleared / unused cells and is a legal RESULT (a cleared min grid queries `+Infinity`) but never a legal INPUT: NaN / +-Infinity fail closed (typeof-guarded first), and the `gcd` kind additionally rejects negatives / non-integers. It is a WORST-case member: every op is worst-case O(log^2 n), so there is no MAX-single-op disclosure line.
+
+**Space is the co-headline.** `4 * rows * cols` cells -- ~4x a 2D BIT's `(rows+1)*(cols+1)` -- the honest price for the general (non-invertible) folds. `4 * rows * cols` is capped at `S2D_MAX_CELLS` (`2^31-1`) by a **float multiply** (never `| 0`, which would wrap a large product to a small int and fail OPEN).
+
+**Two-phase linear build.** `SegmentTree2D.build(matrix, kind)` is O(rows*cols): fold each row's col-tree, THEN fold the row-tree position-wise -- NOT rows*cols updates.
+
+```js
+import { SegmentTree2D } from '@zakkster/lite-logn';
+
+const grid = new SegmentTree2D(1000, 1000, 'min');   // a 1000 x 1000 min-grid, one flat Float64Array
+grid.update(3, 7, 5);                                 // set (row 3, col 7) = 5   -- O(log^2 n)
+grid.query(0, 0, 3, 7);                               // min over the [0..3] x [0..7] rectangle, inclusive
+grid.at(3, 7);                                         // the single stored cell    -- O(1)
+
+// bulk build from a dense matrix (O(rows*cols), two-phase)
+const fromMatrix = SegmentTree2D.build([[4, 2, 6], [1, 9, 3]], 'max');
+fromMatrix.query(0, 0, 1, 2);                         // 9
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new SegmentTree2D(rows, cols, kind)` | O(rows*cols) | `rows`, `cols` integers >= 1; `kind` `'min'` / `'max'` / `'sum'` / `'gcd'`, frozen. Allocates one `Float64Array(4*rows*cols)` (min/max filled with the fold identity). Throws when `4*rows*cols` exceeds `S2D_MAX_CELLS` (2^31-1) -- a float multiply, never `\| 0`. |
+| `rows` / `cols` / `kind` | getters | O(1) | The frozen dimensions and fold. |
+| `query` | `query(r1, c1, r2, c2) -> number` | O(log^2 n) | The fold over `[r1..r2] x [c1..c2]` INCLUSIVE on all four edges. Out-of-range or `r1 > r2` / `c1 > c2` throw. A fresh / cleared grid queries to the identity. |
+| `update` | `update(r, c, value) -> this` | O(log^2 n) | Set cell `(r, c)` to `value` (ABSOLUTE), fixing every affected fold (inner col-tree, then outer row-tree). Non-finite value (typeof-guarded first; nonnegative integer for `gcd`) / out-of-range coord throw. |
+| `at` | `at(r, c) -> number` | O(1) | The single stored leaf value at `(r, c)`. Out-of-range coord throws. |
+| `clear` | `clear() -> this` | O(rows*cols) | Reset every cell to the fold identity, keeping the fixed dimensions and kind. |
+| `forEach` | `forEach(fn) -> void` | O(rows*cols) | Visits `(value, r, c, tree)` in row-major ascending order (`r` outer, `c` inner). 0 B/op in the loop body. |
+| `SegmentTree2D.build` | `build(matrix, kind) -> SegmentTree2D` | O(rows*cols) | Two-phase bottom-up bulk build (fold each row's col-tree, then the row-tree position-wise -- NOT rows*cols updates). Fails closed on a non-2D-array-like, ragged rows, or any non-finite (or out-of-domain gcd) entry. |
+
+</details>
+
+### SortedArray
+
+<details>
+<summary><strong>SortedArray</strong> -- Read-optimized ordered map over parallel sorted arrays -- O(log n) get / rank / successor, O(1) select / keyAt / valueAt / min / max, O(n) writes.</summary>
+
+A **dynamic, read-optimized, key -> value ordered map** over TWO parallel SORTED typed arrays: `_key` (a `Float64Array` kept ASCENDING) and `_value` (parallel, at the same index). The family's FIFTH ordered structure (after SkipList / Treap / Scapegoat / SplayTree); its differentiator is **contiguous storage**. Keys live packed in a flat array rather than scattered across pointer-chased nodes, so it is the **fastest `forEach`** (a straight cache-friendly scan), has **O(1)** `select` / `keyAt` / `valueAt` (a raw array index) and **O(1)** `min` / `max` (index `0` / `size-1`), and **O(log n)** `get` / `has` / `rank` / `successor` / `predecessor` via ONE shared branch-free lower-bound binary search (`_lb`, which the whole surface reuses). Keys are UNIQUE; `set` UPDATES the value in place when the key exists (O(log n), no shift). Keys AND values are finite numbers, typeof-guarded FIRST (before any coercion) at the door of every mutating op, so Symbol / BigInt / NaN / +-Infinity fail closed -- null is not zero. Fixed capacity: `set` overflow throws, never silently drops. Every read op allocates zero bytes after construction.
+
+**Read-optimized: O(log n) reads, O(n) writes DISCLOSED.** The honest cost is the write: a genuine `set` insert shifts the tail up one slot and `delete` shifts it down one -- an in-place `copyWithin` on the preallocated column (no temp, no spread), so it is **O(n)** yet still **0 B/op**. This is the read-optimized dual of the pointer-based ordered maps: they buy O(log n) writes with pointer-chasing; SortedArray buys the fastest reads + iteration with O(n) writes. It is literally the sorted-array FOIL the earlier ordered members were measured against, now a first-class member -- the "reads dominate, writes rare" ordered map. The gated witness op is `get` (WORST-CASE O(log n), like Scapegoat.get -- deterministic, no RNG); the O(n) insert is a DISCLOSED max-single-op bar, NEVER gated. See [`decisions/0016-sortedarray.md`](./decisions/0016-sortedarray.md).
+
+```js
+import { SortedArray } from '@zakkster/lite-logn';
+
+const sa = new SortedArray(1024);   // capacity 1024, two flat Float64Array columns
+sa.set(50, 5.0);                    // key 50 -> value 5.0   -- O(log n) locate + O(n) shift
+sa.set(20, 2.0);
+sa.set(80, 8.0);
+sa.set(20, 2.5);                    // key present -> value UPDATED in place (no shift), O(log n)
+sa.get(20);                         // -> 2.5              (O(log n) binary search)
+sa.min();                           // -> 20               (O(1), index 0)
+sa.max();                           // -> 80               (O(1), index size-1)
+sa.select(1);                       // -> 50               (the 1st-smallest KEY, O(1))
+sa.valueAt(1);                      // -> 5.0              (its parallel value, O(1))
+sa.rank(50);                        // -> 1                (keys strictly < 50)
+sa.successor(50);                   // -> 80   sa.predecessor(50); // -> 20
+[...sa.rangeIter(20, 60)];          // -> [20, 50]         (O(log n + k), ascending, version-stamped)
+
+// O(n log n) bulk build from two parallel array-likes (sort once, load once):
+const built = SortedArray.build([9, 1, 5], [90, 10, 50]);
+built.get(5);                       // -> 50
+```
+
+| Member | Signature | Complexity | Notes |
+| --- | --- | --- | --- |
+| constructor | `new SortedArray(capacity)` | O(capacity) | `capacity` integer in `[1, 2^31-1]`, frozen. Allocates the two `Float64Array(capacity)` columns once. Throws when `capacity` exceeds `SA_MAX_CAPACITY` (2^31-1). |
+| `size` / `capacity` | getters | O(1) | Live entry count / fixed capacity. |
+| `get` | `get(key) -> number \| undefined` | O(log n) | The value under `key`, or `undefined` if absent (never throws on a miss). One lower-bound search + one equality check. Non-finite key (typeof-guarded first) throws. |
+| `has` | `has(key) -> boolean` | O(log n) | True iff `key` is resident. Non-finite key throws. |
+| `set` | `set(key, value) -> this` | O(n) (O(log n) update) | Insert, or UPDATE the value in place if `key` exists (O(log n), no shift). A genuine insert `copyWithin`-shifts the tail up one slot (the DISCLOSED max-single-op cost, never gated). Non-finite key / value or a full map throw as a no-op. |
+| `delete` | `delete(key) -> boolean` | O(n) | Idempotent: `false` if absent (no throw), `true` if removed. O(log n) to locate, O(n) to `copyWithin`-shift the tail down one slot. |
+| `rank` | `rank(x) -> number` | O(log n) | Count of stored keys STRICTLY LESS than `x`, in `[0, size]`. `x` need not be present. Non-finite `x` throws. |
+| `select` / `keyAt` | `select(k) -> number \| undefined` | O(1) | The k-th smallest KEY (0-based order statistic) = a raw array index. Out-of-range `k` returns `undefined`; non-integer `k` throws. |
+| `valueAt` | `valueAt(k) -> number \| undefined` | O(1) | The VALUE parallel to the key at order-statistic index `k`. Out-of-range `k` returns `undefined`; non-integer `k` throws. |
+| `successor` / `predecessor` | `successor(key) -> number \| undefined` | O(log n) | The smallest key strictly `>` (successor) / largest strictly `<` (predecessor) `key`, or `undefined`. `key` need not be present. Non-finite key throws. |
+| `min` / `max` | `min() -> number \| undefined` | O(1) | The smallest / largest key (index `0` / `size-1`); `undefined` if empty. |
+| `rangeIter` | `rangeIter(lo, hi) -> IterableIterator<number>` | O(log n + k) | Keys in `[lo, hi]` INCLUSIVE, ascending; a lower-bound seek then a contiguous walk. VERSION-STAMPED: any structural mutation mid-iteration throws `[lite-logn]`. Bounds may be +-Infinity; NaN or `lo > hi` throws. |
+| `clear` | `clear() -> this` | O(1) | Resets the size counter (stale slots never read), keeping the fixed capacity; bumps the version so any live iterator fails closed. |
+| `forEach` | `forEach(fn) -> void` | O(n) | Visits `(key, value, sortedArray)` in ascending key order -- a CONTIGUOUS scan, the fastest forEach in the family. NOT version-stamped. 0 B/op in the loop body (pass a hoisted callback). |
+| `SortedArray.build` | `build(keys, values) -> SortedArray` | O(n log n) | Bulk build from two parallel array-likes: sort once by key, load into a fresh map sized to the count. Fails closed on a non-array-like, length mismatch, count outside `[1, 2^31-1]`, any non-finite key / value, or a DUPLICATE key. |
+
+Member signatures for later members are appended here as each ships.
+
+</details>
+
+
 ## Zero-GC design notes
 
 - **Array-embedded members allocate no nodes.** BinaryHeap, Fenwick, and SegmentTree live in flat typed arrays; there is no `new Node` per op, so there is nothing to collect. The parent / child / sibling relationships are index arithmetic (`2i+1`, `i & -i`), not pointers.
 - **Pointer-based members use a pointer-free node pool.** SkipList and the later balanced-BST members allocate a slot INDEX from a free list over parallel `Uint32Array` link columns -- never a heap object. `NIL = 0`, slot 0 unused.
 - **Fixed, preallocated capacity.** Overflow fails closed (a `[lite-logn]`-tagged throw), never a silent grow + amortized resize -- a resize would break the worst-case bound the witness proves.
+
+<details>
+<summary>Per-op allocation table + the gated witness numbers for every lane.</summary>
 
 | Op class | Allocation |
 | --- | --- |
@@ -719,8 +883,15 @@ Member signatures for later members are appended here as each ships.
 | `Fenwick2D` update / prefix / rectSum / at / set | 0 B/op (one flat `Float64Array`; the nested `i & -i` climb / descend and the inlined rectSum inclusion-exclusion use only local scalar temporaries) |
 | `Fenwick2D` constructor / `build` / `clear` | O(rows*cols) one typed array `(rows+1)*(cols+1)` cells, once (cold) |
 | `Fenwick2D` forEach | 0 B/op in the loop body (pass a hoisted callback) |
+| `SortedArray` get / has / rank / select / keyAt / valueAt / successor / predecessor / min / max | 0 B/op (two flat `Float64Array` columns; a lower-bound binary search + scalar temporaries, no pointer-chasing) |
+| `SortedArray` set / delete | 0 B/op (the O(n) tail shift is an in-place `copyWithin` on the preallocated columns -- no temp, no spread) |
+| `SortedArray` constructor / `build` / `clear` | O(capacity) two typed arrays, once (cold); `clear` is an O(1) size reset |
+| `SortedArray` forEach | 0 B/op in the loop body (a contiguous scan; pass a hoisted callback) |
+| `SortedArray` rangeIter | one iterator + `{value, done}` per step (the documented per-protocol allocator; transient, not retained) |
 
-Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`); Scapegoat `get` R^2 ~ 0.99, slope ~ 3.8-4.0 ns/level (band `[2.41, 5.63]`, sweep `[2^11, 2^17]`) -- WORST-case (deterministic), with the AMORTIZED `set` rebuild spike proven by the amortized-trace assertion (ratio `< 4x`), not a per-op line; MinMaxHeap `popMin` R^2 ~ 0.99, slope ~ 10.3 ns/level (band `[6.18, 14.42]`, sweep `[1e4, 1e6]`) -- WORST-case (a DEPQ whose push / popMin / popMax are all worst-case, so no MAX-single-op line), a touch ABOVE BinaryHeap.pop because a min-max trickle-down compares against up to six descendants per level; SplayTree `get` R^2 ~ 0.98, slope ~ 27.3 ns/level (band `[16.39, 38.24]`, sweep `[2^12, 2^17]`) -- AMORTIZED + DETERMINISTIC (a read SPLAYS -- rotations rewrite links every op, so the per-level slope sits well above a read-only descent), with the MAX single get (a cold deep splay) DISCLOSED, never gated; BinomialHeap `popMin` R^2 ~ 0.98, slope ~ 44.8 ns/level (band `[26.89, 62.75]`, sweep `[2^11, 2^17]`) -- WORST-case (a mergeable heap whose push / popMin / meld are all worst-case, so no MAX-single-op line), well ABOVE the array-embedded heaps because a binomial popMin chases scattered forest slots (which is why it is gated over the cache-resident exact-power window); PairingHeap `popMin` R^2 ~ 0.99 (median-of-5 fits; individual single-fit R^2 is flaky ~0.945-0.985, so this lane gates on the median of 5 independent sweep-fits -- measurement-quality only, the frozen floor + band are untouched), slope ~ 21.4 ns/level (band `[13.08, 30.52]`, sweep `[2^11, 2^17]`, 15-sample slope median 21.799) -- AMORTIZED (a two-pass combine of the root's child list; a single pop can fold a long list, so the MAX single popMin is DISCLOSED, never gated), sitting BETWEEN the array-embedded heaps and BinomialHeap because it is a single multi-way tree, not a forest; FibonacciHeap `popMin` R^2 ~ 0.98 (median-of-7 fits; individual single-fit R^2 is flaky ~0.981-0.988 and can dip below the floor across meta-runs, so this lane gates on the median of 7 independent sweep-fits -- measurement-quality only, the frozen floor + band are untouched), slope ~ 45.3 ns/level (band `[27.18, 63.41]`, sweep `[2^11, 2^17]`, 15-sample slope median 45.296) -- AMORTIZED (a lazy forest consolidated by degree on demand; a single pop can do an O(n) consolidation and a single decreaseKey an O(n) cascade, so BOTH the MAX single popMin AND the MAX single decreaseKey are DISCLOSED, never gated), the FAMILY's STEEPEST per-level slope because it does the most pointer-chasing per level of any heap here (textbook-optimal in asymptotics, honestly slower wall-clock than Pairing/Binary); Fenwick2D `update` R^2 ~ 0.99 (median-of-fits), slope ~ 3.5 ns per `(log2 n)^2` unit (band `[2.13, 4.96]`) and `rectSum` R^2 ~ 0.99, slope ~ 4.8 ns per `(log2 n)^2` unit (band `[2.90, 6.77]`), both gated over exact power-of-two square sides `[2^5, 2^11]` on the family's FIRST SQUARED-log axis (`nsPerOp = intercept + slope*(log2 n)^2`, via a per-lane `xOf` hook that defaults to `Math.log2` so every prior lane is byte-identical) -- WORST-case (no MAX-single-op line), each O(n^2)-per-op dense-rescan foil OFF the line. The allocation table is extended per member as each lands.
+Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R^2 ~ 0.99, slope ~ 8-10 ns/level; Fenwick `update` R^2 ~ 0.98-0.99, slope ~ 2.9-3.0 ns/level (band `[1.84, 4.30]`); Fenwick `prefix` R^2 ~ 0.97, slope ~ 2.6-2.7 ns/level (band `[1.76, 4.10]`); SegmentTree `update` R^2 ~ 0.99, slope ~ 3.2 ns/level (band `[2.29, 5.35]`); SegmentTree `query` R^2 ~ 0.99, slope ~ 7 ns/level (band `[4.30, 10.04]`); SkipList `get` R^2 ~ 0.97-0.99, slope ~ 9 ns/level (band `[5.27, 12.30]`, sweep `[2^11, 2^17]`); SkipList `set` R^2 ~ 0.97-0.99, slope ~ 14 ns/level (band `[8.36, 19.50]`, cache-resident sweep `[2^9, 2^14]`); Treap `get` R^2 ~ 0.99, slope ~ 4 ns/level (band `[2.55, 5.95]`, sweep `[2^11, 2^17]`); Scapegoat `get` R^2 ~ 0.99, slope ~ 3.8-4.0 ns/level (band `[2.41, 5.63]`, sweep `[2^11, 2^17]`) -- WORST-case (deterministic), with the AMORTIZED `set` rebuild spike proven by the amortized-trace assertion (ratio `< 4x`), not a per-op line; MinMaxHeap `popMin` R^2 ~ 0.99, slope ~ 10.3 ns/level (band `[6.18, 14.42]`, sweep `[1e4, 1e6]`) -- WORST-case (a DEPQ whose push / popMin / popMax are all worst-case, so no MAX-single-op line), a touch ABOVE BinaryHeap.pop because a min-max trickle-down compares against up to six descendants per level; SplayTree `get` R^2 ~ 0.98, slope ~ 27.3 ns/level (band `[16.39, 38.24]`, sweep `[2^12, 2^17]`) -- AMORTIZED + DETERMINISTIC (a read SPLAYS -- rotations rewrite links every op, so the per-level slope sits well above a read-only descent), with the MAX single get (a cold deep splay) DISCLOSED, never gated; BinomialHeap `popMin` R^2 ~ 0.98, slope ~ 44.8 ns/level (band `[26.89, 62.75]`, sweep `[2^11, 2^17]`) -- WORST-case (a mergeable heap whose push / popMin / meld are all worst-case, so no MAX-single-op line), well ABOVE the array-embedded heaps because a binomial popMin chases scattered forest slots (which is why it is gated over the cache-resident exact-power window); PairingHeap `popMin` R^2 ~ 0.99 (median-of-5 fits; individual single-fit R^2 is flaky ~0.945-0.985, so this lane gates on the median of 5 independent sweep-fits -- measurement-quality only, the frozen floor + band are untouched), slope ~ 21.4 ns/level (band `[13.08, 30.52]`, sweep `[2^11, 2^17]`, 15-sample slope median 21.799) -- AMORTIZED (a two-pass combine of the root's child list; a single pop can fold a long list, so the MAX single popMin is DISCLOSED, never gated), sitting BETWEEN the array-embedded heaps and BinomialHeap because it is a single multi-way tree, not a forest; FibonacciHeap `popMin` R^2 ~ 0.98 (median-of-7 fits; individual single-fit R^2 is flaky ~0.981-0.988 and can dip below the floor across meta-runs, so this lane gates on the median of 7 independent sweep-fits -- measurement-quality only, the frozen floor + band are untouched), slope ~ 45.3 ns/level (band `[27.18, 63.41]`, sweep `[2^11, 2^17]`, 15-sample slope median 45.296) -- AMORTIZED (a lazy forest consolidated by degree on demand; a single pop can do an O(n) consolidation and a single decreaseKey an O(n) cascade, so BOTH the MAX single popMin AND the MAX single decreaseKey are DISCLOSED, never gated), the FAMILY's STEEPEST per-level slope because it does the most pointer-chasing per level of any heap here (textbook-optimal in asymptotics, honestly slower wall-clock than Pairing/Binary); Fenwick2D `update` R^2 ~ 0.99 (median-of-fits), slope ~ 3.5 ns per `(log2 n)^2` unit (band `[2.13, 4.96]`) and `rectSum` R^2 ~ 0.99, slope ~ 4.8 ns per `(log2 n)^2` unit (band `[2.90, 6.77]`), both gated over exact power-of-two square sides `[2^5, 2^11]` on the family's FIRST SQUARED-log axis (`nsPerOp = intercept + slope*(log2 n)^2`, via a per-lane `xOf` hook that defaults to `Math.log2` so every prior lane is byte-identical) -- WORST-case (no MAX-single-op line), each O(n^2)-per-op dense-rescan foil OFF the line; SortedArray `get` R^2 ~ 0.98 (median-of-7 fits), slope ~ 1.0 ns/level (band `[0.59, 1.38]`, sweep `[2^12, 2^18]`) -- WORST-case O(log n) (a deterministic contiguous lower-bound binary search, the family's SHALLOWEST per-level slope because a packed search touches fewer cache lines per level than a pointer-chasing descent), with the MAX single insert (an O(n) tail shift) DISCLOSED, never gated, and its O(n) linear-scan foil OFF the line (R^2 ~ 0.78). The allocation table is extended per member as each lands.
+
+</details>
 
 ## Testing
 

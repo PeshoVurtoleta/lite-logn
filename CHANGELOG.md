@@ -6,6 +6,74 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-22
+
+### Added
+
+- **SortedArray** -- the fourteenth member and the family's READ-OPTIMIZED ordered map: a DYNAMIC
+  key -> value ordered map over TWO parallel SORTED `Float64Array` columns (`_key` ascending +
+  `_value` at the same index). The family's FIFTH ordered structure (after SkipList / Treap /
+  Scapegoat / SplayTree); its differentiator is CONTIGUOUS storage. `get` / `has` / `rank` /
+  `successor` / `predecessor` are O(log n) via ONE shared branch-free lower-bound binary search
+  (`_lb`); `select` / `keyAt` / `valueAt` are O(1) (a raw array index) and `min` / `max` are O(1)
+  (index 0 / size-1); `forEach` is the fastest in the family (a contiguous cache-friendly scan). It
+  is literally the sorted-array FOIL the earlier ordered members were measured against, now a
+  first-class member. Surface: `get` / `has` / `set` / `delete` / `rank` / `select` / `keyAt` /
+  `valueAt` / `successor` / `predecessor` / `min` / `max` / `rangeIter` / `clear` / `forEach`, `size`
+  / `capacity` getters, and the static `SortedArray.build(keys, values)`. See
+  `decisions/0016-sortedarray.md`.
+- **Parallel sorted Float64Array columns + shared lower-bound (D-SA1 / D-SA3).** Keys AND values are
+  finite numbers, typeof-guarded FIRST (before any coercion) at every mutating door, so Symbol /
+  BigInt / NaN / +-Infinity fail closed (null is not zero). Unique keys; `set` UPDATES the value in
+  place when the key exists (O(log n), no shift). `_lb` never early-exits on equality -- it always
+  narrows to the lower bound and callers do ONE equality check, so get / has / rank / successor /
+  predecessor / the set-probe all reuse the same hot search.
+- **Dynamic member with a plain O(n) in-place shift, not static / batched (D-SA2).** A genuine `set`
+  insert `copyWithin`-shifts the tail up one slot and `delete` shifts it down one -- in the
+  preallocated column, no temp, no spread -- so the O(n) write is still 0 B/op. Fixed capacity: `set`
+  overflow throws `[lite-logn]`, never silently drops.
+- **O(1) select / keyAt / valueAt / min / max -- the differentiator (D-SA4).** Order statistics are a
+  raw array index (no augmentation, unlike Treap / Scapegoat which carry subtree-size columns), and
+  the extremes are the two ends of the sorted column.
+- **Version-stamped rangeIter (D-SA6).** `rangeIter(lo, hi)` is O(log n + k): a lower-bound seek then
+  a contiguous walk; it captures the map's version and throws `[lite-logn]` on any structural mutation
+  mid-iteration rather than yield stale data. Bounds may be +-Infinity; NaN or `lo > hi` fails closed.
+- **O(n log n) build + `SA_MAX_CAPACITY` (D-SA1).** `SortedArray.build(keys, values)` sorts once by
+  key then loads a fresh map sized to the count; it fails closed BEFORE the map is usable on a
+  non-array-like, length mismatch, count outside [1, 2^31-1], any non-finite key / value, or a
+  DUPLICATE key. `SA_MAX_CAPACITY = 0x7FFFFFFF` (2^31-1) caps the index arithmetic.
+- **The witness's nineteenth gated op, back on the default log2(n) axis.** `SortedArray.get` is the
+  gated hot op -- a WORST-CASE O(log n) contiguous lower-bound binary search (the deterministic
+  Scapegoat.get analogue, no RNG): R^2 0.98 (median-of-7 fits), slope ~1.0 ns/level, band
+  `[0.59, 1.38]` (median 0.984 * [0.6, 1.4]), sweep `[2^12, 2^18]` at 1e6 iterations/point. It is the
+  family's SHALLOWEST per-level slope (a packed search touches fewer cache lines per level than a
+  pointer-chasing descent), so the lane widens the sweep + raises iterations and adds the median-of-7
+  fit as measurement-quality insurance -- the frozen 0.958 floor and slope band are UNTOUCHED. The
+  O(n) linear-scan foil leaves the line (R^2 ~ 0.78). The O(n) insert (a tail shift) is a DISCLOSED
+  max-single-op bar, NEVER gated.
+
+### Changed
+
+- Version bumped to 0.14.0 across the trinity (`package.json`, `LogN.js` `VERSION`, `llms.txt`).
+- The benchmark grid grows to 14 subjects x 19 op-rows; D1 emits 19 gated witness op-rows. `LogN.js`'s
+  prior thirteen classes are byte-identical (VERSION line + one appended class).
+- `package.json` keywords add `sorted-array`, `sorted-map`, `binary-search`, `ordered-array`,
+  `cache-friendly`, `read-optimized`.
+
+### Fixed
+
+- **SplayTree** documented iteration complexity corrected (docs only; no code change --
+  describes existing v0.8.0 behavior). `forEach` / `[Symbol.iterator]` are `O(n * depth)`
+  and `rangeIter` is `O((k + 1) * depth)`, not the previously stated `O(n log n)`: the
+  non-splaying walk re-descends by key each step, so a tree built by pure sorted insertion
+  with no intervening access (a depth-n chain) makes a full walk `O(n^2)`. README / llms.txt /
+  GUIDE now state this and advise splaying a key (or inserting in mixed order) before a large
+  walk. The library `forEach` itself is unchanged (the lean non-splaying walk is by design).
+
+### Removed
+
+- Nothing.
+
 ## [0.13.0] - 2026-09-22
 
 ### Added

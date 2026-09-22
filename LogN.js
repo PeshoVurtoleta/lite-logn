@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.13.0';
+export const VERSION = '0.14.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -5623,5 +5623,410 @@ export class SegmentTree2D {
     _badGcdValue(value) {
         throw new RangeError(
             '[lite-logn] SegmentTree2D gcd value must be a nonnegative integer, got ' + String(value));
+    }
+}
+
+// SortedArray (v0.14.0 session) -- a DYNAMIC read-optimized ordered map over parallel sorted arrays (BELOW).
+
+/**
+ * Max SortedArray capacity: `0x7FFFFFFF` (2^31 - 1). Entries live at indices [0, size)
+ * of two parallel `Float64Array` columns, and `size` / `capacity` must fit a positive
+ * int32 so `copyWithin` offsets and the binary-search midpoint stay valid array indices.
+ * The index arithmetic (not the byte count) is the hard ceiling -- the same "the
+ * arithmetic caps it" reasoning as the array-embedded members.
+ */
+const SA_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A DYNAMIC, read-optimized, key -> value ORDERED MAP over two parallel SORTED typed
+ * arrays. The family's FIFTH ordered structure (after SkipList / Treap / Scapegoat /
+ * SplayTree); its differentiator is CONTIGUOUS storage. Keys live ascending in a flat
+ * `Float64Array`, values in a parallel one at the same index -- so it is the fastest
+ * `forEach` (a straight cache-friendly scan), has O(1) `select` / `keyAt` / `valueAt`
+ * (a raw array index), O(1) `min` / `max` (index 0 / size-1), and O(log n) `get` / `has`
+ * / `rank` / `successor` / `predecessor` via ONE shared branch-free lower-bound binary
+ * search (`_lb`). The honest cost is O(n) `set` (insert-with-shift) and `delete`
+ * (shift-down): a `copyWithin` in the preallocated column, no temp, no spread. It is
+ * literally the sorted-array FOIL the earlier ordered members were measured against,
+ * now a first-class member: the "reads dominate, writes rare" ordered map.
+ *
+ * Storage (allocated once, sized to capacity):
+ *   - `_key`   Float64Array -- the keys, kept ASCENDING in [0, size).
+ *   - `_value` Float64Array -- the value parallel to each key (same index).
+ * `_size` is the live entry count; slots [size, capacity) are stale scratch (never read).
+ *
+ * Honesty contract (documented in decisions/0016 + README + llms): the gated hot op is
+ * `get`, a WORST-CASE O(log n) binary search (like Scapegoat.get -- deterministic, no
+ * RNG). The O(n) `set` insert is a DISCLOSED max-single-op bar, NEVER gated (the "worst-
+ * case O(log n) reads, O(n) writes disclosed" pattern). This is the read-optimized dual
+ * of the pointer-based ordered maps: they buy O(log n) writes with pointer-chasing;
+ * SortedArray buys the fastest reads + iteration with O(n) writes.
+ *
+ * Keys AND values are finite numbers; the typeof-guard fires FIRST (before any coercion)
+ * at the door of every mutating op, so Symbol / BigInt / NaN / +-Infinity fail closed --
+ * null is not zero. Fixed capacity: `set` overflow throws, never silently drops.
+ * `rangeIter` is a VERSION-STAMPED iterator -- any structural change mid-iteration throws
+ * `[lite-logn]` rather than yield stale data. Every read op allocates ZERO bytes after
+ * construction; `set` / `delete` shift in place (the `copyWithin` reuses the backing
+ * store), so the O(n) write is still 0 B/op.
+ */
+export class SortedArray {
+    /**
+     * @param {number} capacity  exact max live entries; integer in [1, 2^31-1].
+     */
+    constructor(capacity) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > SA_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] SortedArray capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        this._cap = capacity;                         // max live entries (fixed)
+        this._key = new Float64Array(capacity);       // keys, ascending in [0, size)
+        this._value = new Float64Array(capacity);     // value parallel to each key
+        this._size = 0;                               // live entry count
+        this._version = 0;                            // iterator invalidation stamp
+    }
+
+    /** Live entry count. O(1). */
+    get size() { return this._size; }
+
+    /** The fixed capacity this map was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /**
+     * Unvalidated LOWER BOUND: the count of stored keys STRICTLY LESS than `x` (= the
+     * index of the first key >= x, in [0, size]). The single binary search the whole
+     * structure reuses -- get / has / rank / successor / predecessor / the set-probe all
+     * call it. Branch-free in the sense that it NEVER early-exits on equality: the loop
+     * always narrows to the lower bound, and callers do ONE equality check on the result.
+     * PRIVATE + hot: no validation, no allocation.
+     * @private
+     * @param {number} x  a finite number
+     * @returns {number} count of keys < x, in [0, size]
+     */
+    _lb(x) {
+        const K = this._key;
+        let lo = 0, hi = this._size;
+        while (lo < hi) {
+            const mid = lo + ((hi - lo) >>> 1);       // overflow-safe midpoint
+            if (K[mid] < x) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    /**
+     * The value stored under `key`, or `undefined` if absent (never throws on a missing /
+     * empty query). O(log n): one lower-bound search, then one equality check. Fails
+     * closed on a non-number / non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    get(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const i = this._lb(key);
+        return (i < this._size && this._key[i] === key) ? this._value[i] : undefined;
+    }
+
+    /**
+     * True iff `key` is currently stored. O(log n). Fails closed on a non-finite key
+     * (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    has(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const i = this._lb(key);
+        return i < this._size && this._key[i] === key;
+    }
+
+    /**
+     * Insert `key -> value`, or UPDATE the value in place if `key` already exists. O(log n)
+     * to locate; an in-place value update is O(log n), a genuine insert is O(n) (a
+     * `copyWithin` shift of the tail up by one slot -- no temp, no spread). Fails closed: a
+     * non-finite key or value (typeof-guarded first), or a full map, each throw
+     * `[lite-logn]` as a no-op. The O(n) insert is a DISCLOSED max-single-op cost (see the
+     * class honesty contract), never a gated line.
+     * @param {number} key    a finite number
+     * @param {number} value  a finite number
+     * @returns {this}
+     */
+    set(key, value) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        const K = this._key, V = this._value, n = this._size;
+        const i = this._lb(key);
+        if (i < n && K[i] === key) {                  // present -> update in place, no shift
+            V[i] = value;
+            this._version = (this._version + 1) | 0;
+            return this;
+        }
+        if (n >= this._cap) return this._full();
+        // Shift the tail [i, n) up by one, in place, reusing the backing store (0 B/op).
+        K.copyWithin(i + 1, i, n);
+        V.copyWithin(i + 1, i, n);
+        K[i] = key;
+        V[i] = value;
+        this._size = n + 1;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove `key`. O(log n) to locate, O(n) to shift the tail down by one (a `copyWithin`,
+     * no temp). Idempotent: returns `false` if `key` is absent (no throw), `true` if it was
+     * present and removed. Fails closed on a non-finite key (typeof-guarded first).
+     * @param {number} key  a finite number
+     * @returns {boolean}
+     */
+    delete(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const K = this._key, V = this._value, n = this._size;
+        const i = this._lb(key);
+        if (i >= n || K[i] !== key) return false;     // absent (no throw)
+        // Shift the tail [i+1, n) down by one, in place, reusing the backing store (0 B/op).
+        K.copyWithin(i, i + 1, n);
+        V.copyWithin(i, i + 1, n);
+        this._size = n - 1;
+        this._version = (this._version + 1) | 0;
+        return true;
+    }
+
+    /**
+     * The number of stored keys STRICTLY LESS than `x` (its rank / position), in [0, size].
+     * O(log n) -- a raw lower-bound search. `x` need not be present; rank of the smallest
+     * key is 0, of a key past the max is `size`. Fails closed on a non-finite `x`.
+     * @param {number} x  a finite number
+     * @returns {number} count of keys < x, in [0, size]
+     */
+    rank(x) {
+        if (typeof x !== 'number' || !Number.isFinite(x)) return this._badKey(x);
+        return this._lb(x);
+    }
+
+    /**
+     * The k-th smallest KEY (0-based order statistic), or `undefined` if `k` is out of
+     * range [0, size). O(1): a raw array index. Fails closed on a non-integer `k`
+     * (typeof-guarded first); an in-type out-of-range `k` returns `undefined` (matching the
+     * soft-miss of `get`).
+     * @param {number} k  integer in [0, size)
+     * @returns {number|undefined} the k-th smallest key
+     */
+    select(k) {
+        if (typeof k !== 'number' || !Number.isInteger(k)) return this._badRank(k);
+        if (k < 0 || k >= this._size) return undefined;
+        return this._key[k];
+    }
+
+    /**
+     * The KEY at 0-based order-statistic index `k` (select's twin), or `undefined` if out of
+     * range. O(1) array index. Fails closed on a non-integer `k` (typeof-guarded first).
+     * @param {number} k  integer in [0, size)
+     * @returns {number|undefined}
+     */
+    keyAt(k) {
+        if (typeof k !== 'number' || !Number.isInteger(k)) return this._badRank(k);
+        if (k < 0 || k >= this._size) return undefined;
+        return this._key[k];
+    }
+
+    /**
+     * The VALUE parallel to the key at 0-based order-statistic index `k`, or `undefined` if
+     * out of range. O(1) array index. Fails closed on a non-integer `k` (typeof-guarded
+     * first).
+     * @param {number} k  integer in [0, size)
+     * @returns {number|undefined}
+     */
+    valueAt(k) {
+        if (typeof k !== 'number' || !Number.isInteger(k)) return this._badRank(k);
+        if (k < 0 || k >= this._size) return undefined;
+        return this._value[k];
+    }
+
+    /**
+     * The smallest key STRICTLY greater than `key`, or `undefined` if none. O(log n).
+     * `key` itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    successor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const K = this._key, n = this._size;
+        let j = this._lb(key);                        // first index with key >= `key`
+        if (j < n && K[j] === key) j++;               // strictly greater -> skip an equal
+        return j < n ? K[j] : undefined;
+    }
+
+    /**
+     * The largest key STRICTLY less than `key`, or `undefined` if none. O(log n). `key`
+     * itself need not be present. Fails closed on a non-finite key.
+     * @param {number} key  a finite number
+     * @returns {number|undefined}
+     */
+    predecessor(key) {
+        if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
+        const i = this._lb(key);                      // first index with key >= `key`
+        return i > 0 ? this._key[i - 1] : undefined;  // its predecessor is i-1
+    }
+
+    /** The smallest key, or `undefined` if empty. O(1) (index 0). */
+    min() { return this._size > 0 ? this._key[0] : undefined; }
+
+    /** The largest key, or `undefined` if empty. O(1) (index size-1). */
+    max() { return this._size > 0 ? this._key[this._size - 1] : undefined; }
+
+    /**
+     * A VERSION-STAMPED iterator over the keys in `[lo, hi]` INCLUSIVE, ascending. Bounds
+     * may be any number INCLUDING +-Infinity (an unbounded end); `NaN` fails closed, as does
+     * `lo > hi`. O(log n + k): a lower-bound seek then a contiguous walk. The generator
+     * captures the map's version and throws `[lite-logn]` if any mutation (structural OR a
+     * set-value update) happens mid-iteration, rather than yield stale data; the one documented per-protocol allocator
+     * is the {value, done} object per step.
+     * @param {number} lo  lower bound (inclusive); may be -Infinity
+     * @param {number} hi  upper bound (inclusive); may be +Infinity
+     * @returns {IterableIterator<number>} the keys in [lo, hi], ascending
+     */
+    rangeIter(lo, hi) {
+        if (typeof lo !== 'number' || Number.isNaN(lo)) return this._badBound(lo);
+        if (typeof hi !== 'number' || Number.isNaN(hi)) return this._badBound(hi);
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._rangeGen(lo, hi);
+    }
+
+    /** @private version-stamped range generator (see rangeIter). */
+    *_rangeGen(lo, hi) {
+        const ver = this._version;
+        const K = this._key;
+        let i = this._lb(lo);                         // first key >= lo
+        for (;;) {
+            if (this._version !== ver) {
+                throw new Error('[lite-logn] SortedArray mutated during iteration');
+            }
+            if (i >= this._size || K[i] > hi) return;
+            yield K[i];
+            i++;
+        }
+    }
+
+    /**
+     * Empty the map, keeping the fixed capacity. O(1): resets the size counter (the stale
+     * slots are never read). Bumps the version so any live iterator fails closed.
+     * @returns {this}
+     */
+    clear() {
+        this._size = 0;
+        this._version = (this._version + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Visit every `(key, value)` pair in ASCENDING key order as `(key, value, sortedArray)`.
+     * O(n) CONTIGUOUS scan -- the fastest forEach in the family (no pointer-chasing, cache-
+     * friendly), allocation-free in the loop body (pass a hoisted callback). Unlike
+     * rangeIter this is NOT version-stamped -- mutating from within the callback is the
+     * caller's responsibility (matching the other members).
+     * @param {(key:number, value:number, sortedArray:SortedArray)=>void} fn
+     */
+    forEach(fn) {
+        const K = this._key, V = this._value, n = this._size;
+        for (let i = 0; i < n; i++) fn(K[i], V[i], this);
+    }
+
+    /**
+     * O(n log n) build from two parallel array-likes: sort ONCE by key, then load the
+     * sorted keys / values into a fresh SortedArray sized to the count. COLD path; fails
+     * closed BEFORE the map is usable on: a non-array-like input, a keys / values length
+     * mismatch, a count outside [1, 2^31-1], any non-finite key or value (typeof-guarded),
+     * OR a DUPLICATE key (a sorted map has no room for two of the same key).
+     * @param {ArrayLike<number>} keys    finite numbers (unsorted ok)
+     * @param {ArrayLike<number>} values  finite numbers, parallel to keys
+     * @returns {SortedArray}
+     */
+    static build(keys, values) {
+        if (keys == null || typeof keys.length !== 'number' ||
+            values == null || typeof values.length !== 'number') {
+            throw new TypeError(
+                '[lite-logn] SortedArray.build needs two parallel array-likes (keys, values)');
+        }
+        const n = keys.length;
+        if (values.length !== n) {
+            throw new RangeError(
+                '[lite-logn] SortedArray.build keys / values length mismatch: ' + n +
+                ' vs ' + values.length);
+        }
+        if (n < 1 || n > SA_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] SortedArray.build count must be an integer in [1, 2^31-1], got ' + n);
+        }
+        // Pair + validate finiteness (typeof-first) BEFORE the sort, then sort by key.
+        // Cold path: the pairs array is throwaway scratch (never a hot allocation).
+        const pairs = new Array(n);
+        for (let i = 0; i < n; i++) {
+            const k = keys[i];
+            if (typeof k !== 'number' || !Number.isFinite(k)) {
+                throw new TypeError(
+                    '[lite-logn] SortedArray.build key must be a finite number, got ' + String(k));
+            }
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] SortedArray.build value must be a finite number, got ' + String(v));
+            }
+            pairs[i] = [k, v];
+        }
+        pairs.sort((a, b) => a[0] - b[0]);
+        const sa = new SortedArray(n);
+        const K = sa._key, V = sa._value;
+        for (let i = 0; i < n; i++) {
+            const k = pairs[i][0];
+            if (i > 0 && k === K[i - 1]) {
+                throw new RangeError(
+                    '[lite-logn] SortedArray.build duplicate key not allowed, got ' + String(k));
+            }
+            K[i] = k;
+            V[i] = pairs[i][1];
+        }
+        sa._size = n;
+        return sa;
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badKey(key) {
+        throw new TypeError(
+            '[lite-logn] SortedArray key must be a finite number, got ' + String(key));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] SortedArray value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badRank(k) {
+        throw new TypeError(
+            '[lite-logn] SortedArray index must be an integer, got ' + String(k));
+    }
+
+    /** @private */
+    _badBound(b) {
+        throw new TypeError(
+            '[lite-logn] SortedArray rangeIter bound must be a number (not NaN), got ' + String(b));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] SortedArray rangeIter needs lo <= hi, got lo=' + String(lo) +
+            ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _full() {
+        throw new RangeError('[lite-logn] SortedArray full (capacity ' + this._cap + ')');
     }
 }

@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1238,6 +1238,102 @@ const st2AtQueryMix = {
     statsOf(s) { return { grows: st2Grows(s) }; },
 };
 
+/** SortedArray's zero-alloc counter: its two flat Float64Array columns, fixed at construction,
+ *  so the delta across the window must be 0 -- even the O(n) insert/delete shift is an in-place
+ *  copyWithin on the SAME backing store (no temp, no spread), so the buffer never grows. */
+function saGrows(s) { return s.sa._key.buffer.byteLength + s.sa._value.buffer.byteLength; }
+
+/** A SortedArray prefilled to half capacity with integer keys/values (ascending -> O(1) appends). */
+function saFill() {
+    const sa = new SortedArray(CAP);
+    for (let i = 0; i < (CAP >> 1); i++) sa.set(i, (i * 2654435761) & 0xffff);
+    return sa;
+}
+
+const SAMASK = (CAP >> 1) - 1; // keys 0..CAP/2-1 resident
+
+/**
+ * get churn: a hit on a resident cycling key via the contiguous lower-bound binary search,
+ * folded into an int32 accumulator. Zero allocation.
+ */
+const saGetChurn = {
+    name: 'SortedArray get churn',
+    setup() { return { sa: saFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sa = s.sa;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) { acc = (acc + (sa.get(t & SAMASK) | 0)) | 0; t = (t + 1) | 0; }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: saGrows(s) }; },
+};
+
+/**
+ * set churn (in-place value update): a set of a RESIDENT cycling key updates the value in place
+ * (no shift, no new slot) -- the pure O(log n) update hot path, zero allocation.
+ */
+const saSetChurn = {
+    name: 'SortedArray set churn (in-place update)',
+    setup() { return { sa: saFill(), tick: 0 }; },
+    hot(s, n) {
+        const sa = s.sa;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { sa.set(t & SAMASK, t & 0xffff); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: saGrows(s) }; },
+};
+
+/** A SortedArray with a bounded resident set for the O(n) shift lane (keeps the copyWithin work
+ *  bounded while still exercising a genuine tail shift). Keys 1..SASHIFTN resident, slot 0 free. */
+const SASHIFTN = 2048;
+function saShiftFill() {
+    const sa = new SortedArray(SASHIFTN + 1);
+    for (let k = 1; k <= SASHIFTN; k++) sa.set(k, k & 0xffff);
+    return sa;
+}
+
+/**
+ * insert + delete churn (the DISCLOSED O(n) write): each op inserts the new MINIMUM key 0 (a full
+ * copyWithin shift UP) then deletes it (a full shift DOWN), size steady -- the honest O(n) write the
+ * read-optimized member discloses, exercised IN PLACE (copyWithin, no temp, no spread). Zero allocation.
+ */
+const saShiftChurn = {
+    name: 'SortedArray insert + delete churn (O(n) in-place shift)',
+    setup() { return { sa: saShiftFill(), tick: 0 }; },
+    hot(s, n) {
+        const sa = s.sa;
+        let t = s.tick | 0;
+        for (let i = 0; i < n; i++) { sa.set(0, t & 0xffff); sa.delete(0); t = (t + 1) | 0; }
+        s.tick = t | 0;
+    },
+    statsOf(s) { return { grows: saGrows(s) }; },
+};
+
+/**
+ * order-statistic mix: rank / select / valueAt / successor / predecessor / min / max on a resident
+ * cycling key, folded into an int32 accumulator, proving the read surface never grows the backing
+ * store. Zero allocation.
+ */
+const saOrderMix = {
+    name: 'SortedArray order-statistic mix (buffer never grows)',
+    setup() { return { sa: saFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const sa = s.sa;
+        let t = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const key = t & SAMASK;
+            acc = (acc + (sa.rank(key) | 0) + (sa.select(key) | 0) + ((sa.valueAt(key) || 0) | 0)) | 0;
+            const su = sa.successor(key); const pr = sa.predecessor(key);
+            acc = (acc + (su === undefined ? 0 : su | 0) + (pr === undefined ? 0 : pr | 0)
+                + (sa.min() | 0) + (sa.max() | 0)) | 0;
+            t = (t + 1) | 0;
+        }
+        s.tick = t | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: saGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1279,6 +1375,7 @@ zgcSuite({
         phPopMinChurn, phDecreaseKeyChurn, phRemoveChurn, phReadMix, phMeldChurn,
         fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn,
         f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix,
-        st2UpdateChurn, st2QueryChurn, st2AtQueryMix],
+        st2UpdateChurn, st2QueryChurn, st2AtQueryMix,
+        saGetChurn, saSetChurn, saShiftChurn, saOrderMix],
     mustFail: [teethMustFailAlloc],
 });

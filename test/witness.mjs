@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -355,6 +355,28 @@ export const S2D_UPDATE_SLOPE_HI = 7.89;      // median 5.638 * 1.4
 export const S2D_QUERY_SLOPE_LO = 3.06;       // median 5.105 * 0.6
 export const S2D_QUERY_SLOPE_HI = 7.15;       // median 5.105 * 1.4
 
+// --- SortedArray (v0.14.0): shared R^2 floor, OWN get slope band + sweep (0016 / D-SA5) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide; SortedArray's
+// gated op is get -- a WORST-CASE O(log n) lower-bound BINARY SEARCH over the sorted key column (the
+// exact analogue of Scapegoat.get: DETERMINISTIC, no RNG). It fits on the DEFAULT log2(n) axis (a
+// single log, NOT the squared-log Fenwick2D/SegmentTree2D use). The O(n) INSERT is a DISCLOSED
+// max-single-op bar (the "worst-case O(log n) reads, O(n) writes disclosed" pattern), NEVER gated.
+// The O(n) LINEAR-SCAN foil (a naive scan for a key over a plain Float64Array) is EXPONENTIAL on the
+// log2(n) axis and MUST miss the floor. Gated over 2^12..2^18 with a 1e6-iteration measurement:
+// a contiguous binary search is the family's FASTEST get (~1 ns/level), so its ~6ns fit span needs
+// a WIDER + HIGHER n-sweep than the pointer-based BST gets AND far more iterations-per-point to keep
+// per-point noise from dominating (the "widen the span + raise iterations" fix, chosen over touching
+// any shared threshold). Band = median-of-15 fit-runs * [0.6, 1.4], centered on the MEDIAN (never a
+// high sample) so a legitimately faster future run is not false-failed; the R^2 floor independently
+// rejects any non-log shape. A contiguous binary search touches FEWER cache lines per level than a
+// pointer-chasing BST descent, so its per-level slope is the family's SHALLOWEST get -- expected,
+// which is why only the R^2 floor is shared. Calibration (this machine, 1e6-iter min-over-15-batches
+// over 2^12..2^18): median-of-15 fit-run slope = 0.984 ns/level (15 samples: 0.918 0.921 0.930 0.930
+// 0.953 0.963 0.979 0.984 1.001 1.024 1.030 1.042 1.047 1.085 1.137); single-fit R^2 min 0.9690,
+// median 0.9919, 0/15 below the 0.958 floor. Band = median 0.984 * [0.6, 1.4].
+export const SA_GET_SLOPE_LO = 0.59;          // median 0.984 * 0.6
+export const SA_GET_SLOPE_HI = 1.38;          // median 0.984 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -417,6 +439,26 @@ const MMH_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // n resident keys. Its O(n) foil (a linear scan) stays on the small O(n^2) sweep.
 const SP_GET_SWEEP = [12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 const SP_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// SortedArray's gated get sweep: EXACT powers of two 2^12..2^18. A contiguous binary search is
+// the FASTEST get in the family (~0.8 ns/level, no pointer-chasing), so its fit needs the extra
+// dynamic range of a higher window than the pointer-based BST gets -- and the 2^11 point is too
+// fast + noisy and drops R^2 near the floor (the SplayTree.get lesson, which starts at 2^12 for
+// the same reason). The top is pinned at 2^18: above it the sorted column leaves the steady cache
+// band and DRAM latency curves the fit. Exact powers keep the level count floor(log2 n) an integer
+// so the staircase maps cleanly onto the log2(n) axis. Its O(n) foil (a linear scan for a key over
+// a plain Float64Array) stays on the small O(n^2) sweep.
+const SA_GET_SWEEP = [12, 13, 14, 15, 16, 17, 18].map((k) => 2 ** k);
+const SA_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// SortedArray.get additionally gates on the MEDIAN of SA_FIT_RUNS independent sweep-fits (the registry
+// `fitRuns` hook) as measurement-quality INSURANCE, same mechanism as SegmentTree.update / PairingHeap
+// / FibonacciHeap / Fenwick2D. With the 1e6-iteration measurement the SINGLE fit already clears the
+// 0.958 floor cleanly on a quiet machine (calibration: 0/15 single fits below the floor, min 0.9690);
+// but the witness runs right after torture (2M+ ops across 14 members) leaves scheduler / thermal
+// residue, and this being the family's FASTEST lane it is the most noise-sensitive under that load, so
+// the median-of-7 fit is kept to reject the occasional load-tilted sweep. Odd so the median is a real
+// sample. Measurement-quality only: the frozen 0.958 floor and the slope band are UNTOUCHED, and a
+// genuine O(n) shape fails every fit, so no teeth are lost. Scoped to this lane.
+const SA_FIT_RUNS = 7;
 // BinomialHeap's gated popMin sweep: EXACT powers of two 2^11..2^17 (the same pointer-chasing
 // window Treap/Scapegoat/SkipList.get use -- a binomial popMin chases scattered forest slots
 // and its cost is DRAM-latency-sensitive, so it needs a cache-resident exact-power window, not
@@ -1177,6 +1219,82 @@ function measureSplayGetFoil(n) {
     return elapsed / count;
 }
 
+// --- SortedArray measurement (get hot op + its O(n) linear-scan foil) --------
+// The map is built OUTSIDE timing and held at steady size n; the timed window is the get
+// binary-search only, hammered over 1024 random resident targets so many search paths are
+// averaged. Same effort as Scapegoat/Treap/SplayTree.get (min-over-batches rejects ambient
+// interference). SortedArray has NO RNG, so its get line is a pure DETERMINISTIC worst-case
+// O(log n) lower-bound binary search over the contiguous sorted key column.
+const SA_ITERS = 1000000;  // hammered ops per timed batch (high, to shrink the fast lane's per-point noise)
+const SA_BATCH = 15;       // min-over-batches
+const SA_TARGETS = 1024;   // distinct random targets cycled per batch (pow2 mask)
+let SORTEDARRAY_MAX_INSERT_NS = 0; // the DISCLOSED (never gated) O(n) worst-case single insert
+
+// The DISCLOSED max single insert: inserting the NEW smallest key into a large sorted map
+// forces the whole tail to shift (the O(n) copyWithin). Timed as the min-over-batches of a
+// front-insert-then-remove round (steady size) at a fixed large n. This is the "worst-case
+// O(log n) reads, O(n) writes disclosed" honesty bar -- printed, NEVER gated.
+function measureSortedArrayMaxInsert() {
+    const n = 1 << 16; // 65536 -- a large steady map
+    const sa = new SortedArray(n + 1);
+    for (let i = 0; i < n; i++) sa.set(i + 1, i); // keys 1..n resident; slot 0 free for a front insert
+    let best = Infinity;
+    for (let b = 0; b < 200; b++) {
+        const t0 = nowNs();
+        sa.set(0, 0);       // NEW minimum -> full O(n) tail shift up
+        const e = nowNs() - t0;
+        if (e < best) best = e;
+        sa.delete(0);       // restore steady size (also an O(n) shift down)
+    }
+    if (best < SORTEDARRAY_MAX_INSERT_NS || SORTEDARRAY_MAX_INSERT_NS === 0) SORTEDARRAY_MAX_INSERT_NS = best;
+    return best;
+}
+
+// get: hammer a search for random resident keys over a dense 0..n-1 map. Return the MIN
+// per-op time over SA_BATCH batches.
+function measureSortedArrayGet(n) {
+    const sa = new SortedArray(n);
+    for (let i = 0; i < n; i++) sa.set(i, i);
+    const tg = new Float64Array(SA_TARGETS);
+    const rnd = mulberry32(0x5A17 ^ n);
+    for (let i = 0; i < SA_TARGETS; i++) tg[i] = (rnd() * n) | 0;
+    let sink = 0;
+    for (let w = 0; w < SA_ITERS; w++) sink += sa.get(tg[w & (SA_TARGETS - 1)]); // warm
+    let best = Infinity;
+    for (let b = 0; b < SA_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < SA_ITERS; i++) sink += sa.get(tg[i & (SA_TARGETS - 1)]);
+        const e = (nowNs() - t0) / SA_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// get FOIL: a naive LINEAR SCAN for a key over a plain Float64Array = O(n) per search (the
+// default before you know the binary-search trick). Exponential on the log2(n) axis, so a
+// straight-line fit MISSES the R^2 floor. O(n^2) total.
+function measureSortedArrayGetFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    for (let i = 0; i < n; i++) a[i] = i;
+    const target = n - 1;
+    { let idx = -1; for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } } if (idx < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let idx = -1;
+            for (let j = 0; j < n; j++) { if (a[j] === target) { idx = j; break; } }
+            sink += idx;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- BinomialHeap measurement (popMin hot op + its O(n) foil) ----------------
 // The heap is built OUTSIDE timing (n pushes), then a FULL popMin drain is timed, accumulated
 // across rebuilds until ~4e6 pops are timed (a stable mean, height ~ log2(n)). The rebuild is
@@ -1848,10 +1966,26 @@ export const MEMBERS = [
         unit: 'ns/level^2',
         // Single-fit: R^2 min 0.99993 over 15 calibration runs -- rock-steady, no fitRuns needed.
     },
+    {
+        name: 'SortedArray',
+        op: 'get',
+        sweep: SA_GET_SWEEP,
+        foilSweep: SA_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0016 inherits D-08)
+        slopeLo: SA_GET_SLOPE_LO,              // own band (DEFAULT log2 axis -- a single log)
+        slopeHi: SA_GET_SLOPE_HI,
+        run: measureSortedArrayGet,
+        foil: measureSortedArrayGetFoil,
+        foilName: 'linear scan (O(n) per search)',
+        // MEDIAN-OF-FITS (0016, measurement-quality only): the family's fastest read lane sits at
+        // the 0.958 floor on a single fit and flips OFF-LINE in a minority of runs; the median-of-
+        // SA_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
+        fitRuns: SA_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.13.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.14.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -1984,6 +2118,16 @@ async function main() {
         if (!amortOk) process.stderr.write(
             '  violation Scapegoat amortized insert ratio ' + ratio.toFixed(2) + 'x >= ' +
             SG_AMORT_RATIO_MAX + ' (amortization broke: rebuilds not absorbing the imbalance)\n');
+    }
+    // SortedArray honesty print: the MAX single insert (an O(n) tail shift) observed. A
+    // read-optimized member must not masquerade as O(log n) on writes -- inserting the new
+    // smallest key shifts the whole array. This is a DISCLOSURE ("worst-case O(log n) reads,
+    // O(n) writes disclosed"), NOT a gate.
+    measureSortedArrayMaxInsert();
+    if (SORTEDARRAY_MAX_INSERT_NS > 0) {
+        process.stdout.write(
+            'SortedArray MAX single insert observed = ' + SORTEDARRAY_MAX_INSERT_NS.toFixed(0) +
+            ' ns (O(n) tail shift -- disclosed, not gated)\n');
     }
     process.stdout.write('WITNESS ' + (ok ? 'ok' : 'FAIL') + '\n');
     if (!ok) process.exitCode = 1;

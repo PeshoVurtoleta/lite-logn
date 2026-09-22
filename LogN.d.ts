@@ -611,3 +611,61 @@ export class SegmentTree2D {
     /** O(rows*cols) bottom-up bulk build from a 2D array-like of finite numbers (equal-length rows). */
     static build(matrix: ArrayLike<ArrayLike<number>>, kind: 'min' | 'max' | 'sum' | 'gcd'): SegmentTree2D;
 }
+
+/**
+ * A dynamic, read-optimized, key -> value ordered map over two parallel sorted
+ * Float64Arrays. Contiguous storage: the fastest forEach, O(1) select / keyAt /
+ * valueAt / min / max (a raw array index), O(log n) get / has / rank / successor /
+ * predecessor (one shared lower-bound binary search) -- at the honest cost of O(n)
+ * set (insert-with-shift) and delete (shift-down) via copyWithin (no temp, no spread).
+ * The gated hot op is get (worst-case O(log n)); the O(n) insert is a disclosed
+ * max-single-op cost, never gated. Keys and values are finite numbers (typeof-guarded
+ * first). Every read allocates zero bytes; the O(n) write shifts in place (0 B/op).
+ */
+export class SortedArray {
+    /** @param capacity exact max live entries; integer in [1, 2^31-1]. */
+    constructor(capacity: number);
+
+    /** Live entry count. */
+    readonly size: number;
+    /** The fixed capacity this map was sized for. */
+    readonly capacity: number;
+
+    /** The value under key, or undefined if absent (no throw). O(log n). Non-finite key throws. */
+    get(key: number): number | undefined;
+    /** True iff key is currently stored. O(log n). Non-finite key throws. */
+    has(key: number): boolean;
+    /** Insert key -> value (O(n) shift), or update the value in place if key exists (O(log n)).
+     *  Non-finite key/value throws; a full map throws. */
+    set(key: number, value: number): this;
+    /** Remove key; true if it was present, false if absent (idempotent). O(n) shift. Non-finite key throws. */
+    delete(key: number): boolean;
+    /** Count of stored keys strictly less than x (its rank), in [0, size]. O(log n). Non-finite x throws. */
+    rank(x: number): number;
+    /** The k-th smallest key (0-based), or undefined if k is out of [0, size). O(1). Non-integer k throws. */
+    select(k: number): number | undefined;
+    /** The key at 0-based order-statistic index k (select's twin), or undefined if out of range. O(1). Non-integer k throws. */
+    keyAt(k: number): number | undefined;
+    /** The value parallel to the key at 0-based index k, or undefined if out of range. O(1). Non-integer k throws. */
+    valueAt(k: number): number | undefined;
+    /** The smallest key strictly greater than key, or undefined. O(log n). Non-finite key throws. */
+    successor(key: number): number | undefined;
+    /** The largest key strictly less than key, or undefined. O(log n). Non-finite key throws. */
+    predecessor(key: number): number | undefined;
+    /** The smallest key, or undefined if empty. O(1). */
+    min(): number | undefined;
+    /** The largest key, or undefined if empty. O(1). */
+    max(): number | undefined;
+    /** A version-stamped iterator over keys in [lo, hi] inclusive, ascending. Bounds
+     *  may be +-Infinity (unbounded ends); NaN or lo > hi throws; mutation during
+     *  iteration throws. O(log n + k). */
+    rangeIter(lo: number, hi: number): IterableIterator<number>;
+    /** Visit every (key, value) pair in ascending key order (contiguous O(n) scan). */
+    forEach(fn: (key: number, value: number, sortedArray: SortedArray) => void): void;
+    /** Empty the map, keeping capacity. O(1). */
+    clear(): this;
+
+    /** O(n log n) build from two parallel array-likes of finite numbers: sort once by key.
+     *  Length mismatch, count outside [1, 2^31-1], non-finite entry, or a duplicate key throws. */
+    static build(keys: ArrayLike<number>, values: ArrayLike<number>): SortedArray;
+}

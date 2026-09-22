@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.13.0 at the SegmentTree2D release', () => {
-    assert.equal(VERSION, '0.13.0');
+test('VERSION is exactly 0.14.0 at the SortedArray release', () => {
+    assert.equal(VERSION, '0.14.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (13 members) --------
+// --- frozen export surface: VERSION + the shipped members (14 members) --------
 
-test('LogN.js exports exactly VERSION + the thirteen members at v0.13.0 (adds SegmentTree2D)', () => {
+test('LogN.js exports exactly VERSION + the fourteen members at v0.14.0 (adds SortedArray)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the thirteen members incl SegmentTree2D)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the fourteen members incl SortedArray)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -57,6 +57,7 @@ test('LogN.js exports exactly VERSION + the thirteen members at v0.13.0 (adds Se
     assert.equal(typeof LogNModule.FibonacciHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick2D, 'function');
     assert.equal(typeof LogNModule.SegmentTree2D, 'function');
+    assert.equal(typeof LogNModule.SortedArray, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -813,4 +814,53 @@ test('SegmentTree2D fails closed with a [lite-logn]-tagged throw on every coerci
     // SegmentTree2D is a range FOLD structure: deliberately NO changeKey / rank / select.
     assert.equal(typeof st.rank, 'undefined', 'SegmentTree2D has no rank (range-fold structure)');
     assert.equal(typeof st.select, 'undefined', 'SegmentTree2D has no select (range-fold structure)');
+});
+
+// --- SortedArray (v0.14.0): coercion + [lite-logn] fail-closed tag ------------
+
+test('SortedArray fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { SortedArray } = LogNModule;
+    // constructor: bad capacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, {}, Symbol('x'), 3n]) {
+        assert.throws(() => new SortedArray(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    assert.throws(() => new SortedArray(0x80000000), /\[lite-logn\]/, 'capacity above 2^31-1');
+    const sa = new SortedArray(16);
+    sa.set(1, 1); sa.set(2, 2);
+    // non-finite / non-number key or value, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => sa.get(bad), /\[lite-logn\]/, 'get key ' + String(bad));
+        assert.throws(() => sa.has(bad), /\[lite-logn\]/, 'has key ' + String(bad));
+        assert.throws(() => sa.set(bad, 1), /\[lite-logn\]/, 'set key ' + String(bad));
+        assert.throws(() => sa.set(1, bad), /\[lite-logn\]/, 'set value ' + String(bad));
+        assert.throws(() => sa.delete(bad), /\[lite-logn\]/, 'delete key ' + String(bad));
+        assert.throws(() => sa.rank(bad), /\[lite-logn\]/, 'rank x ' + String(bad));
+        assert.throws(() => sa.successor(bad), /\[lite-logn\]/, 'successor key ' + String(bad));
+        assert.throws(() => sa.predecessor(bad), /\[lite-logn\]/, 'predecessor key ' + String(bad));
+    }
+    // select / keyAt / valueAt reject a non-integer index (typeof-first)
+    for (const bad of [1.5, NaN, Infinity, '0', null, undefined, {}, Symbol('i'), 2n]) {
+        assert.throws(() => sa.select(bad), /\[lite-logn\]/, 'select ' + String(bad));
+        assert.throws(() => sa.keyAt(bad), /\[lite-logn\]/, 'keyAt ' + String(bad));
+        assert.throws(() => sa.valueAt(bad), /\[lite-logn\]/, 'valueAt ' + String(bad));
+    }
+    // rangeIter bounds: NaN / non-number fail closed, and lo > hi fails closed
+    for (const bad of [NaN, '5', null, undefined, {}, Symbol('b'), 2n]) {
+        assert.throws(() => sa.rangeIter(bad, 5), /\[lite-logn\]/, 'rangeIter lo ' + String(bad));
+        assert.throws(() => sa.rangeIter(0, bad), /\[lite-logn\]/, 'rangeIter hi ' + String(bad));
+    }
+    assert.throws(() => sa.rangeIter(5, 2), /\[lite-logn\]/, 'rangeIter lo > hi');
+    // set overflow fails closed
+    const full = new SortedArray(2);
+    full.set(1, 1); full.set(2, 2);
+    assert.throws(() => full.set(3, 3), /\[lite-logn\]/, 'set past capacity');
+    // build fails closed on mismatch / non-array-like / non-finite / duplicate key
+    assert.throws(() => SortedArray.build(null, [1]), /\[lite-logn\]/);
+    assert.throws(() => SortedArray.build([1, 2], [1]), /\[lite-logn\]/);       // length mismatch
+    assert.throws(() => SortedArray.build([], []), /\[lite-logn\]/);            // empty
+    assert.throws(() => SortedArray.build([1, NaN], [1, 2]), /\[lite-logn\]/);  // non-finite key
+    assert.throws(() => SortedArray.build([1, 2], [1, Infinity]), /\[lite-logn\]/); // non-finite value
+    assert.throws(() => SortedArray.build([5, 5], [1, 2]), /\[lite-logn\]/);    // duplicate key
+    // SortedArray is an ordered MAP: it deliberately has NO changeKey (not an addressable heap).
+    assert.equal(typeof sa.changeKey, 'undefined', 'SortedArray has no changeKey (ordered map, not a heap)');
 });

@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.13.0 thirteen members have
+avoid, and how to measure the logarithm yourself. At v0.14.0 fourteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
-MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D and
-SegmentTree2D -- so this guide carries their per-member sections. It is NOT an API
+MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
+SegmentTree2D and SortedArray -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -33,7 +33,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v0.13.0 all thirteen members have
+`(am)` = amortized, `(exp)` = expected. At v0.14.0 all fourteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -78,8 +78,12 @@ START -- what do you need?
 |   point updates (2D prefix sums; SUM only, not min/max)?     -> Fenwick2D (wc)    [v0.12.0]
 |
 +-- 2D rectangle MIN / MAX / GCD (or SUM) over a grid that
-    stay correct under point updates (a general 2D fold that
-    a sum-only 2D BIT cannot do; ~4x the space)?              -> SegmentTree2D (wc) [v0.13.0]
+|   stay correct under point updates (a general 2D fold that
+|   a sum-only 2D BIT cannot do; ~4x the space)?              -> SegmentTree2D (wc) [v0.13.0]
+|
++-- An ORDERED map where READS dominate and writes are rare,
+    and you want O(1) select / min / max / order-statistic
+    index + the fastest ordered iteration (a sorted array)?  -> SortedArray (wc)   [v0.14.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -133,6 +137,17 @@ worst-case (a cold deep access can splay an O(n) chain, disclosed by the witness
 and it is LEAN (no `rank` / `select` / `split` / `merge`). Reach for Scapegoat, not
 SplayTree, when a single slow lookup is unacceptable; reach for SplayTree when the
 workload is hot-key-skewed and you want the self-optimizing shape.
+**SortedArray** is the fifth ordered map and the read-optimized one: it stores keys +
+values in two parallel SORTED arrays (contiguous, not pointer-chased), so it is the
+pick when READS DOMINATE and writes are rare -- it has the fastest `get` (a packed
+lower-bound binary search), O(1) `select` / `keyAt` / `valueAt` / `min` / `max` (a raw
+array index), and the fastest ordered `forEach` (a straight cache scan) of any member
+here, plus `rank` / `successor` / `predecessor` in O(log n). Its price is the write:
+`set` / `delete` are **O(n)** (an in-place `copyWithin` tail shift), so a write-heavy
+workload should reach for SkipList / Treap / Scapegoat (O(log n) writes) instead.
+SortedArray vs the BST ordered maps is the reads-vs-writes pair: reach for SortedArray
+when the map is built rarely and queried often (and you want O(1) order statistics +
+the leanest iteration); reach for a BST when inserts and deletes are frequent.
 
 ---
 
@@ -153,10 +168,11 @@ workload is hot-key-skewed and you want the self-optimizing shape.
 | Same addressable + mergeable surface, textbook-optimal bounds ON PAPER (teaching / analysis; slower wall-clock) | FibonacciHeap | O(1)-amortized push/meld/decreaseKey, O(log n)-amortized popMin/remove | 0.11.0 |
 | 2D grid RECTANGLE SUMS under point updates (2D prefix sums; SUM only) | Fenwick2D | O(log^2 n) update / prefix / rectSum | 0.12.0 |
 | 2D grid RECTANGLE MIN / MAX / GCD / SUM under point updates (a general 2D fold; ~4x the space of a 2D BIT) | SegmentTree2D | O(log^2 n) update / query | 0.13.0 |
+| Read-optimized ordered map (reads dominate, writes rare); O(1) select / min / max + fastest iteration | SortedArray | O(log n) get / rank / successor; O(1) select / keyAt / valueAt / min / max; O(n) set / delete | 0.14.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's and SegmentTree2D's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's and SortedArray's are below).
 
 ---
 
@@ -705,6 +721,52 @@ so NEITHER lane needs the median-of-fits hook; see
 sides `[2^5, 2^11]`, while each O(n^2)-per-op dense-rescan foil leaves the line. WORST-case member: every
 op is worst-case O(log^2 n), so there is no MAX-single-op line. `node --expose-gc test/torture.mjs`
 proves update / query / at / clear at 0 B/op.
+
+---
+
+## SortedArray -- the read-optimized ordered map (reads dominate, writes rare)
+
+**Reach for it when** you have an ordered map / set that is BUILT rarely and QUERIED often, and you
+want the leanest reads in the family. SortedArray keeps keys ascending in one flat `Float64Array` and
+their values in a parallel one, so: `get` / `has` / `rank` / `successor` / `predecessor` are O(log n)
+via a single contiguous lower-bound binary search (the family's SHALLOWEST per-level slope -- a packed
+search touches fewer cache lines per level than a pointer-chasing BST descent); `select(k)` / `keyAt(k)`
+/ `valueAt(k)` are O(1) (a raw array index -- order statistics for free, no augmentation); `min` / `max`
+are O(1) (index 0 / size-1); and `forEach` is the fastest ordered iteration here (a straight cache scan,
+no pointer-chasing). Keys are UNIQUE; `set` UPDATES the value in place when the key already exists
+(O(log n), no shift). Canonical uses: a lookup table loaded once at startup then read in a hot loop, a
+sorted index you occasionally patch, an order-statistic query surface (the k-th smallest, or "how many
+keys below x") over a mostly-static set. Bulk-load two parallel array-likes with
+`SortedArray.build(keys, values)` (O(n log n): sort once, load once).
+
+**Avoid it when:**
+
+- Writes are frequent. `set` (a genuine insert) and `delete` are **O(n)** -- an in-place `copyWithin`
+  tail shift (0 B/op, but O(n) work). A write-heavy workload wants O(log n) writes: reach for **SkipList**
+  (plain ordered map), **Treap** (also rank / select / split / merge), or **Scapegoat** (worst-case get).
+  The O(n) insert is a DISCLOSED max-single-op bar the witness prints, never gated.
+- Your access is hot-key-SKEWED and you want the structure to self-optimize. Reach for **SplayTree** (a
+  read splays the hot key toward the root); SortedArray's cost is flat across all keys, it does not adapt.
+- You need `split` / `merge` set surgery. SortedArray has none -- use **Treap**.
+- You key by an object, or need duplicate keys / multiset semantics. SortedArray is a UNIQUE-key numeric
+  map (finite-number keys AND values; `build` rejects a duplicate key); Symbol / BigInt / NaN / +-Infinity
+  fail closed typeof-first.
+- The data is a priority queue (you only ever want the extreme + pop). A heap (**BinaryHeap** /
+  **MinMaxHeap**) is O(log n) pop with O(1) peek and no O(n) shift; SortedArray keeps the WHOLE order,
+  which a PQ does not need.
+
+**Measure it yourself:** `npm run witness` fits `get` against the default axis, `nsPerOp = intercept +
+slope*log2(n)` (its `get` is O(log n), a deterministic worst-case binary search -- the Scapegoat.get
+analogue, no RNG); it must clear the shared R^2 floor (0.958) and sit inside its band (`[0.59, 1.38]`
+ns/level; median slope 0.984), over exact power-of-two sizes `[2^12, 2^18]`, while the O(n) linear-scan
+foil leaves the line (R^2 ~ 0.78). Because a contiguous binary search is the FASTEST get in the family
+(~1 ns/level, a ~6 ns fit span), this lane uses the widest + highest n-sweep and a 1e6-iteration
+measurement to keep per-point noise off the fit, plus the MEDIAN of 7 independent sweep-fits as
+measurement-quality insurance against the post-torture run's scheduler / thermal residue -- the frozen
+0.958 floor and the slope band are UNTOUCHED (see [`decisions/0016-sortedarray.md`](./decisions/0016-sortedarray.md)).
+The witness also DISCLOSES the MAX single insert (an O(n) tail shift), never gated. `node --expose-gc
+test/torture.mjs` proves get / set / delete / rank / select / successor / predecessor / rangeIter at
+0 B/op -- the O(n) write shifts in place, so even a write storm allocates nothing.
 
 ---
 

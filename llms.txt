@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.13.0
+Version: 0.14.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -23,8 +23,10 @@ adds SkipList; v0.5.0 adds Treap; v0.6.0 adds Scapegoat; v0.7.0 adds MinMaxHeap;
 v0.8.0 adds SplayTree; v0.9.0 adds BinomialHeap; v0.10.0 adds PairingHeap; v0.11.0
 adds FibonacciHeap (the mergeable-heap arc's FINALE); v0.12.0 adds Fenwick2D (the
 family's FIRST 2D structure); v0.13.0 adds SegmentTree2D (the general 2D rectangle
-fold -- min/max/sum/gcd -- a 2D BIT cannot do). The roster (one member per session,
-each landing append-only):
+fold -- min/max/sum/gcd -- a 2D BIT cannot do); v0.14.0 adds SortedArray (the
+READ-OPTIMIZED ordered map: O(log n) get/rank/successor/predecessor + O(1)
+select/keyAt/valueAt/min/max over two parallel sorted arrays, O(n) writes disclosed).
+The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
   min|max binary heap over three parallel typed arrays (`_key` Float64Array,
@@ -231,6 +233,24 @@ each landing append-only):
   (rows+1)*(cols+1) -- the honest price for the general (non-invertible) folds. WORST-CASE (no
   max-single-op line); its witness is the family's SECOND on the SQUARED-log axis ((log2 n)^2). Zero
   allocation on every hot op.
+
+- SortedArray (v0.14.0) -- the READ-OPTIMIZED ordered map: a DYNAMIC key -> value ordered map over
+  TWO parallel SORTED `Float64Array` columns (`_key` ascending + `_value` at the same index). The
+  family's FIFTH ordered structure (after SkipList / Treap / Scapegoat / SplayTree); its
+  differentiator is CONTIGUOUS storage. get / has / rank / successor / predecessor are O(log n) via
+  ONE shared branch-free lower-bound binary search (`_lb`); select / keyAt / valueAt are O(1) (a raw
+  array index) and min / max are O(1) (index 0 / size-1); forEach is the fastest in the family (a
+  straight cache-friendly scan, no pointer-chasing). The honest cost is O(n) set (insert-with-shift)
+  and delete (shift-down): a `copyWithin` in the preallocated column -- no temp, no spread, still
+  0 B/op. Unique keys; set() UPDATES the value in place when the key exists (O(log n), no shift).
+  Keys AND values are finite numbers (typeof-guarded FIRST, before coercion -- Symbol / BigInt / NaN
+  / +-Infinity fail closed; null is not zero). Fixed capacity: set overflow throws, never silently
+  drops. rangeIter is a VERSION-STAMPED iterator (any structural change mid-iteration throws
+  `[lite-logn]`). It is literally the sorted-array FOIL the earlier ordered members were measured
+  against, now a first-class member: the "reads dominate, writes rare" ordered map. Its gated witness
+  op is `get` -- WORST-CASE O(log n) (like Scapegoat.get: deterministic, no RNG), on the DEFAULT
+  log2(n) axis; the O(n) set insert is a DISCLOSED max-single-op bar, NEVER gated. Zero allocation on
+  every read op; the O(n) write is still 0 B/op. `SA_MAX_CAPACITY = 2^31-1`.
 
 ## Exports (from the single main file LogN.js)
 
@@ -568,6 +588,38 @@ each landing append-only):
     from a 2D array-like (fold each row's col-tree, then fold the row-tree position-wise -- NOT
     rows*cols updates); fails closed on a non-2D-array-like, ragged rows, or any non-finite (or
     out-of-domain gcd) entry.
+- `SortedArray` -- class. A DYNAMIC read-optimized ordered map (key -> value) over two parallel
+  SORTED `Float64Array` columns: O(log n) get / has / rank / successor / predecessor via one shared
+  lower-bound search, O(1) select / keyAt / valueAt / min / max, O(n) set / delete (in-place
+  `copyWithin` shift, 0 B/op). Unique keys; the fastest forEach in the family. Keys AND values are
+  finite numbers (typeof-guarded first; NaN / +-Infinity / non-number / Symbol / BigInt fail closed).
+  - `new SortedArray(capacity)` -- capacity an integer in [1, 2^31-1], frozen at ctor. Allocates the
+    two `Float64Array(capacity)` columns once. Throws when capacity exceeds `SA_MAX_CAPACITY`.
+  - `size` / `capacity` getters. O(1).
+  - `get(key)` -> value | undefined. O(log n) (one lower-bound search + one equality check); never
+    throws on a missing / empty query. The gated witness op.
+  - `has(key)` -> boolean. O(log n).
+  - `set(key, value)` -> this. Insert, or UPDATE the value in place if key exists (O(log n), no
+    shift). A genuine insert is O(n) (a `copyWithin` shift of the tail up one slot -- the DISCLOSED
+    max-single-op cost, never gated). Fails closed on non-finite key / value or a full map.
+  - `delete(key)` -> boolean (idempotent): false if absent (no throw), true if removed. O(log n) to
+    locate, O(n) to shift the tail down one slot.
+  - `rank(x)` -> number. Count of stored keys STRICTLY LESS than x, in [0, size]. O(log n); x need
+    not be present.
+  - `select(k)` / `keyAt(k)` -> key | undefined. The k-th smallest KEY (0-based order statistic).
+    O(1) raw array index; out-of-range k returns undefined (non-integer k throws).
+  - `valueAt(k)` -> value | undefined. The VALUE parallel to the key at order-statistic index k. O(1).
+  - `successor(key)` / `predecessor(key)` -> number | undefined. STRICT (strictly greater / less).
+    O(log n); key itself need not be present.
+  - `min()` / `max()` -> key | undefined. O(1) (index 0 / size-1); undefined if empty.
+  - `rangeIter(lo, hi)` -> IterableIterator<number>. Keys in [lo, hi] INCLUSIVE, ascending; O(log n
+    + k) (a lower-bound seek + contiguous walk). Bounds may be +-Infinity; NaN or lo > hi throws; any
+    structural mutation mid-iteration throws `[lite-logn]` (VERSION-STAMPED).
+  - `size` / `capacity` getters; `clear()` -> this (O(1) size reset, keeps capacity); `forEach(fn)`
+    visits (key, value, sortedArray) in ascending key order (a contiguous scan, NOT version-stamped).
+  - `SortedArray.build(keys, values)` -> SortedArray. O(n log n) build from two parallel array-likes
+    (sort once by key, load into a fresh map sized to the count); fails closed on a non-array-like,
+    length mismatch, count outside [1, 2^31-1], any non-finite key / value, or a DUPLICATE key.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.
