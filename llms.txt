@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.14.0
+Version: 0.15.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -25,7 +25,10 @@ adds FibonacciHeap (the mergeable-heap arc's FINALE); v0.12.0 adds Fenwick2D (th
 family's FIRST 2D structure); v0.13.0 adds SegmentTree2D (the general 2D rectangle
 fold -- min/max/sum/gcd -- a 2D BIT cannot do); v0.14.0 adds SortedArray (the
 READ-OPTIMIZED ordered map: O(log n) get/rank/successor/predecessor + O(1)
-select/keyAt/valueAt/min/max over two parallel sorted arrays, O(n) writes disclosed).
+select/keyAt/valueAt/min/max over two parallel sorted arrays, O(n) writes disclosed);
+v0.15.0 adds PersistentSegTree (the family's FIRST persistent / branching structure and
+its FIRST bump/append allocator: a FULLY PERSISTENT segment tree via path-copying where
+every past version stays queryable and any version can be branched off).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -251,6 +254,33 @@ The roster (one member per session, each landing append-only):
   op is `get` -- WORST-CASE O(log n) (like Scapegoat.get: deterministic, no RNG), on the DEFAULT
   log2(n) axis; the O(n) set insert is a DISCLOSED max-single-op bar, NEVER gated. Zero allocation on
   every read op; the O(n) write is still 0 B/op. `SA_MAX_CAPACITY = 2^31-1`.
+
+- PersistentSegTree (v0.15.0) -- the family's FIRST persistent / branching member and its FIRST
+  bump/append allocator: a FULLY PERSISTENT (BRANCHING) segment tree via PATH-COPYING. Every version
+  is preserved and queryable forever, and ANY version can be branched off:
+  `update(fromVersion, i, value)` does NOT mutate `fromVersion` -- it returns a NEW dense version
+  whose root SHARES every off-path subtree with the parent and owns a freshly-copied O(log n)
+  root-to-leaf path (H + 1 nodes, H = ceil(log2 n)). It is the time-travel complement to the flat
+  SegmentTree (member 3): that one is a single mutable timeline over a `Float64Array(2n)`; this one is
+  a persistent DAG of immutable nodes. THE LOAD-BEARING IDIOM (decisions/0017): persistent nodes are
+  IMMUTABLE, SHARED across versions, and NEVER individually freed, so the allocator is a monotonic
+  BUMP/APPEND cursor (`_next`) into three preallocated columns (`_val` Float64, `_left` / `_right`
+  Uint32; NIL = 0 reserves slot 0) -- NOT the free-list NodePool the pointer members (SkipList / Treap
+  / Scapegoat / SplayTree) use, because a recycled slot would corrupt every older version that still
+  points at it. There is no `free()`; `clear()` is the only reset (rewind `_next`, re-seed v0).
+  Capacity is BY VERSION COUNT: `new PersistentSegTree(length, versionCapacity, kind)` takes the max
+  number of updates (extra versions beyond v0); the node budget `1 + (2n-1) + versionCapacity*(H+1)`
+  is computed INTERNALLY and guarded by a FLOAT product against `PST_MAX_NODES = 2^31-1` (never `| 0`,
+  which would wrap a large product and fail OPEN). Both arenas FAIL CLOSED: the version guard fires
+  first (the `versionCapacity + 1`-th update throws), and the node-arena overflow throw is
+  dead-code-by-construction but kept as a loud defense (the SparseTable r<l precedent). The fold menu
+  (min / max / sum / gcd) is chosen ONCE at ctor and cached as a small-int `_k` + inline switch --
+  EXACT SegmentTree parity, reusing the shared `segGcd` helper; value semantics are ABSOLUTE point-set.
+  Value doors are typeof-guarded FIRST (Symbol / BigInt / NaN / +-Infinity fail closed; the gcd kind
+  also rejects negative / non-integer). `query(version, lo, hi)` folds `[lo, hi]` INCLUSIVE in
+  WORST-CASE O(log n) and is the gated Witness op on the DEFAULT log2(n) axis; `at(version, i)` is the
+  O(log n) point read. Recursion (build / query / path-copy) runs on the native call stack, so every
+  hot op is 0 B/op. `PST_MAX_LENGTH = 2^30-1`.
 
 ## Exports (from the single main file LogN.js)
 
@@ -620,6 +650,35 @@ The roster (one member per session, each landing append-only):
   - `SortedArray.build(keys, values)` -> SortedArray. O(n log n) build from two parallel array-likes
     (sort once by key, load into a fresh map sized to the count); fails closed on a non-array-like,
     length mismatch, count outside [1, 2^31-1], any non-finite key / value, or a DUPLICATE key.
+
+- `PersistentSegTree` -- class. A FULLY PERSISTENT (BRANCHING) segment tree via PATH-COPYING: an
+  associative range-fold (min / max / sum / gcd, frozen at ctor) over a fixed-length array where EVERY
+  version is preserved and queryable forever and any version can be branched off. `update` returns a
+  NEW version sharing every off-path subtree with the parent (O(log n) time AND O(log n) new nodes);
+  the allocator is a monotonic BUMP/APPEND cursor over immutable, never-freed shared nodes, NOT the
+  free-list NodePool. Value semantics are ABSOLUTE point-set; value doors are typeof-guarded FIRST
+  (Symbol / BigInt / NaN / +-Infinity fail closed; the gcd kind also rejects negative / non-integer).
+  - `new PersistentSegTree(length, versionCapacity, kind)` -- length an integer in [1, 2^30-1];
+    versionCapacity the max updates (extra versions beyond v0), integer >= 1; kind 'min' | 'max' |
+    'sum' | 'gcd'. Sizes the node arena internally to `1 + (2n-1) + versionCapacity*(H+1)` (H =
+    ceil(log2 n)) and throws (FLOAT-product guard) when it exceeds `PST_MAX_NODES` (2^31-1). Seeds
+    version 0 to the fold identity.
+  - `query(version, lo, hi)` -> number. The fold over [lo, hi] INCLUSIVE in the given version, worst-
+    case O(log n) read-only descent; the GATED Witness op. Throws on an unknown / out-of-range version,
+    an out-of-range lo / hi, or lo > hi. A one-element range lo == hi returns that leaf.
+  - `at(version, i)` -> number. The single element at 0-based leaf i in version, O(log n). Throws on an
+    unknown version or out-of-range index.
+  - `update(fromVersion, i, value)` -> number. Set element i to value (ABSOLUTE) in a NEW version
+    branched off fromVersion WITHOUT touching it; returns the new dense version handle. O(log n) (copies
+    exactly the root-to-leaf path, shares every off-path subtree, 0 B/op). Fails closed as a NO-OP on an
+    unknown fromVersion, a non-finite value (checked first), a gcd-kind negative / non-integer, an
+    out-of-range index, or a FULL version arena.
+  - `length` / `versions` / `versionCapacity` / `kind` getters; `clear()` -> this (discard every
+    version, rewind the arena, re-seed a fresh identity version 0 -- keeps capacity; any prior handle
+    >= 1 is invalid). There is NO forEach / iterator (a persistent DAG has no single live timeline).
+  - `PersistentSegTree.build(values, versionCapacity, kind)` -> PersistentSegTree. O(n) seed of version
+    0 from an array-like (a snapshot, NOT n updates); fails closed BEFORE the tree is usable on a
+    non-array-like, any non-finite entry, or (gcd kind) any negative / non-integer entry.
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

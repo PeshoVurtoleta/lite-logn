@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -212,6 +212,43 @@ function kSortedArraySet(n) {
     return { obj: sa, op: () => { sa.set(0, i); sa.delete(0); i = (i + 1) | 0; } };
 }
 
+/** A FIXED, bounded version arena for the fill-based dimensions (D3/D4/D6/D7): PersistentSegTree is
+ *  index-addressed (its n leaves are its "elements", all live), so a modest fixed version headroom is
+ *  enough to populate a non-empty tree without an n-sized arena. clear() rewinds it in place. */
+const PST_BENCH_VC = 64;
+
+function kPstQuery(n) {
+    // A tree of n leaves plus PST_VERS path-copying versions; each op folds the widest window
+    // [1, n-2] over a RANDOM existing version (version does not change the O(log n) descent cost).
+    // The index is `rng() >>> 1` (drop the high bit) so it stays a 31-bit Smi. Deterministic
+    // worst-case O(log n), read-only (0 B/op).
+    const VERS = 16;
+    const t = new PersistentSegTree(n, VERS, 'sum');
+    let cur = 0;
+    const seed = prng(0x9E37 ^ n);
+    for (let v = 0; v < VERS; v++) cur = t.update(cur, (seed() >>> 1) % n, (seed() >>> 1) & 0xffff);
+    const versions = t.versions;
+    const rng = prng(0x5A17 ^ n);
+    const lo = 1, hi = n - 2;
+    return { obj: t, op: () => { const ver = (rng() >>> 1) % versions; SINK = (SINK + (t.query(ver, lo, hi) | 0)) | 0; } };
+}
+
+function kPstUpdate(n) {
+    // The persistent path-copying update: branch off the head (or v0 every 4th) with a bump-allocated
+    // O(log n) path, sharing off-path subtrees. The fixed version arena is recycled in place via
+    // clear() before it fills (rewind the bump cursor + re-seed v0 in the SAME store, 0 B/op), so the
+    // steady op runs forever without reallocating. An INTEGER (Smi) key/value avoids boxing.
+    const VC = 512;
+    const t = new PersistentSegTree(n, VC, 'sum');
+    let cur = 0, i = 0;
+    const rng = prng(0x1234 ^ n);
+    return { obj: t, op: () => {
+        if (t.versions > VC - 1) { t.clear(); cur = 0; }
+        cur = t.update((i & 3) ? cur : 0, (rng() >>> 1) % n, i & 0xffff);
+        i = (i + 1) | 0;
+    } };
+}
+
 function kMinMaxHeapPopMin(n) {
     // A full min-max heap of n ids; each op pops the minimum id and re-pushes it with a
     // fresh key -- the O(log n) trickle-down + sift-up pair, size steady at n. SINK is
@@ -373,6 +410,7 @@ export function makeOpKernel(member, op, n) {
         case 'SegmentTree2D.update': return kSegTree2DUpdate(n);
         case 'SegmentTree2D.query': return kSegTree2DQuery(n);
         case 'SortedArray.get': return kSortedArrayGet(n);
+        case 'PersistentSegTree.query': return kPstQuery(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -393,6 +431,7 @@ export function makeSubject(member, n) {
     if (member === 'Fenwick2D') return kFenwick2DUpdate(n);
     if (member === 'SegmentTree2D') return kSegTree2DUpdate(n);
     if (member === 'SortedArray') return kSortedArraySet(n);
+    if (member === 'PersistentSegTree') return kPstUpdate(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -596,6 +635,10 @@ export function memberBytes(member, obj) {
     if (member === 'Fenwick2D') return obj._t.buffer.byteLength;
     if (member === 'SegmentTree2D') return obj._t.buffer.byteLength;
     if (member === 'SortedArray') return obj._key.buffer.byteLength + obj._value.buffer.byteLength;
+    if (member === 'PersistentSegTree') {
+        return obj._val.buffer.byteLength + obj._left.buffer.byteLength +
+            obj._right.buffer.byteLength + obj._roots.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -615,6 +658,7 @@ export function theoreticalMinPerLive(member) {
     if (member === 'Fenwick2D') return 8;    // one Float64 tree cell per grid cell
     if (member === 'SegmentTree2D') return 32; // four Float64 tree cells (4RC array) per grid cell
     if (member === 'SortedArray') return 16; // key (Float64, 8) + value (Float64, 8) per live entry
+    if (member === 'PersistentSegTree') return 32; // the v0 tree is ~2 nodes/element * 16 B (val 8 + 2 child ptrs 8)
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -623,6 +667,7 @@ function liveCount(member, obj) {
     if (member === 'Fenwick' || member === 'SegmentTree') return obj.length; // all cells always live
     if (member === 'Fenwick2D') return obj.rows * obj.cols;                  // every grid cell is live
     if (member === 'SegmentTree2D') return obj.rows * obj.cols;              // every grid cell is live
+    if (member === 'PersistentSegTree') return obj.length;                   // index-addressed: n leaves are the elements
     return obj.size;
 }
 
@@ -641,6 +686,16 @@ function fillMember(member, obj, count) {
     if (member === 'Fenwick2D') { obj.clear(); const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return; }
     if (member === 'SegmentTree2D') { obj.clear(); const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return; }
     if (member === 'SortedArray') { obj.clear(); for (let k = 0; k < count; k++) obj.set(k, k); return; }
+    if (member === 'PersistentSegTree') {
+        // PST is index-addressed (n fixed leaves); "fill" = clear + a bounded chain of path-copying
+        // updates that seed values (the version arena is fixed, so bound to its capacity). liveCount
+        // is always obj.length, so the target `count` maps to how many leaves get a nonzero value.
+        obj.clear();
+        const L = obj.length, m = Math.min(count, obj.versionCapacity);
+        let cur = 0;
+        for (let k = 0; k < m; k++) cur = obj.update(cur, k % L, (k & 0xffff) + 1);
+        return;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -668,6 +723,7 @@ function clearContent(member, obj) {
     if (member === 'SegmentTree') return obj.query(0, obj.length - 1); // fold of all cells
     if (member === 'Fenwick2D') return obj.prefix(obj.rows - 1, obj.cols - 1); // sum of the whole grid
     if (member === 'SegmentTree2D') return obj.query(0, 0, obj.rows - 1, obj.cols - 1); // fold of the whole grid
+    if (member === 'PersistentSegTree') return obj.query(obj.versions - 1, 0, obj.length - 1); // fold of the HEAD version (0 once cleared to identity v0)
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -687,6 +743,12 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'Fenwick2D') { const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, 1); return R * C; }
     if (member === 'SegmentTree2D') { const R = obj.rows, C = obj.cols; for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) obj.update(r, c, (r * C + c) & 0xffff); return R * C; }
     if (member === 'SortedArray') { for (let k = 0; k < n; k++) obj.set(k, k); return n; }
+    if (member === 'PersistentSegTree') {
+        const L = obj.length, m = Math.min(n, obj.versionCapacity);
+        let cur = 0;
+        for (let k = 0; k < m; k++) cur = obj.update(cur, k % L, (k & 0xffff) + 1);
+        return m;
+    }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -749,6 +811,7 @@ export function D3(member, opts = {}) {
     else if (member === 'Fenwick2D') { const side = f2dSide(n); obj = new Fenwick2D(side, side); }
     else if (member === 'SegmentTree2D') { const side = f2dSide(n); obj = new SegmentTree2D(side, side, 'sum'); }
     else if (member === 'SortedArray') obj = new SortedArray(n);
+    else if (member === 'PersistentSegTree') obj = new PersistentSegTree(n, PST_BENCH_VC, 'sum');
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -780,7 +843,7 @@ export function D3(member, opts = {}) {
     // + SkipList shrink their live set (bytes-per-live RISES ~1/loadFactor over the
     // fixed backing store); Fenwick + SegmentTree are INDEX-ADDRESSED (every cell is
     // always live), so their curve is FLAT by design -- stated, not hidden.
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D');
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -817,6 +880,18 @@ export function D3(member, opts = {}) {
 
 function denseIterNsPerElem(member, obj, reps) {
     let acc = 0;
+    // PersistentSegTree has no forEach (persistent nodes are shared/immutable, not a single timeline);
+    // its dense-iteration analogue is a full O(n) sweep of the HEAD version via at(head, i).
+    if (member === 'PersistentSegTree') {
+        const head = obj.versions - 1, L = obj.length;
+        const size0 = Math.max(1, L);
+        for (let i = 0; i < L; i++) acc = (acc + (obj.at(head, i) | 0)) | 0; // warm
+        const t0p = performance.now();
+        for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + (obj.at(head, i) | 0)) | 0;
+        SINK += acc;
+        const dtp = performance.now() - t0p;
+        return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
+    }
     const cb = (x) => { acc = (acc + (x | 0)) | 0; };
     obj.forEach(cb); // warm
     const size = Math.max(1, liveCount(member, obj));
@@ -854,6 +929,9 @@ function randomLookupOp(member, obj, n, rng) {
     if (member === 'SegmentTree2D') return () => { const r = rng() % obj.rows, c = rng() % obj.cols; SINK += obj.query(r, c, r, c); };
     // SortedArray is key-addressed: a random resident-key get (its contiguous binary search) is the analogue.
     if (member === 'SortedArray') return () => { const v = obj.get(rng() % n); if (v !== undefined) SINK += v; };
+    // PersistentSegTree is index-addressed: a random single-leaf read of the HEAD version (its O(log n)
+    // point descent) is the analogue.
+    if (member === 'PersistentSegTree') { const head = obj.versions - 1; return () => { SINK += obj.at(head, rng() % n) | 0; }; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -880,6 +958,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'SegmentTree2D') return () => { const r = i % obj.rows, c = i % obj.cols; SINK += obj.query(r, c, r, c); i++; if (i >= n) i = 0; };
     // SortedArray is key-addressed: a sequential resident-key get (ascending scan of the search) analogue.
     if (member === 'SortedArray') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
+    // PersistentSegTree is index-addressed: a sequential single-leaf read of the HEAD version (row-major).
+    if (member === 'PersistentSegTree') { const head = obj.versions - 1; return () => { SINK += obj.at(head, i) | 0; i++; if (i >= n) i = 0; }; }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -914,6 +994,12 @@ function buildFull(member, n) {
     else if (member === 'Fenwick2D') { const side = f2dSide(n); obj = new Fenwick2D(side, side); for (let r = 0; r < side; r++) for (let c = 0; c < side; c++) obj.update(r, c, 1); }
     else if (member === 'SegmentTree2D') { const side = f2dSide(n); obj = new SegmentTree2D(side, side, 'sum'); for (let r = 0; r < side; r++) for (let c = 0; c < side; c++) obj.update(r, c, 1); }
     else if (member === 'SortedArray') { obj = new SortedArray(n); for (let k = 0; k < n; k++) obj.set(k, k); } // ascending set appends O(1); build is O(n)
+    else if (member === 'PersistentSegTree') {
+        // n leaves + a bounded chain of path-copying versions (index-addressed: all n leaves live).
+        obj = new PersistentSegTree(n, PST_BENCH_VC, 'sum');
+        let cur = 0;
+        for (let k = 0; k < PST_BENCH_VC; k++) cur = obj.update(cur, k % n, (k & 0xffff) + 1);
+    }
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1284,7 +1370,8 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'SegmentTree' || member === 'SkipList' || member === 'Treap' ||
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
         member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' ||
-        member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray') mode = 0;
+        member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray' ||
+        member === 'PersistentSegTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

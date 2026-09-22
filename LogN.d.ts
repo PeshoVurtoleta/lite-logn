@@ -669,3 +669,44 @@ export class SortedArray {
      *  Length mismatch, count outside [1, 2^31-1], non-finite entry, or a duplicate key throws. */
     static build(keys: ArrayLike<number>, values: ArrayLike<number>): SortedArray;
 }
+
+/**
+ * A FULLY PERSISTENT (BRANCHING) segment tree via path-copying: an associative range-fold
+ * (min | max | sum | gcd, frozen at construction) over a fixed-length array where every version is
+ * preserved and queryable forever and any version can be branched off. `update(fromVersion, i, value)`
+ * does NOT mutate fromVersion; it returns a new dense version sharing every off-path subtree with the
+ * parent (O(log n) time and O(log n) new nodes) over a monotonic bump/append node arena.
+ */
+export class PersistentSegTree {
+    /** @param length exact element count; integer in [1, 2^30-1].
+     *  @param versionCapacity max updates (extra versions beyond v0); integer >= 1.
+     *  @param kind the frozen associative fold. */
+    constructor(length: number, versionCapacity: number, kind: 'min' | 'max' | 'sum' | 'gcd');
+
+    /** Element count this tree was sized for. */
+    readonly length: number;
+    /** The number of versions that currently exist (dense handles 0 .. versions-1). */
+    readonly versions: number;
+    /** The max number of updates (extra versions beyond v0) this tree was sized for. */
+    readonly versionCapacity: number;
+    /** The frozen associative fold. */
+    readonly kind: 'min' | 'max' | 'sum' | 'gcd';
+
+    /** The fold over [lo, hi] INCLUSIVE in the given version, worst-case O(log n). Unknown version,
+     *  out-of-range lo/hi, or lo > hi throws. */
+    query(version: number, lo: number, hi: number): number;
+    /** The single element at 0-based leaf i in the given version. O(log n). Unknown version or
+     *  out-of-range index throws. */
+    at(version: number, i: number): number;
+    /** Set element i to value (ABSOLUTE) in a NEW version branched off fromVersion, WITHOUT touching
+     *  it; returns the new dense version handle. O(log n), 0 B/op. Unknown fromVersion, non-finite
+     *  value, a gcd-kind negative/non-integer, out-of-range index, or a full version arena throws. */
+    update(fromVersion: number, i: number, value: number): number;
+    /** Discard every version, rewind the arena, and re-seed a fresh identity version 0 (keeps
+     *  capacity; any prior handle >= 1 is invalid). O(n). */
+    clear(): this;
+
+    /** O(n) seed of version 0 from an array-like (a snapshot, NOT n updates). Non-array-like, any
+     *  non-finite entry, or (gcd) a negative/non-integer entry throws before the tree is usable. */
+    static build(values: ArrayLike<number>, versionCapacity: number, kind: 'min' | 'max' | 'sum' | 'gcd'): PersistentSegTree;
+}

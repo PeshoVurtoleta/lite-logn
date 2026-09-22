@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -377,6 +377,25 @@ export const S2D_QUERY_SLOPE_HI = 7.15;       // median 5.105 * 1.4
 export const SA_GET_SLOPE_LO = 0.59;          // median 0.984 * 0.6
 export const SA_GET_SLOPE_HI = 1.38;          // median 0.984 * 1.4
 
+// --- PersistentSegTree (v0.15.0): shared R^2 floor, OWN query slope band + sweep (0017 / D-PST6) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide; PersistentSegTree's
+// gated op is query -- a WORST-CASE O(log n) read-only range descent over a persistent DAG (the [1, n-2]
+// window folds ~2*(log2 n - 1) nodes, deterministic, no RNG on the hot path). It fits the DEFAULT
+// log2(n) axis (a single log). The O(n) LINEAR-SCAN foil is EXPONENTIAL on that axis and MUST miss the
+// floor. Its per-level slope is the STEEPEST get/query in the family -- expected, and why only the R^2
+// floor is shared: unlike the flat SegmentTree (one contiguous `Float64Array(2n)`, cache-friendly
+// boundary walk), a persistent query chases SCATTERED node slots (`_left` / `_right` indices into a
+// bump arena), so each level is a pointer-chase across a large working set = a full DRAM latency per
+// level. Band = median-of-15 fit-runs * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a
+// legitimately faster future run is not false-failed; the R^2 floor independently rejects any non-log
+// shape. Calibration (this machine, 3e5-iter min-over-10-batches over 2^11..2^17): median-of-15 fit-run
+// slope = 39.25 ns/level (15 samples: 35.63 37.82 37.82 38.09 38.26 38.59 39.20 39.25 39.45 39.48 39.57
+// 39.75 39.95 40.01 40.29); single-fit R^2 min 0.9533, median 0.9730, 1/15 below the 0.958 floor -- so
+// the lane opts into the median-of-fits (PST_FIT_RUNS) hook, exactly like SegmentTree.update /
+// PairingHeap / FibonacciHeap. Band = median 39.25 * [0.6, 1.4].
+export const PST_QUERY_SLOPE_LO = 23.55;      // median 39.25 * 0.6
+export const PST_QUERY_SLOPE_HI = 54.95;      // median 39.25 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -453,12 +472,31 @@ const SA_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // `fitRuns` hook) as measurement-quality INSURANCE, same mechanism as SegmentTree.update / PairingHeap
 // / FibonacciHeap / Fenwick2D. With the 1e6-iteration measurement the SINGLE fit already clears the
 // 0.958 floor cleanly on a quiet machine (calibration: 0/15 single fits below the floor, min 0.9690);
-// but the witness runs right after torture (2M+ ops across 14 members) leaves scheduler / thermal
+// but the witness runs right after torture (2M+ ops across 15 members) leaves scheduler / thermal
 // residue, and this being the family's FASTEST lane it is the most noise-sensitive under that load, so
 // the median-of-7 fit is kept to reject the occasional load-tilted sweep. Odd so the median is a real
 // sample. Measurement-quality only: the frozen 0.958 floor and the slope band are UNTOUCHED, and a
 // genuine O(n) shape fails every fit, so no teeth are lost. Scoped to this lane.
 const SA_FIT_RUNS = 7;
+// PersistentSegTree's gated query sweep: EXACT powers of two 2^11..2^17 (the pointer-chasing window
+// Treap / Scapegoat / SkipList.get and BinomialHeap.popMin use -- a persistent range query descends
+// a DAG of scattered node slots and is DRAM-latency-sensitive, so it needs a cache-resident
+// exact-power window, not the [1e4..1e6] array-embedded band). Exact powers keep the decomposition
+// node count regular (the [1, n-2] window folds ~2*(log2 n - 1) nodes), so the staircase maps cleanly
+// onto the continuous log2(n) axis. It fits the DEFAULT log2(n) axis (a single log, NOT the
+// squared-log Fenwick2D / SegmentTree2D use). Its O(n) linear-scan foil stays on the small O(n^2)
+// sweep. Band = median-of-15 fit-runs * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a
+// legitimately faster future run is not false-failed; the frozen 0.958 R^2 floor independently
+// rejects any non-log shape.
+const PST_QUERY_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const PST_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// PersistentSegTree.query gates on the MEDIAN of PST_FIT_RUNS independent sweep-fits (the registry
+// `fitRuns` hook), same mechanism as SegmentTree.update / PairingHeap / FibonacciHeap: the witness
+// runs right after torture (2M+ ops across 15 members), whose scheduler / thermal residue tilts the
+// occasional sweep; the median-of-fits rejects it. Odd so the median is a real sample. Measurement-
+// quality only: the frozen 0.958 floor and the slope band are UNTOUCHED, and a genuine O(n) shape
+// fails every fit, so no teeth are lost. Scoped to this lane.
+const PST_FIT_RUNS = 7;
 // BinomialHeap's gated popMin sweep: EXACT powers of two 2^11..2^17 (the same pointer-chasing
 // window Treap/Scapegoat/SkipList.get use -- a binomial popMin chases scattered forest slots
 // and its cost is DRAM-latency-sensitive, so it needs a cache-resident exact-power window, not
@@ -1295,6 +1333,67 @@ function measureSortedArrayGetFoil(n) {
     return elapsed / count;
 }
 
+// --- PersistentSegTree measurement (query hot op + its O(n) linear-scan foil) -
+// The tree is built OUTSIDE timing: v0 plus PST_VERS path-copying updates so several versions
+// coexist, then the timed window is the range query [1, n-2] over a RANDOM existing version
+// (version does not change the O(log n) descent cost -- all versions share the tree height -- so
+// cycling versions exercises the persistent DAG without tilting the shape). Same effort as
+// SegmentTree.query, hammered over 1e6 iters min-over-batches. PersistentSegTree has NO RNG on the
+// hot path, so its query line is a pure DETERMINISTIC worst-case O(log n) descent.
+const PST_ITERS = 1000000;  // hammered ops per timed batch (high, to shrink per-point noise)
+const PST_BATCH = 15;       // min-over-batches
+const PST_TARGETS = 1024;   // distinct random versions cycled per batch (pow2 mask)
+const PST_VERS = 16;        // versions coexisting in the timed tree
+
+// query: fold the widest gated window [1, n-2] over a random existing version. Return the MIN
+// per-op time over PST_BATCH batches.
+function measurePstQuery(n) {
+    const t = new PersistentSegTree(n, PST_VERS, 'sum');
+    const seed = mulberry32(0x9E37 ^ n);
+    let cur = 0;
+    for (let v = 0; v < PST_VERS; v++) cur = t.update(cur, (seed() * n) | 0, (seed() * 65536) | 0);
+    const versions = t.versions;
+    const tv = new Int32Array(PST_TARGETS);
+    const rnd = mulberry32(0x5A17 ^ n);
+    for (let i = 0; i < PST_TARGETS; i++) tv[i] = (rnd() * versions) | 0;
+    const lo = 1, hi = n - 2;
+    let sink = 0;
+    for (let w = 0; w < PST_ITERS; w++) sink += t.query(tv[w & (PST_TARGETS - 1)], lo, hi); // warm
+    let best = Infinity;
+    for (let b = 0; b < PST_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < PST_ITERS; i++) sink += t.query(tv[i & (PST_TARGETS - 1)], lo, hi);
+        const e = (nowNs() - t0) / PST_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// query FOIL: a naive linear scan-fold over [1, n-2] of a plain Float64Array = O(n) per query (the
+// default before you know the segment-tree trick). Exponential on the log2(n) axis, so a
+// straight-line fit MUST MISS the R^2 floor. O(n^2) total. (Same foil SegmentTree.query uses.)
+function measurePstQueryFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    const rnd = mulberry32(0x2c3d ^ n);
+    for (let i = 0; i < n; i++) a[i] = (rnd() * 65536) | 0;
+    { let s = 0; for (let k = 1; k <= n - 2; k++) s += a[k]; if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let s = 0;
+            for (let k = 1; k <= n - 2; k++) s += a[k]; // O(n) scan-fold
+            sink += s;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- BinomialHeap measurement (popMin hot op + its O(n) foil) ----------------
 // The heap is built OUTSIDE timing (n pushes), then a FULL popMin drain is timed, accumulated
 // across rebuilds until ~4e6 pops are timed (a stable mean, height ~ log2(n)). The rebuild is
@@ -1982,10 +2081,27 @@ export const MEMBERS = [
         // SA_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
         fitRuns: SA_FIT_RUNS,
     },
+    {
+        name: 'PersistentSegTree',
+        op: 'query',
+        sweep: PST_QUERY_SWEEP,
+        foilSweep: PST_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0017 inherits D-08)
+        slopeLo: PST_QUERY_SLOPE_LO,           // own band (DEFAULT log2 axis -- a single log)
+        slopeHi: PST_QUERY_SLOPE_HI,
+        run: measurePstQuery,
+        foil: measurePstQueryFoil,
+        foilName: 'linear scan-fold (O(n) per query)',
+        // MEDIAN-OF-FITS (0017, measurement-quality only): a persistent range query chases scattered
+        // node slots, so a single fit's R^2 dips below the floor in a minority of runs (1/15 in
+        // calibration); the median-of-PST_FIT_RUNS clears it reliably. Floor + band unchanged; an
+        // O(n) shape fails every fit.
+        fitRuns: PST_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.14.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.15.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

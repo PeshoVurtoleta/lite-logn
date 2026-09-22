@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.14.0 fourteen members have
+avoid, and how to measure the logarithm yourself. At v0.15.0 fifteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
-SegmentTree2D and SortedArray -- so this guide carries their per-member sections. It is NOT an API
+SegmentTree2D, SortedArray and PersistentSegTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -33,7 +33,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v0.14.0 all fourteen members have
+`(am)` = amortized, `(exp)` = expected. At v0.15.0 all fifteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -82,8 +82,13 @@ START -- what do you need?
 |   a sum-only 2D BIT cannot do; ~4x the space)?              -> SegmentTree2D (wc) [v0.13.0]
 |
 +-- An ORDERED map where READS dominate and writes are rare,
-    and you want O(1) select / min / max / order-statistic
-    index + the fastest ordered iteration (a sorted array)?  -> SortedArray (wc)   [v0.14.0]
+|   and you want O(1) select / min / max / order-statistic
+|   index + the fastest ordered iteration (a sorted array)?  -> SortedArray (wc)   [v0.14.0]
+|
++-- An associative range fold (min / max / sum / gcd) where
+    EVERY PAST VERSION must stay queryable + branchable
+    (time-travel / undo / audit: update returns a new version,
+    it never mutates the old one)?                           -> PersistentSegTree (wc) [v0.15.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -169,10 +174,11 @@ the leanest iteration); reach for a BST when inserts and deletes are frequent.
 | 2D grid RECTANGLE SUMS under point updates (2D prefix sums; SUM only) | Fenwick2D | O(log^2 n) update / prefix / rectSum | 0.12.0 |
 | 2D grid RECTANGLE MIN / MAX / GCD / SUM under point updates (a general 2D fold; ~4x the space of a 2D BIT) | SegmentTree2D | O(log^2 n) update / query | 0.13.0 |
 | Read-optimized ordered map (reads dominate, writes rare); O(1) select / min / max + fastest iteration | SortedArray | O(log n) get / rank / successor; O(1) select / keyAt / valueAt / min / max; O(n) set / delete | 0.14.0 |
+| Associative range fold where EVERY PAST VERSION stays queryable + branchable (time-travel / undo / audit) | PersistentSegTree | O(log n) query / at / update (update -> a new version, sharing off-path subtrees) | 0.15.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's and SortedArray's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's and PersistentSegTree's are below).
 
 ---
 
@@ -767,6 +773,57 @@ measurement-quality insurance against the post-torture run's scheduler / thermal
 The witness also DISCLOSES the MAX single insert (an O(n) tail shift), never gated. `node --expose-gc
 test/torture.mjs` proves get / set / delete / rank / select / successor / predecessor / rangeIter at
 0 B/op -- the O(n) write shifts in place, so even a write storm allocates nothing.
+
+---
+
+## PersistentSegTree -- the fully persistent (branching) range fold (time-travel / undo)
+
+**Reach for it when** you need an associative range fold (min / max / sum / gcd) over a
+fixed-length array AND every past version must stay queryable and branchable -- not just
+the latest. PersistentSegTree makes `update(fromVersion, i, value)` return a NEW version
+that shares every off-path subtree with its parent (O(log n) time AND O(log n) new nodes,
+0 B/op); `fromVersion` is untouched, so you can branch off ANY version, not only the newest.
+Canonical uses: an undo / redo stack over a range-queryable array, a "what-if" fork of a
+scenario, an audit log where every historical state must remain exactly queryable, a
+functional / immutable range structure, persistence-based offline algorithms (k-th in a
+range via version differencing). `query(version, lo, hi)` folds `[lo, hi]` inclusive and
+`at(version, i)` reads one leaf, both O(log n) in ANY version. `kind` (min / max / sum /
+gcd) and capacity (`length`, `versionCapacity`) are frozen at construction.
+
+**Avoid it when:**
+
+- You only need ONE mutable timeline (no history, no branching). The flat **SegmentTree**
+  (v0.3.0) is far leaner -- one `Float64Array(2n)`, in-place O(log n) update, no per-update
+  node copies -- and answers the same range folds. Reach for PersistentSegTree ONLY when past
+  versions must survive; a mutable timeline that discards history should not pay the
+  path-copying node cost.
+- You need RANGE updates (add x to every element in `[lo, hi]`). v0.15.0 is point-update only
+  (an ABSOLUTE set); persistent lazy propagation is deferred.
+- Your fold is a plain SUM over a single timeline and you want the tightest memory. Use
+  **Fenwick** (v0.2.0). PersistentSegTree's node arena is sized to `1 + (2n-1) +
+  versionCapacity*(H+1)` -- the honest price of keeping every version.
+- You key by an arbitrary value, or need `rank` / `select` / `successor`. PersistentSegTree
+  is index-addressed over `[0, length)`, not a keyed ordered map -- use **Treap** /
+  **Scapegoat** / **SkipList** / **SortedArray**.
+- You would exceed the version budget. Capacity is BY VERSION COUNT and fails closed: the
+  `versionCapacity + 1`-th update throws (never a silent drop or a reallocation). Size
+  `versionCapacity` up front for the number of updates you will make.
+
+**Measure it yourself:** `npm run witness` fits `query` (a read-only descent over a random
+existing version) against the DEFAULT axis, `nsPerOp = intercept + slope*log2(n)` (its
+`query` is WORST-CASE O(log n), independent of which version is read); it must clear the
+shared R^2 floor (0.958) and sit inside its band (`[23.55, 54.95]` ns/level; median slope
+39.25), over exact power-of-two sizes `[2^11, 2^17]`, while the O(n) linear-scan foil leaves
+the line. Because a persistent path-copying query chases scattered bump-allocated slots
+across the node arena, its per-level slope sits with the pointer-chasing members, and this
+lane opts into the MEDIAN of 7 independent sweep-fits as measurement-quality insurance
+against the post-torture run's scheduler / thermal residue -- the frozen 0.958 floor and the
+slope band are UNTOUCHED (see
+[`decisions/0017-persistentsegtree.md`](./decisions/0017-persistentsegtree.md)). WORST-CASE
+member: every op is worst-case O(log n), so there is no MAX-single-op line. `node --expose-gc
+test/torture.mjs` proves query / at / update at 0 B/op -- `update` bump-allocates ONLY
+preallocated slots (no `new`, no typed-array growth), so even an update storm (refreshed via
+`clear()` so the fixed arena never overflows) allocates nothing.
 
 ---
 

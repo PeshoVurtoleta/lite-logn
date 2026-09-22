@@ -6,6 +6,75 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-22
+
+### Added
+
+- **PersistentSegTree** -- the fifteenth member and the family's FIRST persistent / branching structure
+  and its FIRST bump/append allocator: a FULLY PERSISTENT (BRANCHING) segment tree via PATH-COPYING. An
+  associative range-fold (min / max / sum / gcd, frozen at construction) over a fixed-length array where
+  EVERY version is preserved and queryable forever, and any version can be branched off.
+  `update(fromVersion, i, value)` does NOT mutate `fromVersion`; it returns a NEW dense version whose
+  root SHARES every off-path subtree with the parent and owns a freshly-copied O(log n) root-to-leaf
+  path (H + 1 nodes, H = ceil(log2 n)). It is the time-travel complement to the flat SegmentTree
+  (member 3): that one is a single mutable timeline over a `Float64Array(2n)`; this one is a persistent
+  DAG of immutable nodes. Surface: `query` / `at` / `update` / `clear`, `length` / `versions` /
+  `versionCapacity` / `kind` getters, and the static `PersistentSegTree.build(values, versionCapacity,
+  kind)`. See `decisions/0017-persistentsegtree.md`.
+- **BUMP/APPEND allocator, NOT the free-list NodePool (D-PST2, the load-bearing idiom).** Persistent
+  nodes are IMMUTABLE, SHARED across versions, and NEVER individually freed -- freeing a shared node
+  would corrupt every version that still points at it. So the allocator is a single monotonic `_next`
+  cursor into three preallocated columns (`_val` `Float64Array`, `_left` / `_right` `Uint32Array`;
+  `NIL = 0` reserves slot 0). This is the DELIBERATE distinction from SkipList / Treap / Scapegoat /
+  SplayTree, which bind the free-list `NodePool` (their nodes are mutable and owned by ONE timeline).
+  There is no `free()`; `clear()` is the only reset (rewind `_next`, re-seed v0).
+- **Capacity BY VERSION COUNT + a FLOAT-product node-arena guard (D-PST3).** `new PersistentSegTree(
+  length, versionCapacity, kind)` takes the max updates (extra versions beyond v0); the node budget
+  `1 + (2n-1) + versionCapacity*(H+1)` is computed INTERNALLY and guarded by a FLOAT multiply against
+  `PST_MAX_NODES` (`0x7FFFFFFF`, 2^31-1) -- never `| 0`, which would wrap a large product to a small /
+  negative int and pass the door (fail OPEN -> under-allocation -> OOB); the float arithmetic is exact
+  to 2^53, so a genuine overflow fails CLOSED (the S2D_MAX_CELLS / F2D_MAX_CELLS precedent).
+  `PST_MAX_LENGTH` (`0x3FFFFFFF`, 2^30-1) is the per-argument door for `length`.
+- **Fail-closed capacity, BOTH arenas (D-PST4).** The VERSION arena fails closed (the
+  `versionCapacity + 1`-th update throws; the version guard fires first, before any node overflow); the
+  NODE arena's overflow throw is DEAD-CODE by construction but kept as a loud fail-closed defense
+  (the SparseTable r<l / SortedArray `_full` precedent). Every door is typeof-guarded FIRST (Symbol /
+  BigInt / NaN / +-Infinity fail closed), and a failing door is a genuine NO-OP (no slot consumed, no
+  version created).
+- **Fold menu = EXACT SegmentTree parity, ABSOLUTE point-set (D-PST5).** min / max / sum / gcd chosen
+  ONCE at construction, cached as a small-int `_k` combined by an INLINE switch on every hot body (no
+  function ref, no closure, no megamorphic call site), reusing the shared `segGcd` helper. Identity:
+  sum -> 0, min -> +Infinity, max -> -Infinity, gcd -> 0; an unwritten cell reads the fold identity
+  (v0 seeds every leaf to it). The value door is typeof-first and the gcd kind additionally rejects
+  negative / non-integer values -- byte-for-byte the SegmentTree contract. `PersistentSegTree.build`
+  seeds v0 in O(n) (a snapshot, NOT n updates), failing closed on non-array-like / non-finite /
+  out-of-domain-gcd entries before the tree is usable.
+- **The witness's twentieth gated op, on the DEFAULT log2(n) axis (D-PST6).** `PersistentSegTree.query`
+  (a read-only descent over a random existing version, WORST-CASE O(log n)) is the gated hot op. It
+  inherits the FROZEN family R^2 floor 0.958 and calibrates its OWN slope band by the shared ADR-0004
+  method: median 39.25 ns/level, band `[23.55, 54.95]` (median * `[0.6, 1.4]`), gated over EXACT powers
+  2^11..2^17. A persistent path-copying query chases scattered bump-allocated slots across the node
+  arena, so its per-level slope sits with the pointer-chasing members and its post-torture run has
+  scheduler / thermal residue -- so the lane opts into the MEDIAN of 7 independent sweep-fits as
+  measurement-quality insurance (the frozen 0.958 floor and slope band are UNTOUCHED). The O(n)
+  linear-scan foil leaves the line. WORST-CASE member: no max-single-op line.
+
+### Changed
+
+- Version bumped to 0.15.0 across the trinity (`package.json`, `LogN.js` `VERSION`, `llms.txt`).
+- The benchmark grid grows to 15 subjects x 8 dimensions = 120 cells; D1 emits 20 gated witness
+  op-rows. `LogN.js`'s prior fourteen classes are byte-identical (VERSION line + one appended class).
+- `package.json` keywords add `persistent`, `persistent-segment-tree`, `versioned`, `path-copying`,
+  `fully-persistent`, `immutable`.
+
+### Fixed
+
+- Nothing.
+
+### Removed
+
+- Nothing.
+
 ## [0.14.0] - 2026-09-22
 
 ### Added

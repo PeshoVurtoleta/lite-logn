@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The fourteen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray'];
+/** The fifteen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree'];
 
-/** The nineteen gated D1 witness op-rows (member.op), in build order. */
+/** The twenty gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -42,6 +42,7 @@ export const OP_ROWS = [
     'Fenwick2D.update', 'Fenwick2D.rectSum',
     'SegmentTree2D.update', 'SegmentTree2D.query',
     'SortedArray.get',
+    'PersistentSegTree.query',
 ];
 
 /** The eight measurement dimensions. */
@@ -75,6 +76,7 @@ export const BASELINE = {
     Fenwick2D: '2d-prefix-rebuild/rect-scan',
     SegmentTree2D: '2d-grid-rebuild/rect-scan',
     SortedArray: 'linear-scan',
+    PersistentSegTree: 'whole-tree-rebuild/scan-fold',
 };
 
 /**
@@ -125,6 +127,10 @@ export const COUNTER_FOIL = {
     // Scapegoat/SplayTree, but the counter-foil is the one-time family illustration carried by SkipList;
     // SortedArray reads NA to avoid a redundant Map comparison.
     SortedArray: NA,
+    // PersistentSegTree is a FULLY PERSISTENT range-fold structure, not an ordered map; a Map cannot
+    // answer a range min/max/sum/gcd at all (let alone across versions), so there is no "faster but
+    // order-blind" O(1) rival -- NA (the string, never 0).
+    PersistentSegTree: NA,
 };
 
 /**
@@ -241,6 +247,13 @@ export const RATIONALE = {
             'it buys the fastest reads + iteration (contiguous storage) at the disclosed cost of O(n) ' +
             'writes. No Map order-tax counterpoint (the one-time family illustration is carried by SkipList).',
     },
+    PersistentSegTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'rebuilding the whole tree (or a naive scan-fold) on every write is the O(n)-per-update ' +
+            'default before path-copying -- the honest rival that motivates a fully persistent tree ' +
+            'whose update preserves every prior version in O(log n). A Map cannot answer a range fold ' +
+            'across versions at all, so there is no order-blind O(1) counter-foil.',
+    },
 };
 
 /**
@@ -291,7 +304,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (12 x 8 = 96 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (15 x 8 = 120 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -410,6 +423,13 @@ export const OP_CLASS = Object.freeze({
     // llms / README / decisions (the "worst-case O(log n) reads, O(n) writes disclosed" pattern),
     // never gated and never smuggled in here as a log op.
     'SortedArray.get': OLOGN_WORST,        // lower-bound binary search over the sorted key column (the gated row)
+    // PersistentSegTree: query is a DETERMINISTIC read-only range descent over a persistent DAG ->
+    // WORST-CASE O(log n) (the gated row). update path-copies the O(log n) root-to-leaf path, sharing
+    // off-path subtrees -> also WORST-CASE O(log n); it IS listed (its O(log n)-node-copy bound is the
+    // load-bearing persistence claim, unlike the O(1) getters). build is O(n) (a one-time snapshot
+    // seed), not an O(log n) class, so it is deliberately NOT in this table.
+    'PersistentSegTree.query': OLOGN_WORST, // read-only range descent over the version's DAG (the gated row)
+    'PersistentSegTree.update': OLOGN_WORST, // path-copy the O(log n) root-to-leaf path, share off-path subtrees
 });
 
 // ===========================================================================
@@ -428,7 +448,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are

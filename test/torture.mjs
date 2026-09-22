@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -226,6 +226,17 @@ async function main() {
             sa.successor(3);
             sa.delete(5);
             tracker.track(sa, noopRelease, 13 * CYCLES + i, { audit: true });
+            // A fresh PersistentSegTree per cycle, exercised (a chain of path-copying updates that
+            // branch off older versions, plus range/point reads) then dropped. Same held-value
+            // contract: a PersistentSegTree owns only its three node columns + a _roots typed array
+            // (no external resource), so the no-op cleanup never defeats finalization.
+            const pst = new PersistentSegTree(64, 40, (i & 1) ? 'min' : 'sum');
+            let pv = 0;
+            for (let k = 0; k < 40; k++) pv = pst.update((k & 3) ? pv : 0, (k * 2654435761) & 63, (k * 40503) & 0xffff);
+            pst.query(pv, 0, 63);
+            pst.query(0, 10, 40);   // an OLD version stays queryable
+            pst.at(pv, 7);
+            tracker.track(pst, noopRelease, 14 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -880,6 +891,44 @@ async function main() {
         sak = (sak + 1) | 0;
     };
 
+    // PersistentSegTree: two out-of-loop trees. `pstQ` is prefilled to a stable set of versions once
+    // (each update path-copies preallocated slots), then the read lanes query/point-read RANDOM
+    // existing versions -- pure read-only descents, 0 B/op. `pstU` drives the update (path-copy)
+    // churn: each update bump-allocates <= H+1 PREALLOCATED slots, so retained growth is 0; when the
+    // version arena nears full the tree is `clear()`ed (rewinds the bump cursor + re-seeds v0 in the
+    // SAME backing store, 0 B/op) so the lane runs forever without reallocating.
+    const PST_VC = 512;                 // stable version count for the read tree
+    const pstQ = new PersistentSegTree(CAP, PST_VC, 'sum');
+    let pstqv = 0;
+    for (let v = 0; v < PST_VC; v++) pstqv = pstQ.update(pstqv, (v * 2654435761) & MASK, (v * 40503) & 0xffff);
+    const PSTQ_VERSIONS = pstQ.versions; // = PST_VC + 1 (v0 .. vPST_VC)
+
+    let psk = 0, psacc = 0;
+    // query: fold a fixed-width window over a RANDOM existing version (version does not change the
+    // O(log n) descent cost), folded into an accumulator. The gated Witness op.
+    const stepPstQuery = () => {
+        const ver = psk % PSTQ_VERSIONS;
+        const lo = psk & (MASK >> 1);
+        psacc = (psacc + (pstQ.query(ver, lo, lo + 100) | 0)) | 0;
+        psk = (psk + 1) | 0;
+    };
+    // at: a single-leaf O(log n) read on a random version, folded in.
+    const stepPstAt = () => {
+        const ver = psk % PSTQ_VERSIONS;
+        psacc = (psacc + (pstQ.at(ver, psk & MASK) | 0)) | 0;
+        psk = (psk + 1) | 0;
+    };
+    // update (path-copy): branch off the current head (or v0 every 4th) with a bump-allocated
+    // O(log n) path. The version arena is fixed, so `clear()` recycles it in place (0 B/op) before
+    // it fills -- proving the persistent update allocates only PREALLOCATED slots.
+    const pstU = new PersistentSegTree(CAP, PST_VC, 'sum');
+    let pstuv = 0, pstuk = 0;
+    const stepPstUpdate = () => {
+        if (pstU.versions > PST_VC - 1) { pstU.clear(); pstuv = 0; }
+        pstuv = pstU.update((pstuk & 3) ? pstuv : 0, pstuk & MASK, pstuk & 0xffff);
+        pstuk = (pstuk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -906,7 +955,8 @@ async function main() {
         stepFhPopMin, stepFhDecreaseKey, stepFhRemove, stepFhRead, stepFhMeld,
         stepF2Update, stepF2RectSum, stepF2Prefix, stepF2At, stepF2Set,
         stepSt2Update, stepSt2Query, stepSt2At,
-        stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor]) {
+        stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor,
+        stepPstQuery, stepPstAt, stepPstUpdate]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -951,6 +1001,7 @@ async function main() {
     if (st2feAcc === 0x7fffffff) throw new Error('unreachable'); // keep st2feAcc live
     if (saacc === 0x7fffffff) throw new Error('unreachable'); // keep saacc live
     if (safeAcc === 0x7fffffff) throw new Error('unreachable'); // keep safeAcc live
+    if (psacc === 0x7fffffff) throw new Error('unreachable'); // keep psacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1096,6 +1147,15 @@ async function main() {
             sink = (sink + (sv === undefined ? 0 : sv | 0)) | 0;
         }
         if ((i & 63) === 0) { const key = i & HMASK; if (sa.delete(key)) sa.set(key, i & 0xffff); }
+        // PersistentSegTree churn every op: a path-copying update (branch off the head, or v0 every
+        // 4th) and a random-version windowed query, plus a random-version point read every 8th. The
+        // fixed version arena is recycled in place via clear() before it fills (rewinds the bump
+        // cursor + re-seeds v0 in the SAME backing store, 0 B/op) -- so the persistent update runs
+        // inside the GC window allocating only PREALLOCATED slots, no major collection.
+        if (pstU.versions > PST_VC - 1) { pstU.clear(); pstuv = 0; }
+        pstuv = pstU.update((i & 3) ? pstuv : 0, i & MASK, i & 0xffff);
+        { const ver = i % PSTQ_VERSIONS; const lo = i & (MASK >> 1); sink = (sink + (pstQ.query(ver, lo, lo + 100) | 0)) | 0; }
+        if ((i & 7) === 0) { const ver = i % PSTQ_VERSIONS; sink = (sink + (pstQ.at(ver, i & MASK) | 0)) | 0; }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1123,6 +1183,7 @@ async function main() {
     const abF2 = new Fenwick2D(32, 32); // 1024 cells; one flat Float64Array, reused across the soak
     const abSt2 = new SegmentTree2D(32, 32, 'sum'); // 4096 cells; one flat Float64Array, reused
     const abSa = new SortedArray(1024); // two Float64Arrays, reused across the soak (copyWithin in place)
+    const abPst = new PersistentSegTree(1024, 256, 'sum'); // node columns + _roots, reused (bump + clear in place)
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1202,6 +1263,16 @@ async function main() {
         for (let i = 0; i < 512; i++) abSa.delete((i * 2654435761) & 1023);
         for (let i = 0; i < 512; i++) abSa.set((i * 2654435761) & 1023, i);
         abSa.clear();
+        // PersistentSegTree: three fixed node columns + a fixed _roots array, no free-list. A full
+        // version arena of path-copying updates (each bump-allocates preallocated slots), then a
+        // clear() that rewinds the bump cursor + re-seeds v0 IN PLACE -- so arrayBuffers must not grow
+        // across soak cycles (a botched grow-on-demand would reallocate a column and grow it here).
+        let abpv = 0;
+        for (let v = 0; v < 256; v++) abpv = abPst.update((v & 3) ? abpv : 0, (v * 2654435761) & 1023, v & 0xffff);
+        if (abPst.versions !== 257) conservationOk = false;   // v0 .. v256, dense
+        if (abPst.query(abpv, 0, 1023) < 0) conservationOk = false; // reachable head stays queryable
+        abPst.clear();
+        if (abPst.versions !== 1 || abPst._next !== 1 + (2 * 1024 - 1)) conservationOk = false; // rewound
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
         // half the slots, then a refill (splaying), then clear -- the invariant must hold
@@ -1328,7 +1399,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

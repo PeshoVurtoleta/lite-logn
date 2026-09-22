@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.14.0';
+export const VERSION = '0.15.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -6028,5 +6028,407 @@ export class SortedArray {
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] SortedArray full (capacity ' + this._cap + ')');
+    }
+}
+
+// PersistentSegTree (v0.15.0 session) -- a FULLY PERSISTENT (branching) segment tree via path-copying (BELOW).
+
+/**
+ * Max PersistentSegTree element count: `0x3FFFFFFF` (2^30 - 1), matching SEGTREE_MAX, so
+ * `2 * length` stays a positive int32 (the v0 tree holds `2n - 1` nodes). The real ceiling on
+ * a large instance is the NODE ARENA, guarded separately by PST_MAX_NODES; this is the clean
+ * per-argument door for `length` itself.
+ */
+const PST_MAX_LENGTH = 0x3FFFFFFF; // 2^30 - 1
+
+/**
+ * Max PersistentSegTree node-arena size: `0x7FFFFFFF` (2^31 - 1). Every node slot is a positive
+ * int32 index into the parallel `_val` / `_left` / `_right` columns and is stored in the
+ * `Uint32Array` child columns, so the arena's total node count must fit a positive int32. The
+ * arena size is a PRODUCT (`versionCapacity * (H + 1)` plus the v0 base), so the guard uses a
+ * FLOAT multiply (never `| 0`, which would wrap a large product to a small / negative int and
+ * pass the door -> under-allocation -> OOB): the float product is exact to 2^53, so a genuine
+ * overflow of this ceiling fails CLOSED (the S2D_MAX_CELLS / F2D_MAX_CELLS lesson).
+ */
+const PST_MAX_NODES = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A FULLY PERSISTENT (BRANCHING) SEGMENT TREE via PATH-COPYING: an associative range-fold over a
+ * fixed-length array where EVERY version is preserved and queryable forever, and any version can be
+ * branched off. `update(fromVersion, i, value)` does NOT mutate `fromVersion`; it returns a NEW
+ * version whose root shares every off-path subtree with the parent and owns a freshly-copied
+ * O(log n) root-to-leaf path. The complement to the flat SegmentTree (member 3): that one is a
+ * single mutable timeline over a `Float64Array(2n)`; this one is a persistent DAG of immutable
+ * nodes -- the "time-travel / what-if" segment tree.
+ *
+ * The load-bearing idiom (decisions/0017): persistent nodes are IMMUTABLE, SHARED across versions,
+ * and NEVER individually freed, so the allocator is a monotonic BUMP/APPEND allocator -- NOT the
+ * free-list NodePool the pointer members (SkipList / Treap / Scapegoat / SplayTree) use. A single
+ * `_next` cursor hands out the next slot in the preallocated columns; `clear()` is the only reset
+ * (rewind `_next`, re-seed v0). There is no `free()`: freeing a shared node would corrupt every
+ * version that points at it.
+ *
+ * Layout (allocated once, sized to a worst-case node budget):
+ *   - `_val`   Float64Array -- each node's folded value over its range.
+ *   - `_left`  Uint32Array  -- left-child slot (NIL = 0 for a leaf).
+ *   - `_right` Uint32Array  -- right-child slot (NIL = 0 for a leaf).
+ *   - `_roots` Uint32Array(versionCapacity + 1) -- `_roots[v]` is version v's root slot.
+ *   - `_next`  the bump cursor; slot 0 is the NIL sentinel (never allocatable; null is not zero).
+ * Node budget = 1 (NIL) + (2n - 1) v0 nodes + versionCapacity * (H + 1), H = ceil(log2 n) (an
+ * update copies at most H + 1 nodes; for a power-of-two n every leaf sits at depth H so each update
+ * copies EXACTLY H + 1). The budget is guarded by a FLOAT product against PST_MAX_NODES.
+ *
+ * Versions are DENSE integers in creation order: version 0 is the initial tree; each successful
+ * `update` returns the next integer (1, 2, ...). Fixed capacity: both the NODE arena AND the
+ * VERSION arena fail CLOSED -- the `versionCapacity + 1`-th version throws `[lite-logn]`, never a
+ * silent drop. An unknown / out-of-range version throws.
+ *
+ * The fold menu (min / max / sum / gcd) is chosen ONCE at construction and cached as a small-int
+ * `_k` combined by an INLINE switch on every hot body (no function ref, no closure, no megamorphic
+ * call site) -- EXACT parity with SegmentTree. Identity: sum -> 0, min -> +Infinity, max ->
+ * -Infinity, gcd -> 0; an unwritten cell reads the fold identity (v0 seeds every leaf to it). The
+ * value door is typeof-guarded FIRST (Symbol / BigInt / NaN / +-Infinity fail closed), and the gcd
+ * kind additionally rejects negative / non-integer values -- byte-for-byte the SegmentTree contract.
+ *
+ * Hot ops allocate ZERO bytes after the arena is built: `query` / `at` are read-only descents;
+ * `update` bump-allocates ONLY preallocated slots (no `new`, no typed-array growth). `query(version,
+ * lo, hi)` folds `[lo, hi]` INCLUSIVE in worst-case O(log n) and is the gated O(log n) Witness op.
+ */
+export class PersistentSegTree {
+    /**
+     * @param {number} length           exact element count; integer in [1, 2^30-1].
+     * @param {number} versionCapacity  max updates (extra versions beyond v0); integer >= 1.
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold.
+     * @param {Float64Array} [_seed]    PRIVATE: validated v0 leaf values (from PersistentSegTree.build).
+     */
+    constructor(length, versionCapacity, kind, _seed) {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof length !== 'number' || !Number.isInteger(length) ||
+            length < 1 || length > PST_MAX_LENGTH) {
+            throw new RangeError(
+                '[lite-logn] PersistentSegTree length must be an integer in [1, 2^30-1], got ' +
+                String(length));
+        }
+        if (typeof versionCapacity !== 'number' || !Number.isInteger(versionCapacity) ||
+            versionCapacity < 1 || versionCapacity > PST_MAX_NODES) {
+            throw new RangeError(
+                '[lite-logn] PersistentSegTree versionCapacity must be an integer >= 1, got ' +
+                String(versionCapacity));
+        }
+        const k = kind === 'min' ? 0 : kind === 'max' ? 1 : kind === 'sum' ? 2 :
+            kind === 'gcd' ? 3 : -1;
+        if (k === -1) {
+            throw new RangeError(
+                '[lite-logn] PersistentSegTree kind must be "min", "max", "sum" or "gcd", got ' +
+                String(kind));
+        }
+        // H = ceil(log2 n) via a float doubling (safe past 2^30 where 1 << h would wrap).
+        let h = 0, p = 1;
+        while (p < length) { p *= 2; h++; }
+        // FLOAT product (never `| 0`): a `| 0` would wrap a large budget to a small / negative int
+        // and pass the door (fail OPEN -> under-allocation -> OOB). The float arithmetic is exact to
+        // 2^53, so a genuine overflow of the 2^31-1 node ceiling fails CLOSED.
+        const budget = 1 + (2 * length - 1) + versionCapacity * (h + 1);
+        if (budget > PST_MAX_NODES) {
+            throw new RangeError(
+                '[lite-logn] PersistentSegTree node arena too large: 1 + (2n-1) + versionCapacity*(H+1) = ' +
+                budget + ' exceeds ' + PST_MAX_NODES);
+        }
+        this._n = length;                          // element count (fixed)
+        this._k = k;                               // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
+        this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
+        this._vcap = versionCapacity;              // max extra versions beyond v0 (fixed)
+        this._budget = budget;                     // node-arena size incl. NIL slot 0 (fixed)
+        this._val = new Float64Array(budget);      // node folded value; _val[0] = NIL, unused
+        this._left = new Uint32Array(budget);      // left-child slot (NIL = 0 -> leaf)
+        this._right = new Uint32Array(budget);     // right-child slot (NIL = 0 -> leaf)
+        this._roots = new Uint32Array(versionCapacity + 1); // _roots[v] = version v's root slot
+        this._next = 1;                            // bump cursor; slot 0 is the NIL sentinel
+        this._vcount = 0;                          // live version count (set by the v0 seed below)
+        // Seed version 0: identity leaves (fresh) or the validated _seed values (from build).
+        this._roots[0] = this._build0(0, length - 1, _seed);
+        this._vcount = 1;
+    }
+
+    /** Element count this tree was sized for. O(1). */
+    get length() { return this._n; }
+
+    /** The number of versions that currently exist (dense handles 0 .. versions-1). O(1). */
+    get versions() { return this._vcount; }
+
+    /** The max number of updates (extra versions beyond v0) this tree was sized for. O(1). */
+    get versionCapacity() { return this._vcap; }
+
+    /** The frozen associative fold, 'min' | 'max' | 'sum' | 'gcd'. O(1). */
+    get kind() {
+        const k = this._k;
+        return k === 0 ? 'min' : k === 1 ? 'max' : k === 2 ? 'sum' : 'gcd';
+    }
+
+    /**
+     * Bump-allocate the next node slot. NO free-list: persistent nodes are immutable + shared, so a
+     * monotonic cursor is the whole allocator (decisions/0017). The overflow throw is DEAD-CODE by
+     * construction -- the budget is sized to the exact worst case and the version guard fires first --
+     * but kept as a loud fail-closed defense (the SparseTable r<l precedent).
+     * @private
+     * @returns {number} a fresh slot index in [1, budget)
+     */
+    _alloc() {
+        const p = this._next;
+        if (p >= this._budget) return this._fullNodes();
+        this._next = p + 1;
+        return p;
+    }
+
+    /**
+     * Recursively build a subtree over `[lo, hi]`, returning its fresh slot. Leaves take the identity
+     * (`seed === undefined`) or `seed[lo]` (validated by build); internals fold their two children via
+     * the inline `_k` switch. O(n) over the whole range -- the v0 seed and `clear` re-seed. COLD.
+     * @private
+     */
+    _build0(lo, hi, seed) {
+        const nn = this._alloc();
+        if (lo === hi) {
+            this._val[nn] = seed === undefined ? this._idv : seed[lo];
+            return nn;
+        }
+        const mid = (lo + hi) >> 1;
+        const l = this._build0(lo, mid, seed);
+        const r = this._build0(mid + 1, hi, seed);
+        this._left[nn] = l;
+        this._right[nn] = r;
+        const k = this._k, a = this._val[l], b = this._val[r];
+        this._val[nn] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
+            k === 2 ? a + b : segGcd(a, b);
+        return nn;
+    }
+
+    /**
+     * The folded value over `[lo, hi]` INCLUSIVE in version `version`, worst-case O(log n): a
+     * read-only descent that stops at any node whose range lies fully inside `[lo, hi]` (returning its
+     * cached fold) and folds the two boundary sub-results via the inline `_k` switch. The GATED
+     * O(log n) Witness op. Allocates ZERO bytes. Fails closed: an unknown / out-of-range version, an
+     * out-of-range `lo` or `hi`, or `lo > hi` each throw `[lite-logn]`. A one-element range `lo == hi`
+     * returns that leaf's value; an unwritten cell reads the fold identity.
+     * @param {number} version  integer in [0, versions)
+     * @param {number} lo       integer in [0, length)
+     * @param {number} hi       integer in [lo, length)
+     * @returns {number} the fold over `[lo, hi]` in the given version
+     */
+    query(version, lo, hi) {
+        if (typeof version !== 'number' || !Number.isInteger(version) ||
+            version < 0 || version >= this._vcount) {
+            return this._badVersion(version);
+        }
+        const n = this._n;
+        if (typeof lo !== 'number' || !Number.isInteger(lo) || lo < 0 || lo >= n) {
+            return this._badRange(lo, hi);
+        }
+        if (typeof hi !== 'number' || !Number.isInteger(hi) || hi < 0 || hi >= n) {
+            return this._badRange(lo, hi);
+        }
+        if (lo > hi) return this._badRange(lo, hi);
+        return this._query(this._roots[version], 0, n - 1, lo, hi);
+    }
+
+    /**
+     * Read-only range descent (see query). Fully-covered node -> its cached fold; range entirely in
+     * one child -> tail-descend; range split -> fold both children via the inline `_k` switch. The two
+     * off-path children are shared with the parent version, so no copy, no allocation. O(log n).
+     * @private
+     */
+    _query(node, nodeLo, nodeHi, lo, hi) {
+        if (lo <= nodeLo && nodeHi <= hi) return this._val[node];
+        const mid = (nodeLo + nodeHi) >> 1;
+        if (hi <= mid) return this._query(this._left[node], nodeLo, mid, lo, hi);
+        if (lo > mid) return this._query(this._right[node], mid + 1, nodeHi, lo, hi);
+        const a = this._query(this._left[node], nodeLo, mid, lo, hi);
+        const b = this._query(this._right[node], mid + 1, nodeHi, lo, hi);
+        const k = this._k;
+        return k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
+            k === 2 ? a + b : segGcd(a, b);
+    }
+
+    /**
+     * The single element at 0-based leaf `i` in version `version`. O(log n) read-only descent (no
+     * range fold). Fails closed: an unknown version or an out-of-range index each throw `[lite-logn]`.
+     * @param {number} version  integer in [0, versions)
+     * @param {number} i        integer in [0, length)
+     * @returns {number}
+     */
+    at(version, i) {
+        if (typeof version !== 'number' || !Number.isInteger(version) ||
+            version < 0 || version >= this._vcount) {
+            return this._badVersion(version);
+        }
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        let node = this._roots[version], lo = 0, hi = this._n - 1;
+        while (lo !== hi) {
+            const mid = (lo + hi) >> 1;
+            if (i <= mid) { node = this._left[node]; hi = mid; }
+            else { node = this._right[node]; lo = mid + 1; }
+        }
+        return this._val[node];
+    }
+
+    /**
+     * Set element `i` to `value` (ABSOLUTE) in a NEW version branched off `fromVersion`, WITHOUT
+     * touching `fromVersion` (or any other version). Returns the new dense version handle. O(log n):
+     * copies exactly the root-to-leaf path (H + 1 fresh slots via the bump allocator), sharing every
+     * off-path subtree with the parent. Allocates ONLY preallocated slots (0 B/op). Fails closed as a
+     * NO-OP (nothing allocated, no version created): an unknown `fromVersion`, a non-finite value
+     * (typeof-guarded first), a gcd-kind value that is negative / non-integer, an out-of-range index,
+     * or a FULL version arena each throw `[lite-logn]`.
+     * @param {number} fromVersion  the version to branch off; integer in [0, versions)
+     * @param {number} i            integer in [0, length)
+     * @param {number} value        a finite number (nonnegative integer for the gcd kind)
+     * @returns {number} the new version handle
+     */
+    update(fromVersion, i, value) {
+        if (typeof fromVersion !== 'number' || !Number.isInteger(fromVersion) ||
+            fromVersion < 0 || fromVersion >= this._vcount) {
+            return this._badVersion(fromVersion);
+        }
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        if (this._vcount > this._vcap) return this._fullVersions();
+        const newRoot = this._copy(this._roots[fromVersion], 0, this._n - 1, i, value);
+        const v = this._vcount;
+        this._roots[v] = newRoot;
+        this._vcount = v + 1;
+        return v;
+    }
+
+    /**
+     * Copy the root-to-leaf path to leaf `i`, sharing the off-path child. Allocates the new node
+     * FIRST, then descends into (and re-links) the single child on the path; the sibling pointer is
+     * copied verbatim from the parent version (shared, immutable). Re-folds the new internal node from
+     * its (one shared, one new) children via the inline `_k` switch. Returns the new node's slot.
+     * O(log n) nodes, one alloc per level. @private
+     */
+    _copy(node, nodeLo, nodeHi, i, value) {
+        const nn = this._alloc();
+        if (nodeLo === nodeHi) {
+            this._val[nn] = value;                 // leaf: children stay NIL (0)
+            return nn;
+        }
+        const mid = (nodeLo + nodeHi) >> 1;
+        let l = this._left[node], r = this._right[node];
+        if (i <= mid) l = this._copy(l, nodeLo, mid, i, value);
+        else r = this._copy(r, mid + 1, nodeHi, i, value);
+        this._left[nn] = l;
+        this._right[nn] = r;
+        const k = this._k, a = this._val[l], b = this._val[r];
+        this._val[nn] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
+            k === 2 ? a + b : segGcd(a, b);
+        return nn;
+    }
+
+    /**
+     * Discard every version and value, rewind the arena, and re-seed a fresh identity version 0 --
+     * keeping the fixed capacity. O(n) COLD (rebuilds the v0 tree). The bump cursor rewinds to 1 (the
+     * NIL sentinel stays reserved), the version count resets to 1, and any handle from before `clear`
+     * is invalid (versions >= 1 no longer exist and fail the version door).
+     * @returns {this}
+     */
+    clear() {
+        this._next = 1;
+        this._vcount = 0;
+        this._roots[0] = this._build0(0, this._n - 1, undefined);
+        this._vcount = 1;
+        return this;
+    }
+
+    /**
+     * O(n) seed of version 0 from `values` (a snapshot, NOT n individual updates), returning a fresh
+     * fully-persistent tree. COLD path; fails closed BEFORE the tree is usable on: a non-array-like
+     * `values`, any non-finite entry, or (gcd kind) any negative / non-integer entry. `versionCapacity`
+     * and `kind` are validated by the delegated ctor; `length` is `values.length`.
+     * @param {ArrayLike<number>} values      finite numbers; length in [1, 2^30-1]
+     * @param {number} versionCapacity        max updates (extra versions beyond v0); integer >= 1
+     * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold
+     * @returns {PersistentSegTree}
+     */
+    static build(values, versionCapacity, kind) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError('[lite-logn] PersistentSegTree.build needs an array-like of finite numbers');
+        }
+        const length = values.length;
+        if (typeof length !== 'number' || !Number.isInteger(length) ||
+            length < 1 || length > PST_MAX_LENGTH) {
+            throw new RangeError(
+                '[lite-logn] PersistentSegTree.build count must be an integer in [1, 2^30-1], got ' +
+                String(length));
+        }
+        const gcdKind = kind === 'gcd';
+        const seed = new Float64Array(length);     // COLD scratch: the validated v0 leaf values
+        for (let i = 0; i < length; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] PersistentSegTree.build value must be a finite number, got ' + String(v));
+            }
+            if (gcdKind && (!Number.isInteger(v) || v < 0)) {
+                throw new RangeError(
+                    '[lite-logn] PersistentSegTree.build gcd value must be a nonnegative integer, got ' +
+                    String(v));
+            }
+            seed[i] = v;
+        }
+        // The ctor validates versionCapacity + kind and seeds v0 from the pre-validated column.
+        return new PersistentSegTree(length, versionCapacity, kind, seed);
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badVersion(version) {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree version must be an integer in [0, ' + this._vcount +
+            '), got ' + String(version));
+    }
+
+    /** @private */
+    _badIndex(i) {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree index must be an integer in [0, ' + this._n + '), got ' +
+            String(i));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree query needs integers 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] PersistentSegTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badGcdValue(value) {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree gcd value must be a nonnegative integer, got ' +
+            String(value));
+    }
+
+    /** @private */
+    _fullVersions() {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree version arena full (versionCapacity ' + this._vcap + ')');
+    }
+
+    /** @private */
+    _fullNodes() {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree node arena full (budget ' + this._budget + ')');
     }
 }

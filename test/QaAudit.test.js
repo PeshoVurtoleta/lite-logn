@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.14.0 at the SortedArray release', () => {
-    assert.equal(VERSION, '0.14.0');
+test('VERSION is exactly 0.15.0 at the PersistentSegTree release', () => {
+    assert.equal(VERSION, '0.15.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (14 members) --------
+// --- frozen export surface: VERSION + the shipped members (15 members) --------
 
-test('LogN.js exports exactly VERSION + the fourteen members at v0.14.0 (adds SortedArray)', () => {
+test('LogN.js exports exactly VERSION + the fifteen members at v0.15.0 (adds PersistentSegTree)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the fourteen members incl SortedArray)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the fifteen members incl PersistentSegTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -58,6 +58,7 @@ test('LogN.js exports exactly VERSION + the fourteen members at v0.14.0 (adds So
     assert.equal(typeof LogNModule.Fenwick2D, 'function');
     assert.equal(typeof LogNModule.SegmentTree2D, 'function');
     assert.equal(typeof LogNModule.SortedArray, 'function');
+    assert.equal(typeof LogNModule.PersistentSegTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -863,4 +864,57 @@ test('SortedArray fails closed with a [lite-logn]-tagged throw on every coercion
     assert.throws(() => SortedArray.build([5, 5], [1, 2]), /\[lite-logn\]/);    // duplicate key
     // SortedArray is an ordered MAP: it deliberately has NO changeKey (not an addressable heap).
     assert.equal(typeof sa.changeKey, 'undefined', 'SortedArray has no changeKey (ordered map, not a heap)');
+});
+
+// --- PersistentSegTree (v0.15.0): coercion + [lite-logn] fail-closed tag -------
+
+test('PersistentSegTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { PersistentSegTree } = LogNModule;
+    // constructor: bad length / versionCapacity (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [0, -1, 1.5, NaN, Infinity, '8', null, undefined, {}, Symbol('x'), 3n]) {
+        assert.throws(() => new PersistentSegTree(bad, 8, 'sum'), /\[lite-logn\]/, 'ctor length ' + String(bad));
+        assert.throws(() => new PersistentSegTree(8, bad, 'sum'), /\[lite-logn\]/, 'ctor versionCapacity ' + String(bad));
+    }
+    assert.throws(() => new PersistentSegTree(0x40000000, 8, 'sum'), /\[lite-logn\]/, 'length above 2^30-1');
+    // bad kind fails closed (no default)
+    for (const bad of ['MIN', 'avg', '', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => new PersistentSegTree(8, 8, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    const t = new PersistentSegTree(16, 8, 'sum');
+    const v1 = t.update(0, 3, 5);
+    // query / at bad version, typeof-first (no Symbol / BigInt coercion), plus out-of-range
+    for (const bad of [1.5, NaN, Infinity, '0', null, undefined, {}, Symbol('v'), 2n, -1, 99]) {
+        assert.throws(() => t.query(bad, 0, 1), /\[lite-logn\]/, 'query version ' + String(bad));
+        assert.throws(() => t.at(bad, 0), /\[lite-logn\]/, 'at version ' + String(bad));
+        assert.throws(() => t.update(bad, 0, 1), /\[lite-logn\]/, 'update fromVersion ' + String(bad));
+    }
+    // query / at / update bad index
+    for (const bad of [1.5, NaN, Infinity, '0', null, undefined, {}, Symbol('i'), 2n, -1, 16]) {
+        assert.throws(() => t.query(0, bad, 1), /\[lite-logn\]/, 'query lo ' + String(bad));
+        assert.throws(() => t.query(0, 0, bad), /\[lite-logn\]/, 'query hi ' + String(bad));
+        assert.throws(() => t.at(0, bad), /\[lite-logn\]/, 'at index ' + String(bad));
+        assert.throws(() => t.update(0, bad, 1), /\[lite-logn\]/, 'update index ' + String(bad));
+    }
+    assert.throws(() => t.query(0, 5, 2), /\[lite-logn\]/, 'query lo > hi');
+    // update bad value, typeof-first
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('n'), 3n]) {
+        assert.throws(() => t.update(0, 0, bad), /\[lite-logn\]/, 'update value ' + String(bad));
+    }
+    // gcd kind rejects negative / non-integer value
+    const g = new PersistentSegTree(8, 4, 'gcd');
+    assert.throws(() => g.update(0, 0, -1), /\[lite-logn\]/, 'gcd negative value');
+    assert.throws(() => g.update(0, 0, 1.5), /\[lite-logn\]/, 'gcd non-integer value');
+    // version arena fails closed (versionCapacity + 1-th update)
+    const small = new PersistentSegTree(8, 2, 'sum');
+    small.update(0, 0, 1); small.update(0, 1, 2);
+    assert.throws(() => small.update(0, 2, 3), /\[lite-logn\]/, 'update past versionCapacity');
+    // build fails closed on non-array-like / non-finite / out-of-domain gcd
+    assert.throws(() => PersistentSegTree.build(null, 4, 'sum'), /\[lite-logn\]/);
+    assert.throws(() => PersistentSegTree.build([], 4, 'sum'), /\[lite-logn\]/);            // empty
+    assert.throws(() => PersistentSegTree.build([1, NaN], 4, 'sum'), /\[lite-logn\]/);      // non-finite
+    assert.throws(() => PersistentSegTree.build([1, -1], 4, 'gcd'), /\[lite-logn\]/);       // gcd negative
+    // PersistentSegTree is a range-fold DAG: it deliberately has NO get by key / forEach.
+    assert.equal(typeof t.get, 'undefined', 'PersistentSegTree has no get by key (not an ordered map)');
+    assert.equal(typeof t.forEach, 'undefined', 'PersistentSegTree has no forEach (a persistent DAG has no single live timeline)');
+    void v1;
 });

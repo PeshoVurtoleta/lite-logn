@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -364,3 +364,26 @@ sa.set(1, 'x');
 
 // @ts-expect-error -- SortedArray constructor takes a single capacity argument.
 new SortedArray(8, 'min');
+
+// --- PersistentSegTree -----------------------------------------------------
+const pst = new PersistentSegTree(1024, 64, 'sum');
+const pstLen: number = pst.length;
+const pstVers: number = pst.versions;
+const pstVcap: number = pst.versionCapacity;
+const pstKind: 'min' | 'max' | 'sum' | 'gcd' = pst.kind;
+const pstQuery: number = pst.query(0, 0, 10);
+const pstAt: number = pst.at(0, 3);
+const pstUpdate: number = pst.update(0, 3, 2.5);    // -> new version handle
+const pstClear: PersistentSegTree = pst.clear();    // fluent -> this
+const pstBuilt: PersistentSegTree = PersistentSegTree.build([3, 1, 2], 8, 'min');
+void pstLen; void pstVers; void pstVcap; void pstKind; void pstQuery; void pstAt;
+void pstUpdate; void pstClear; void pstBuilt;
+
+// @ts-expect-error -- update value must be a number.
+pst.update(0, 1, 'x');
+
+// @ts-expect-error -- kind is required (no default).
+new PersistentSegTree(8, 4);
+
+// @ts-expect-error -- PersistentSegTree is not an ordered map: no get by key.
+pst.get(3);

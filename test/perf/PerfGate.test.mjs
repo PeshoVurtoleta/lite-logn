@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1334,6 +1334,96 @@ const saOrderMix = {
     statsOf(s) { return { grows: saGrows(s) }; },
 };
 
+/** PersistentSegTree's zero-alloc counter: its four flat backing buffers (node value + the two
+ *  child columns + the per-version root map), all fixed at construction, so the delta across the
+ *  window must be 0 -- the read-only descents share off-path subtrees (no copy) and update BUMP-
+ *  allocates only preallocated slots (no JS-heap object). */
+function pstGrows(s) {
+    const t = s.pst;
+    return t._val.buffer.byteLength + t._left.buffer.byteLength +
+        t._right.buffer.byteLength + t._roots.buffer.byteLength;
+}
+
+const PST_LEN = 1 << 12;        // 4096 leaves (H = 12, so update copies H+1 = 13 slots/call)
+const PSTMASK = PST_LEN - 1;    // power-of-2 mask: index & PSTMASK is always in [0, PST_LEN)
+const PST_QVERS = 512;          // resident version count for the read lanes (power of 2 -> maskable)
+const PST_QVMASK = PST_QVERS - 1;
+
+/** A PersistentSegTree seeded to a chain of PST_QVERS versions (v0 + PST_QVERS-1 updates), each
+ *  branching off the previous -- a warmed, stable persistent DAG for the read lanes. */
+function pstQueryFill() {
+    const t = new PersistentSegTree(PST_LEN, PST_QVERS, 'sum');
+    for (let i = 0; i < PST_QVERS - 1; i++) t.update(t.versions - 1, i & PSTMASK, (i * 2654435761) & 0xffff);
+    return t; // t.versions === PST_QVERS
+}
+
+/**
+ * query churn: each op folds a fixed-width window in a cycling resident version (a read-only
+ * O(log n) descent that stops at fully-covered nodes and shares every off-path subtree), folded
+ * into an int32 accumulator. The GATED O(log n) Witness op; zero allocation.
+ */
+const pstQueryChurn = {
+    name: 'PersistentSegTree query churn (read-only, shared subtrees)',
+    setup() { return { pst: pstQueryFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.pst;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const v = tick & PST_QVMASK;
+            const lo = tick & (PSTMASK >> 1);
+            acc = (acc + (t.query(v, lo, lo + 100) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: pstGrows(s) }; },
+};
+
+/**
+ * at churn: a single-leaf read-only descent in a cycling resident version, folded into an int32
+ * accumulator, proving the read surface never copies or grows the backing store. Zero allocation.
+ */
+const pstAtChurn = {
+    name: 'PersistentSegTree at churn (single-leaf read)',
+    setup() { return { pst: pstQueryFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.pst;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.at(tick & PST_QVMASK, tick & PSTMASK) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: pstGrows(s) }; },
+};
+
+const PST_UVCAP = 1 << 13; // 8192 updates per fill cycle before the arena is clear()-refilled
+
+/**
+ * update churn (path-copy write): each op sets an ABSOLUTE bounded leaf in a NEW version branched
+ * off the latest, copying exactly the root-to-leaf path (H+1 fresh slots via the bump allocator)
+ * and sharing every off-path subtree. update consumes the version arena, so once it fills the
+ * steady-state loop clear()-refills IN PLACE (rewind the bump cursor + re-seed v0, reusing the SAME
+ * backing buffers, no JS-heap object) -- the copyWithin-of-persistent-trees analogue. Both the
+ * path-copy and the periodic clear bump into preallocated typed arrays; zero allocation.
+ */
+const pstUpdateChurn = {
+    name: 'PersistentSegTree update churn (path-copy, clear-refill arena)',
+    setup() { return { pst: new PersistentSegTree(PST_LEN, PST_UVCAP, 'sum'), tick: 0 }; },
+    hot(s, n) {
+        const t = s.pst;
+        let tick = s.tick | 0;
+        for (let i = 0; i < n; i++) {
+            if (t.versions > t.versionCapacity) t.clear(); // arena full -> rewind + re-seed v0 in place
+            t.update(t.versions - 1, tick & PSTMASK, tick & 0xffff);
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0;
+    },
+    statsOf(s) { return { grows: pstGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1376,6 +1466,7 @@ zgcSuite({
         fhPopMinChurn, fhDecreaseKeyChurn, fhRemoveChurn, fhReadMix, fhMeldChurn,
         f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix,
         st2UpdateChurn, st2QueryChurn, st2AtQueryMix,
-        saGetChurn, saSetChurn, saShiftChurn, saOrderMix],
+        saGetChurn, saSetChurn, saShiftChurn, saOrderMix,
+        pstQueryChurn, pstAtChurn, pstUpdateChurn],
     mustFail: [teethMustFailAlloc],
 });
