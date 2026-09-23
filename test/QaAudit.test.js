@@ -33,13 +33,13 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 1.1.0 at the 1.1.0 release', () => {
-    assert.equal(VERSION, '1.1.0');
+test('VERSION is exactly 1.1.1 at the 1.1.1 release', () => {
+    assert.equal(VERSION, '1.1.1');
 });
 
 // --- frozen export surface: VERSION + the shipped members (17 members) --------
 
-test('LogN.js exports exactly VERSION + the seventeen members at v1.1.0', () => {
+test('LogN.js exports exactly VERSION + the seventeen members at v1.1.1', () => {
     const exportedNames = Object.keys(LogNModule).sort();
     assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
         'LogN.js export surface drifted from the frozen surface (VERSION + the seventeen members incl WaveletTree)');

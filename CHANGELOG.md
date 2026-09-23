@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-23
+
+### Fixed
+
+- **`llms.txt` now documents WaveletTree.** The 1.1.0 `llms.txt` was version-stamped 1.1.0 but its
+  "What it is" roster and "Exports" section stopped at MergeSortTree -- the WaveletTree entries were
+  never appended, so the published 1.1.0 tarball's `llms.txt` (a `files[]` member) omitted the
+  seventeenth member. Added WaveletTree to the roster summary, a full "What it is" entry, and the
+  per-class "Exports" block (`access` / `rank` / `select` / `quantile` / `rangeCount` + getters), and
+  corrected the two remaining "a future WaveletTree" references (now shipped in v1.1.0). No code change:
+  `README.md`, `CHANGELOG.md`, and `LogN.d.ts` already documented WaveletTree at 1.1.0, and `LogN.js` is
+  byte-identical to 1.1.0 apart from the `VERSION` constant.
+
 ## [1.1.0] - 2026-09-23
 
 ### Added

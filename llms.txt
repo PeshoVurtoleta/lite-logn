@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.1.0
+Version: 1.1.1
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -31,7 +31,10 @@ its FIRST bump/append allocator: a FULLY PERSISTENT segment tree via path-copyin
 every past version stays queryable and any version can be branched off); v0.16.0 adds
 MergeSortTree (the family's FIRST truly IMMUTABLE member and FIRST offline range-RANK
 structure: a STATIC merge sort tree answering countLE / rangeCount over an index range in
-worst-case O(log^2 n)).
+worst-case O(log^2 n)); v1.1.0 adds WaveletTree (the family's FIRST post-1.0 exotic and its FIRST
+succinct / rank-select member: a STATIC wavelet MATRIX answering access / rank / select / quantile --
+the k-th smallest value in an index range MergeSortTree deferred -- and rangeCount in worst-case
+O(log n), on the DEFAULT log2(n) axis).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -302,13 +305,37 @@ The roster (one member per session, each landing append-only):
   the same decomposition (a private STRICT-less descent), exact for float bounds. It is PLAIN O(log^2 n)
   with NO fractional cascading (rejected: buys O(log n) but wrecks the flat, pointer-free zero-GC
   layout). The kth-smallest-in-range ORDER STATISTIC is DELIBERATELY NOT shipped (a different algorithm;
-  routed to a future WaveletTree) -- this member ships the range-RANK primitives only. O(n log n) BUILD
+  routed to WaveletTree, the v1.1.0 member) -- this member ships the range-RANK primitives only. O(n log n) BUILD
   and O(n log n) SPACE are a DISCLOSED co-headline, never hidden. Fail closed: the source must be an
   array-like of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN / +-Infinity fail closed),
   the length an integer in [1, MST_MAX_LENGTH], and the `(H+1)*n` cell product guarded by a FLOAT
   multiply against MST_MAX_CELLS. Query bounds are integers with `0 <= lo <= hi < length`; the
   value-window needs `vlo <= vhi`. WORST-CASE (no max-single-op line); its witness is the family's THIRD
   on the SQUARED-log axis ((log2 n)^2). Zero allocation on every hot op.
+
+- WaveletTree (v1.1.0) -- the family's FIRST post-1.0 exotic and its FIRST succinct / rank-select
+  member: a STATIC, IMMUTABLE WAVELET MATRIX that finally answers the k-th-smallest-in-a-range ORDER
+  STATISTIC MergeSortTree deferred, and answers `rangeCount` in O(log n) (improving MergeSortTree's
+  O(log^2 n)). It COORDINATE-COMPRESSES arbitrary finite numbers to distinct ranks at build (the
+  MergeSortTree input contract, via a `_remap` table) and stores the sequence as level-wise FLAT
+  bitvectors (`n * ceil(log2 distinct)` bits) plus a per-level zero-count and a succinct O(1)-rank
+  block / superblock index (cumulative popcount over the packed words), so each query is a SINGLE
+  descent of `levels = ceil(log2 distinct)` with O(1) succinct-rank work per level. `access(i)` returns
+  the value at an index; `rank(value, i)` counts occurrences in the prefix `[0, i)`; `select(value, k)`
+  returns the index of the k-th occurrence (or `undefined` -- a consistent read, not a throw -- when
+  absent / out of range); `quantile(lo, hi, k)` returns the ACTUAL k-th smallest VALUE in the INDEX
+  range `[lo, hi]` INCLUSIVE (the headline); `rangeCount(lo, hi, vlo, vhi)` counts values in a
+  value-window over an index range. All queries are worst-case O(log n) = O(log sigma) and 0 B/op
+  (`select` is O(log sigma . log n)). Unlike MergeSortTree it sits on the DEFAULT log2(n) witness axis
+  (a single-log descent, not a per-node binary search): witness op = `quantile` via a lane-scoped
+  median-of-7 fit (the family's TIGHTEST R^2 margin; the frozen 0.958 floor + slope band unchanged),
+  with an O(n log n) linear-kth foil (copy the window, sort, index k) OFF-line. The source is COPIED in
+  at construction (genuine immutability); there are NO mutators and NO forEach / iterator. Fail closed:
+  the source must be an array-like of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN /
+  +-Infinity fail closed), the length an integer in [1, WT_MAX_LENGTH], and the `levels * wordsPerLevel`
+  word product guarded by a FLOAT multiply against WT_MAX_CELLS. WORST-CASE (no max-single-op line);
+  O(n log sigma) BUILD and space (bits + rank index + remap table) a DISCLOSED co-headline. Zero
+  allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -713,7 +740,7 @@ The roster (one member per session, each landing append-only):
   value-window) in WORST-CASE O(log^2 n), zero-allocation. A segment tree of SORTED runs packed by level
   into ONE flat `Float64Array` of `n * (ceil(log2 n) + 1)` cells; the source is COPIED in at
   construction and there are NO mutators. PLAIN O(log^2 n) (no fractional cascading); kth-in-range
-  deferred to a future WaveletTree. O(n log n) build + space a DISCLOSED co-headline.
+  deferred to WaveletTree (v1.1.0). O(n log n) build + space a DISCLOSED co-headline.
   - `new MergeSortTree(values)` -- values an array-like of finite numbers (any order), length an integer
     in [1, MST_MAX_LENGTH] (2^31-1). COPIES a snapshot in (later mutating the caller's array changes
     nothing). O(n log n) build. Throws (typeof-guarded FIRST) on a non-array-like, an out-of-range
@@ -729,6 +756,40 @@ The roster (one member per session, each landing append-only):
   - `length` / `size` getters -> the element count (the source length); `cells` getter -> the flat
     run-table cell count (`(ceil(log2 n) + 1) * n`, the disclosed O(n log n) space). All O(1). There is
     NO clear / mutator / forEach (static + immutable).
+
+- `WaveletTree` -- class. A STATIC, IMMUTABLE WAVELET MATRIX: over a fixed sequence of finite numbers it
+  answers `access` / `rank` / `select` / `quantile` / `rangeCount` in worst-case O(log n), zero-allocation.
+  It COORDINATE-COMPRESSES arbitrary finite numbers to distinct ranks at build (a `_remap` table) and
+  stores level-wise FLAT bitvectors (`n * ceil(log2 distinct)` bits) plus a per-level zero-count and a
+  succinct O(1)-rank block / superblock index. `quantile(lo, hi, k)` is the k-th-smallest-in-a-range ORDER
+  STATISTIC MergeSortTree deferred, and `rangeCount` runs in O(log n) (improving MergeSortTree's
+  O(log^2 n)). The source is COPIED in at construction and there are NO mutators. O(n log sigma) build +
+  space a DISCLOSED co-headline.
+  - `new WaveletTree(values)` -- values an array-like of finite numbers (any order), length an integer in
+    [1, WT_MAX_LENGTH] (2^31-1). COORDINATE-COMPRESSES + COPIES a snapshot in (later mutating the caller's
+    array changes nothing). O(n log sigma) build. Throws (typeof-guarded FIRST) on a non-array-like, an
+    out-of-range length, a `levels * wordsPerLevel` word product over WT_MAX_CELLS (FLOAT-product guard),
+    or any non-finite entry.
+  - `WaveletTree.build(values)` -> WaveletTree. The idiomatic factory; equal to `new WaveletTree(values)`,
+    same fail-closed doors.
+  - `access(i)` -> number. The value stored at index i. Worst-case O(log sigma), 0 B/op. A non-integer /
+    out-of-range i throws.
+  - `rank(value, i)` -> number. Occurrences of `value` in the prefix [0, i). Worst-case O(log sigma),
+    0 B/op. A value not present returns 0; a non-numeric value or a non-integer i outside [0, length]
+    throws.
+  - `select(value, k)` -> number | undefined. Index of the k-th (0-based) occurrence of `value`, or
+    `undefined` when `value` is absent or has fewer than k+1 occurrences (a consistent read, NOT a throw).
+    Worst-case O(log sigma . log n), 0 B/op. A NaN / non-numeric value or a negative / non-integer k throws.
+  - `quantile(lo, hi, k)` -> number. The ACTUAL k-th smallest VALUE (0-based) in the INDEX range [lo, hi]
+    INCLUSIVE -- the order statistic MergeSortTree deferred. Worst-case O(log sigma), 0 B/op. A
+    non-integer / out-of-range lo or hi, lo > hi, or k outside [0, hi - lo] throws.
+  - `rangeCount(lo, hi, vlo, vhi)` -> number. Count of stored values in the VALUE-window [vlo, vhi]
+    INCLUSIVE within the INDEX range [lo, hi] INCLUSIVE -- O(log n), improving MergeSortTree's O(log^2 n).
+    Worst-case O(log sigma), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws.
+  - `length` / `size` getters -> the element count (the source length); `levels` getter ->
+    `ceil(log2 distinct)` (>= 1, the descent depth); `distinct` getter -> the compressed alphabet size
+    (sigma); `bits` getter -> the total bitvector bit count (`n * levels`, the disclosed O(n log sigma)
+    space). All O(1). There is NO clear / mutator / forEach (static + immutable).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.
