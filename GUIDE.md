@@ -197,20 +197,40 @@ machine-specific, reproducible from seed `0x9e3779b1`.
 
 **Per-level cost (D1 slope, ns/level -- the price of one added level per doubling):**
 
+The default log2(n)-axis ops, cheapest per level first:
+
 | Op | slope ns/level | `R^2` | memory (B/live) | pick it when |
 | --- | --- | --- | --- | --- |
+| `SortedArray.get` | 1.0 | 0.98 | 16 (exact) | a read-mostly ordered map: the shallowest per-level cost, but insert is an O(n) shift |
 | `Fenwick.update` / `.prefix` | 2.6 - 2.8 | 0.97 - 0.98 | 8 (exact) | the cheapest per-level cost + the tightest memory; sum-only prefix/range |
 | `SegmentTree.update` | 3.1 | 0.99 | 16 (exact) | any associative fold (min/max/sum/gcd), point update |
+| `Scapegoat.get` | 3.8 | 0.99 | 40 | worst-case (not expected) O(log n) reads + rank / select; rebuilds amortize inserts |
+| `Treap.get` | 4.0 | 0.99 | 36 | an ordered map WITH rank / select / split / merge -- lower per-level cost + leaner store than SkipList |
 | `SegmentTree.query` | 7.0 | 0.998 | 16 (exact) | as above -- a range fold is ~2 nodes/level, so its slope is higher than update's |
-| `BinaryHeap.pop` | 8.4 | 0.996 | 16 | repeated extremum + addressable reprioritize |
 | `SkipList.get` | 8.0 | 0.988 | 88 | an ordered map: successor / predecessor / range |
+| `BinaryHeap.pop` | 8.4 | 0.996 | 16 | repeated extremum + addressable reprioritize |
+| `MinMaxHeap.popMin` | 10.3 | 0.99 | 12 | a double-ended priority queue (both extremes), the leanest heap store |
 | `SkipList.set` | 12.1 | 0.985 | 88 | as above -- insert is a double descent + a random-height splice |
-| `Treap.get` | 4.0 | 0.988 | 16 | an ordered map WITH rank / select / split / merge -- lower per-level cost + leaner store than SkipList |
+| `PairingHeap.popMin` | 21.4 | 0.99 | 36 | an addressable mergeable PQ with O(1) meld + decreaseKey (Dijkstra / Prim) |
+| `SplayTree.get` | 27.3 | 0.98 | 28 | skewed / temporally-local access -- hot keys ride near the root (amortized) |
+| `PersistentSegTree.query` | 38.9 | 0.97 | 32 | immutable version history -- query any past version in O(log n) |
+| `BinomialHeap.popMin` | 44.8 | 0.98 | 32 | a lean mergeable PQ (O(log n) meld), no decrease-key |
+| `FibonacciHeap.popMin` | 45.3 | 0.98 | 45 | the textbook-optimal amortized bounds; slower wall-clock than PairingHeap |
 
-Read it as a ladder: the index-addressed array members (Fenwick, SegmentTree)
-are the cheapest per level AND the tightest in memory; the comparison-ordered
-members (BinaryHeap, SkipList) cost more per level and, for SkipList, carry the
-`ceil(log2 cap)+1` link-column tower (88 B/live) that BUYS the ordered queries.
+On the **O(log^2 n) squared-log axis** the slope is ns per `(log2 n)^2` unit (not
+per level), so these do not sort into the ladder above: `Fenwick2D.update` 3.5 /
+`.rectSum` 4.8 (`R^2` ~ 0.99, 8.1 B/live) for 2D rectangle SUM under point updates;
+`SegmentTree2D.update` 6.4 / `.query` 5.8 (`R^2` ~ 0.997 / 0.9999, 32 B/live) for 2D
+rectangle min / max / gcd; `MergeSortTree.countLE` 6.8 (`R^2` ~ 0.97, 136 B/live) for
+offline range-rank (count-<=-x-in-[l,r]) queries.
+
+Read it as a ladder: the index-addressed array members (Fenwick, SegmentTree,
+SortedArray) are the cheapest per level AND the tightest in memory; the
+comparison-ordered members (Treap, SkipList) cost more per level and, for
+SkipList, carry the `ceil(log2 cap)+1` link-column tower (88 B/live) that BUYS the
+ordered queries; the pointer-chasing mergeable heaps (PairingHeap, BinomialHeap,
+FibonacciHeap) sit at the steep end -- the largest constant factors, the price of
+meld / decrease-key.
 
 **The order tax (SkipList vs a native Map).** If you only need `get` / `set` by
 exact key and NEVER `successor` / `predecessor` / `rangeIter`, a native `Map` is
