@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lite-logn -- the O(log n) demo</title>
+<!-- Repo-only dev artifact (NEVER shipped). Drives the REAL shipped classes of ../LogN.js. -->
+<style>
+:root {
+    --bg: #0d1117; --bg2: #161b22; --fg: #e6edf3; --dim: #8b949e; --line: #30363d;
+    --accent: #58a6ff; --hot: #f0883e; --good: #3fb950; --warn: #d29922; --foil: #f85149;
+    color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 15px; }
+header { padding: 1rem 1.25rem 0.5rem; border-bottom: 1px solid var(--line); }
+h1 { font-size: 1.15rem; margin: 0; letter-spacing: 0.02em; }
+h1 .v { color: var(--accent); }
+.tagline { color: var(--dim); font-size: 0.85rem; margin: 0.25rem 0 0; }
+.tabs { display: flex; gap: 0.35rem; padding: 0.6rem 1.25rem 0; flex-wrap: wrap; }
+.tab { background: var(--bg2); color: var(--dim); border: 1px solid var(--line);
+    border-bottom: none; border-radius: 6px 6px 0 0; padding: 0.45rem 0.85rem; cursor: pointer;
+    font: inherit; font-size: 0.82rem; }
+.tab[aria-selected="true"] { color: var(--fg); background: var(--line); }
+@media (hover: hover) { .tab:hover { color: var(--fg); } }
+main { padding: 0.75rem 1.25rem 2rem; }
+.scene { display: none; }
+.scene[data-active="true"] { display: grid; grid-template-columns: minmax(0, 1fr) 20rem; gap: 1rem; }
+@media (max-width: 60rem) { .scene[data-active="true"] { grid-template-columns: 1fr; } }
+.stage { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 0.5rem; min-height: 22rem; }
+canvas { width: 100%; height: 20rem; display: block; }
+svg { width: 100%; height: 20rem; display: block; }
+.panel { background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 0.75rem; }
+.panel h2 { font-size: 0.8rem; margin: 0 0 0.5rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; }
+table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+th, td { text-align: right; padding: 0.2rem 0.3rem; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; }
+thead th { color: var(--dim); font-weight: 600; }
+.zero { color: var(--good); }
+.foilrow td { color: var(--foil); }
+.axis { color: var(--warn); font-size: 0.68rem; }
+.note { color: var(--dim); font-size: 0.7rem; margin-top: 0.6rem; line-height: 1.4; }
+.badge { display: inline-block; font-size: 0.62rem; padding: 0.05rem 0.35rem; border-radius: 4px;
+    border: 1px solid var(--line); color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+    <h1>lite-logn <span class="v" id="version">--</span> -- the O(log n) demo</h1>
+    <p class="tagline">All 16 shipped members driving live. Every frame kernel is 0 B/op; only the naive foils allocate.</p>
+</header>
+<nav class="tabs" id="tabs" role="tablist">
+    <button class="tab" role="tab" data-tab="s1" aria-selected="true">01 Priority Queues</button>
+    <button class="tab" role="tab" data-tab="s2" aria-selected="false">02 Ordered Maps</button>
+    <button class="tab" role="tab" data-tab="s3" aria-selected="false">03 Range &amp; Prefix</button>
+    <button class="tab" role="tab" data-tab="s4" aria-selected="false">04 Time-Travel</button>
+</nav>
+<main>
+    <section class="scene" data-scene="s1" data-active="true">
+        <div class="stage"><canvas id="c1" width="900" height="360"></canvas>
+            <svg id="v1" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel"><h2>Truth Panel -- worst-case log line</h2>
+            <table id="t1"><thead><tr><th>member</th><th>ns/op</th><th>slope</th><th>R^2</th><th>B/op</th><th>max</th></tr></thead><tbody></tbody></table>
+            <p class="note" id="n1"></p></div>
+    </section>
+    <section class="scene" data-scene="s2" data-active="false">
+        <div class="stage"><canvas id="c2" width="900" height="360"></canvas>
+            <svg id="v2" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel"><h2>Truth Panel -- expected vs worst-case</h2>
+            <table id="t2"><thead><tr><th>member</th><th>ns/op</th><th>slope</th><th>R^2</th><th>B/op</th><th>max</th></tr></thead><tbody></tbody></table>
+            <p class="note" id="n2"></p></div>
+    </section>
+    <section class="scene" data-scene="s3" data-active="false">
+        <div class="stage"><canvas id="c3" width="900" height="360"></canvas>
+            <svg id="v3" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel"><h2>Truth Panel -- 1D log2(n), 2D (log2 n)^2</h2>
+            <table id="t3"><thead><tr><th>member</th><th>ns/op</th><th>slope</th><th>R^2</th><th>B/op</th><th>axis</th></tr></thead><tbody></tbody></table>
+            <p class="note" id="n3"></p></div>
+    </section>
+    <section class="scene" data-scene="s4" data-active="false">
+        <div class="stage"><canvas id="c4" width="900" height="360"></canvas>
+            <svg id="v4" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg></div>
+        <div class="panel"><h2>Truth Panel -- version DAG + offline rank</h2>
+            <table id="t4"><thead><tr><th>member</th><th>ns/op</th><th>slope</th><th>R^2</th><th>B/op</th><th>axis</th></tr></thead><tbody></tbody></table>
+            <p class="note" id="n4"></p></div>
+    </section>
+</main>
+
+<script type="module">
+import * as K from './kernels.mjs';
+import { VERSION } from './kernels.mjs';
+
+// ---- DOM handles cached ONCE at module init ($-prefixed per hot-path law) --------------
+const $version = document.getElementById('version');
+const $tabs = document.getElementById('tabs');
+const $scenes = document.querySelectorAll('.scene');
+const $tabBtns = document.querySelectorAll('.tab');
+const $c1 = document.getElementById('c1'), $c2 = document.getElementById('c2'),
+    $c3 = document.getElementById('c3'), $c4 = document.getElementById('c4');
+const $v1 = document.getElementById('v1'), $v2 = document.getElementById('v2'),
+    $v3 = document.getElementById('v3'), $v4 = document.getElementById('v4');
+const $t1 = document.querySelector('#t1 tbody'), $t2 = document.querySelector('#t2 tbody'),
+    $t3 = document.querySelector('#t3 tbody'), $t4 = document.querySelector('#t4 tbody');
+const $n1 = document.getElementById('n1'), $n2 = document.getElementById('n2'),
+    $n3 = document.getElementById('n3'), $n4 = document.getElementById('n4');
+const g1 = $c1.getContext('2d'), g2 = $c2.getContext('2d'),
+    g3 = $c3.getContext('2d'), g4 = $c4.getContext('2d');
+
+$version.textContent = VERSION;
+
+// ---- constants (precomputed, never re-created in a loop) -------------------------------
+const TAU = Math.PI * 2;
+const SVGNS = 'http://www.w3.org/2000/svg';
+const COL_BG = '#161b22', COL_CELL = '#1f6feb', COL_HOT = '#f0883e', COL_DIM = '#30363d',
+    COL_GOOD = '#3fb950', COL_LINE = '#8b949e', COL_ACCENT = '#58a6ff';
+const RING = 64, RMASK = RING - 1;
+const BATCH = 400; // steps per frame per member (drives a legible flow, stays 0 B/op)
+
+// ---- ns/op ring buffers (pow2, bitmask index) -- one per member ------------------------
+function makeRing() { return { buf: new Float64Array(RING), head: 0 }; }
+function ringPush(r, v) { r.buf[r.head & RMASK] = v; r.head = (r.head + 1) | 0; }
+function ringMean(r) { let s = 0; for (let i = 0; i < RING; i++) s += r.buf[i]; return s / RING; }
+
+// ---- inline least-squares fit (slope + R^2) for the static init sweep ------------------
+function fit(xs, ys, n) {
+    let sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let i = 0; i < n; i++) { sx += xs[i]; sy += ys[i]; sxx += xs[i] * xs[i]; sxy += xs[i] * ys[i]; }
+    const d = n * sxx - sx * sx;
+    const slope = d === 0 ? 0 : (n * sxy - sx * sy) / d;
+    const icpt = (sy - slope * sx) / n;
+    let ssTot = 0, ssRes = 0; const my = sy / n;
+    for (let i = 0; i < n; i++) { const yh = icpt + slope * xs[i]; ssRes += (ys[i] - yh) ** 2; ssTot += (ys[i] - my) ** 2; }
+    const r2 = ssTot === 0 ? 1 : 1 - ssRes / ssTot;
+    return { slope, r2 };
+}
+
+// ---- member registry -- the SINGLE source of scene wiring ------------------------------
+// squared: (log2 n)^2 axis; amortized: has a disclosed max-single-op row; svg: rendered as SVG.
+const MEMBERS = [
+    // scene 1
+    { s: 1, name: 'BinaryHeap', squared: false, amortized: false, svg: false,
+      make: (n) => K.createBinaryHeapWorld(n, n >> 1), step: K.stepBinaryHeapWorld, snap: K.snapshotBinaryHeap },
+    { s: 1, name: 'MinMaxHeap', squared: false, amortized: false, svg: false,
+      make: (n) => K.createMinMaxHeapWorld(n, n >> 1), step: K.stepMinMaxHeapWorld, snap: K.snapshotMinMaxHeap },
+    { s: 1, name: 'BinomialHeap', squared: false, amortized: false, svg: true,
+      make: (n) => K.createBinomialHeapWorld(n, n >> 1), step: K.stepBinomialHeapWorld, snap: K.snapshotBinomialHeap },
+    { s: 1, name: 'PairingHeap', squared: false, amortized: true, svg: true,
+      make: (n) => K.createPairingHeapWorld(n, n >> 1), step: K.stepPairingHeapWorld, snap: K.snapshotPairingHeap },
+    { s: 1, name: 'FibonacciHeap', squared: false, amortized: true, svg: true,
+      make: (n) => K.createFibonacciHeapWorld(n, n >> 1), step: K.stepFibonacciHeapWorld, snap: K.snapshotFibonacciHeap },
+    // scene 2
+    { s: 2, name: 'SkipList', squared: false, amortized: true, svg: true,
+      make: (n) => K.createSkipListWorld(n, n >> 1), step: K.stepSkipListWorld, snap: K.snapshotSkipList },
+    { s: 2, name: 'Treap', squared: false, amortized: true, svg: true,
+      make: (n) => K.createTreapWorld(n, n >> 1), step: K.stepTreapWorld, snap: K.snapshotTreap },
+    { s: 2, name: 'Scapegoat', squared: false, amortized: false, svg: true,
+      make: (n) => K.createScapegoatWorld(n, n >> 1), step: K.stepScapegoatWorld, snap: K.snapshotScapegoat },
+    { s: 2, name: 'SplayTree', squared: false, amortized: true, svg: true,
+      make: (n) => K.createSplayTreeWorld(n, n >> 1), step: K.stepSplayTreeWorld, snap: K.snapshotSplayTree },
+    { s: 2, name: 'SortedArray', squared: false, amortized: false, svg: false,
+      make: (n) => K.createSortedArrayWorld(n, n >> 1), step: K.stepSortedArrayWorld, snap: K.snapshotSortedArray },
+    // scene 3
+    { s: 3, name: 'Fenwick', squared: false, amortized: false, svg: false,
+      make: (n) => K.createFenwickWorld(n), step: K.stepFenwickWorld, snap: K.snapshotFenwick },
+    { s: 3, name: 'SegmentTree', squared: false, amortized: false, svg: false,
+      make: (n) => K.createSegmentTreeWorld(n), step: K.stepSegmentTreeWorld, snap: K.snapshotSegmentTree },
+    { s: 3, name: 'Fenwick2D', squared: true, amortized: false, svg: false,
+      make: (n) => { const d = Math.max(8, Math.round(Math.sqrt(n))); return K.createFenwick2DWorld(d, d); }, step: K.stepFenwick2DWorld, snap: K.snapshotFenwick2D },
+    { s: 3, name: 'SegmentTree2D', squared: true, amortized: false, svg: false,
+      make: (n) => { const d = Math.max(8, Math.round(Math.sqrt(n))); return K.createSegmentTree2DWorld(d, d); }, step: K.stepSegmentTree2DWorld, snap: K.snapshotSegmentTree2D },
+    // scene 4
+    { s: 4, name: 'PersistentSegTree', squared: false, amortized: false, svg: true,
+      make: (n) => K.createPersistentSegTreeWorld(n, 400), step: K.stepPersistentSegTreeWorld, snap: K.snapshotPersistentSegTree },
+    { s: 4, name: 'MergeSortTree', squared: true, amortized: false, svg: false,
+      make: (n) => K.createMergeSortTreeWorld(n), step: K.stepMergeSortTreeWorld, snap: K.snapshotMergeSortTree },
+];
+
+// ---- warmup: build every world once + one static ns/op sweep for the panel slope -------
+const SWEEP = [256, 512, 1024, 2048];
+const _xs = new Float64Array(SWEEP.length), _ys = new Float64Array(SWEEP.length);
+for (let m = 0; m < MEMBERS.length; m++) {
+    const M = MEMBERS[m];
+    M.world = M.make(1024);
+    M.ring = makeRing();
+    M.foilRing = makeRing();
+    // static slope/R^2 off the REAL kernel (init only, off the hot path).
+    for (let i = 0; i < SWEEP.length; i++) {
+        const w = M.make(SWEEP[i]);
+        for (let j = 0; j < 4000; j++) M.step(w);
+        const t0 = performance.now(); const IT = 40000;
+        for (let j = 0; j < IT; j++) M.step(w);
+        const ns = (performance.now() - t0) * 1e6 / IT;
+        _xs[i] = M.squared ? Math.log2(SWEEP[i]) ** 2 : Math.log2(SWEEP[i]);
+        _ys[i] = ns;
+    }
+    const f = fit(_xs, _ys, SWEEP.length);
+    M.slope = f.slope; M.r2 = f.r2;
+    // pre-build one Truth-Panel row (DOM created ONCE, updated in place forever).
+    const tb = M.s === 1 ? $t1 : M.s === 2 ? $t2 : M.s === 3 ? $t3 : $t4;
+    const tr = document.createElement('tr');
+    const c0 = document.createElement('td'); c0.textContent = M.name;
+    const c1 = document.createElement('td'); const c2 = document.createElement('td');
+    const c3 = document.createElement('td'); const c4 = document.createElement('td');
+    const c5 = document.createElement('td');
+    c2.textContent = M.slope.toFixed(2); c3.textContent = M.r2.toFixed(3);
+    c4.textContent = '0'; c4.className = 'zero';
+    if (M.s <= 2) c5.textContent = M.amortized ? '--' : 'n/a';
+    else { c5.textContent = M.squared ? '(log2 n)^2' : 'log2(n)'; c5.className = 'axis'; }
+    tr.append(c0, c1, c2, c3, c4, c5);
+    tb.appendChild(tr);
+    M.$ns = c1; M.$max = c5;
+}
+const FOIL_NS = { 1: 0, 2: 0, 3: 0, 4: 0 };
+$n1.textContent = 'Foil: unsorted-array PQ rescans for min every pop -- O(n) per extract, and it allocates every frame.';
+$n2.textContent = 'Foil: plain-array ordered map -- O(n) memmove insert + linear scan, allocating each frame.';
+$n3.textContent = '1D on log2(n); 2D on (log2 n)^2 (axis named per row). Foils rebuild the whole prefix/grid each write.';
+$n4.textContent = 'PST path-copies O(log n) nodes per version; the foil clones the whole array each version. MST builds once, queries hot.';
+
+// ---- SVG member banding: each scene's SVG members share ONE <svg>, split into horizontal
+// bands. Assign each SVG member its band index + a slice of the pre-allocated node pool. ------
+for (let s = 1; s <= 4; s++) {
+    let count = 0;
+    for (let m = 0; m < MEMBERS.length; m++) if (MEMBERS[m].s === s && MEMBERS[m].svg) count++;
+    let idx = 0;
+    for (let m = 0; m < MEMBERS.length; m++) {
+        const M = MEMBERS[m];
+        if (M.s !== s || !M.svg) continue;
+        M.svgIndex = idx; M.svgCount = count; idx++;
+    }
+}
+
+// ---- SVG node pools (pre-allocated ONCE; only attributes set on the hot path) -----------
+// Geometry is written via `.baseVal.value` (a NUMBER assignment -- no per-frame string alloc,
+// unlike setAttribute which stringifies). fill/visibility use cached constant strings and are
+// only re-set when the tracked code actually changes. Per-slot scratch (xs/ys/stamp) lets tree
+// renderers draw parent-child links without allocating. MAXSLOT covers cap+1 for every world.
+const SVG_NODES = 200;
+const MAXSLOT = 4096;
+const COL_WARN = '#d29922';
+const FILLS = [COL_CELL, COL_HOT, COL_DIM, COL_GOOD, COL_WARN]; // fill codes 0..4
+function buildPool(svg) {
+    const circles = new Array(SVG_NODES), lines = new Array(SVG_NODES);
+    for (let i = 0; i < SVG_NODES; i++) {
+        const ln = document.createElementNS(SVGNS, 'line');
+        ln.setAttribute('stroke', COL_DIM); ln.setAttribute('stroke-width', '1'); ln.setAttribute('visibility', 'hidden');
+        svg.appendChild(ln); lines[i] = ln;
+    }
+    for (let i = 0; i < SVG_NODES; i++) {
+        const c = document.createElementNS(SVGNS, 'circle');
+        c.setAttribute('r', '5'); c.setAttribute('fill', COL_CELL); c.setAttribute('visibility', 'hidden');
+        svg.appendChild(c); circles[i] = c;
+    }
+    return {
+        circles, lines,
+        cfill: new Int8Array(SVG_NODES).fill(0),   // last fill code per circle
+        cvis: new Uint8Array(SVG_NODES),           // last visibility per circle (0 hidden)
+        lvis: new Uint8Array(SVG_NODES),           // last visibility per line
+        px: new Float64Array(MAXSLOT), py: new Float64Array(MAXSLOT), // pixel pos per slot
+        stamp: new Int32Array(MAXSLOT).fill(-1),   // frame-stamp: slot visited this SVG frame
+        stack: new Uint32Array(MAXSLOT), dstack: new Uint16Array(MAXSLOT),
+        visited: new Uint32Array(SVG_NODES),
+    };
+}
+const POOL = { s1: buildPool($v1), s2: buildPool($v2), s3: buildPool($v3), s4: buildPool($v4) };
+
+// ---- pooled-SVG primitives (geometry via baseVal.value; no per-frame string alloc) -----
+function putCircle(pool, i, x, y, r, code) {
+    const c = pool.circles[i];
+    c.cx.baseVal.value = x; c.cy.baseVal.value = y; c.r.baseVal.value = r;
+    if (pool.cfill[i] !== code) { c.setAttribute('fill', FILLS[code]); pool.cfill[i] = code; }
+    if (pool.cvis[i] !== 1) { c.setAttribute('visibility', 'visible'); pool.cvis[i] = 1; }
+}
+function putLine(pool, i, x1, y1, x2, y2) {
+    const l = pool.lines[i];
+    l.x1.baseVal.value = x1; l.y1.baseVal.value = y1; l.x2.baseVal.value = x2; l.y2.baseVal.value = y2;
+    if (pool.lvis[i] !== 1) { l.setAttribute('visibility', 'visible'); pool.lvis[i] = 1; }
+}
+function hideCircles(pool, from, to) {
+    for (let i = from; i < to; i++) if (pool.cvis[i] !== 0) { pool.circles[i].setAttribute('visibility', 'hidden'); pool.cvis[i] = 0; }
+}
+function hideLines(pool, from, to) {
+    for (let i = from; i < to; i++) if (pool.lvis[i] !== 0) { pool.lines[i].setAttribute('visibility', 'hidden'); pool.lvis[i] = 0; }
+}
+
+// ---- rendering -- Canvas for dense members, SVG pool for discrete ones ------------------
+function clearCanvas(g, w, h) { g.fillStyle = COL_BG; g.fillRect(0, 0, w, h); }
+
+// Dense 1D array of values -> a colored strip/tree (BinaryHeap/MinMaxHeap/SortedArray/Fenwick/SegmentTree/MergeSortTree)
+function drawStrip(g, arr, count, w, h, y0, hh, hot) {
+    if (count <= 0) return;
+    const cw = w / count;
+    for (let i = 0; i < count; i++) {
+        const v = arr[i] | 0;
+        const t = (v & 255) / 255;
+        g.fillStyle = i === hot ? COL_HOT : COL_CELL;
+        const bh = 2 + t * (hh - 2);
+        g.globalAlpha = 0.35 + 0.65 * t;
+        g.fillRect(i * cw, y0 + (hh - bh), cw > 2 ? cw - 1 : cw, bh);
+    }
+    g.globalAlpha = 1;
+}
+// Dense 2D grid heat (Fenwick2D/SegmentTree2D), drawn within its lane [y0, y0+h).
+function drawGrid(g, arr, rows, cols, stride, w, h, y0) {
+    const cw = w / cols, ch = h / rows;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+        const v = Math.abs(arr[(r + 1) * stride + (c + 1)] | 0);
+        const t = Math.min(1, v / 64);
+        g.fillStyle = COL_CELL; g.globalAlpha = 0.15 + 0.85 * t;
+        g.fillRect(c * cw, y0 + r * ch, cw > 2 ? cw - 1 : cw, ch > 2 ? ch - 1 : ch);
+    }
+    g.globalAlpha = 1;
+}
+// MergeSortTree is STATIC (its _t run table never changes), so we animate the QUERY instead of
+// the tree: a faint source-value backdrop (world.values, by index) with the live index window
+// [lo,hi] highlighted, the counted set tinted (countLE: v<=x; rangeCount: vlo<=v<=vhi), the
+// threshold/value-band drawn, and a live result gauge. All state read from M.world.* each frame
+// (numbers only -> 0 alloc); it moves every step. Drawn in the TOP half (PST DAG owns the bottom).
+function drawMST(g, M, x0, y0, w, h) {
+    const world = M.world, vals = world.values, n = world.n;
+    const lo = world.lo, hi = world.hi, x = world.x, vlo = world.vlo, vhi = world.vhi, op = world.lastOp;
+    const VS = 65536, botY = y0 + h - 6, room = h - 14;
+    const xstep = w / n;
+    const wx0 = x0 + (lo / n) * w, wx1 = x0 + ((hi + 1) / n) * w;
+    // 1) source backdrop + window tint of the COUNTED set (this is what countLE/rangeCount select)
+    for (let i = 0; i < n; i++) {
+        const v = vals[i], bh = (v / VS) * room, inWin = i >= lo && i <= hi;
+        let counted = 0;
+        if (inWin) counted = op === 1 ? (v <= x ? 1 : 0) : ((v >= vlo && v <= vhi) ? 1 : 0);
+        g.fillStyle = counted ? COL_GOOD : (inWin ? COL_ACCENT : COL_DIM);
+        g.globalAlpha = counted ? 0.9 : (inWin ? 0.5 : 0.16);
+        g.fillRect(x0 + i * xstep, botY - bh, xstep > 1.5 ? xstep - 0.5 : xstep, bh);
+    }
+    g.globalAlpha = 0.9; g.fillStyle = COL_HOT;
+    // 2) threshold line (countLE) or value band edges (rangeCount) across the window
+    if (op === 1) { const ty = botY - (x / VS) * room; g.fillRect(wx0, ty, wx1 - wx0, 2); }
+    else {
+        const ya = botY - (vhi / VS) * room, yb = botY - (vlo / VS) * room;
+        g.fillRect(wx0, ya, wx1 - wx0, 2); g.fillRect(wx0, yb, wx1 - wx0, 2);
+    }
+    // 3) window edges
+    g.globalAlpha = 1; g.fillStyle = COL_WARN;
+    g.fillRect(wx0, y0 + 2, 2, h - 4); g.fillRect(wx1 - 2, y0 + 2, 2, h - 4);
+    // 4) live result gauge along the top edge (result / window size) -- grows/shrinks each step
+    const winSz = hi - lo + 1, res = op === 1 ? world.countRes : world.rangeRes;
+    g.fillStyle = COL_GOOD; g.globalAlpha = 0.85;
+    g.fillRect(x0, y0, (winSz > 0 ? res / winSz : 0) * w, 4);
+    g.globalAlpha = 1;
+}
+// ---- per-member SVG renderers -- each reads ONLY its snapshot arrays, zero string alloc on
+// the hot path, ~10Hz (called behind the (frame & 7) mask). Each owns pool circles/lines
+// [off, off+budget). `fid` is the running SVG-frame id used to stamp slots visited THIS frame.
+
+// Bounded iterative-inorder BST layout: fills pool.px/py per slot for visited nodes (up to
+// budget), stamps them with fid, returns the visited count. Shared by Treap/Scapegoat/Splay.
+function layoutBST(pool, root, left, right, off, budget, x0, y0, bw, bh, fid) {
+    const stack = pool.stack, dstack = pool.dstack, visited = pool.visited, stamp = pool.stamp,
+        px = pool.px, py = pool.py;
+    let cur = root, sp = 0, count = 0, depth = 0, maxd = 0;
+    while ((cur !== 0 || sp > 0) && count < budget) {
+        while (cur !== 0 && count < budget) { stack[sp] = cur; dstack[sp] = depth; sp++; depth++; cur = left[cur]; }
+        if (sp === 0) break;
+        sp--; const node = stack[sp], d = dstack[sp];
+        if (d > maxd) maxd = d;
+        visited[count] = node; px[node] = count; py[node] = d; stamp[node] = fid; count++;
+        cur = right[node]; depth = d + 1;
+    }
+    const xstep = count > 0 ? bw / count : bw, levelH = bh / (maxd + 2);
+    for (let k = 0; k < count; k++) { const node = visited[k]; px[node] = x0 + (px[node] + 0.5) * xstep; py[node] = y0 + 10 + py[node] * levelH; }
+    return count;
+}
+
+function svgBST(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, left = sn.left, right = sn.right, root = sn.root;
+    const count = layoutBST(pool, root, left, right, off, budget, x0, y0, bw, bh, fid);
+    const stamp = pool.stamp, px = pool.px, py = pool.py, visited = pool.visited, prio = sn.prio;
+    const isSplay = M.name === 'SplayTree', hl = sn.hl, hr = sn.hr;
+    const rebuilt = M.name === 'Scapegoat' && M.world.rebuilt;
+    let li = off;
+    for (let k = 0; k < count; k++) {
+        const node = visited[k], lc = left[node], rc = right[node];
+        if (lc !== 0 && stamp[lc] === fid && li < off + budget) { putLine(pool, li, px[node], py[node], px[lc], py[lc]); li++; }
+        if (rc !== 0 && stamp[rc] === fid && li < off + budget) { putLine(pool, li, px[node], py[node], px[rc], py[rc]); li++; }
+    }
+    for (let k = 0; k < count; k++) {
+        const node = visited[k];
+        const r = prio ? 4 + (prio[node] % 5) : (node === root ? 7 : 5);
+        // root = hot (the splayed / treap root); _hl/_hr splay hands = warn; rebuild frame = good.
+        const code = node === root ? 1 : (isSplay && (node === hl || node === hr)) ? 4 : rebuilt ? 3 : 0;
+        putCircle(pool, off + k, px[node], py[node], r, code);
+    }
+    hideCircles(pool, off + count, off + budget);
+    hideLines(pool, li, off + budget);
+}
+
+function svgSkipList(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, next = sn.next, stride = sn.stride, maxLevel = sn.maxLevel, update = sn.update;
+    // Walk the level-0 chain from head (slot 0); one tower column per node.
+    let slot = next[0], k = 0;
+    const rowY = y0 + bh - 8, unit = (bh - 16) / (maxLevel + 1);
+    const xstep = bw / (budget + 1);
+    let li = off;
+    while (slot !== 0 && k < budget) {
+        // tower height: highest level with an outgoing link at this slot, +1.
+        let hgt = 1;
+        for (let L = maxLevel - 1; L >= 1; L--) if (next[L * stride + slot] !== 0) { hgt = L + 1; break; }
+        const x = x0 + (k + 1) * xstep, topY = rowY - hgt * unit;
+        putLine(pool, li, x, rowY, x, topY); li++;
+        // highlight nodes on the _update descent path (the search spine)
+        let onPath = 0;
+        for (let L = 0; L < maxLevel; L++) if (update[L] === slot) { onPath = 1; break; }
+        putCircle(pool, off + k, x, topY, onPath ? 6 : 4, onPath ? 1 : 0);
+        slot = next[slot]; k++;
+    }
+    hideCircles(pool, off + k, off + budget);
+    hideLines(pool, li, off + budget);
+}
+
+function svgBinomial(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, head = sn.head, sibling = sn.sibling, order = sn.order, min = sn.min;
+    const greyed = sn.consumed ? 2 : 0;
+    let slot = head, k = 0; const cy = y0 + bh * 0.5, xstep = bw / (budget + 1);
+    let li = off;
+    while (slot !== 0 && k < budget) {
+        const x = x0 + (k + 1) * xstep, r = 4 + (order[slot] > 8 ? 8 : order[slot]);
+        if (k > 0 && li < off + budget) { putLine(pool, li, x - xstep, cy, x, cy); li++; }
+        putCircle(pool, off + k, x, cy, r, slot === min ? 1 : greyed);
+        slot = sibling[slot]; k++;
+    }
+    hideCircles(pool, off + k, off + budget);
+    hideLines(pool, li, off + budget);
+}
+
+function svgFibonacci(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, min = sn.min, rightArr = sn.right, mark = sn.mark, degree = sn.degree;
+    const cx = x0 + bw * 0.5, cy = y0 + bh * 0.5, rad = Math.min(bw, bh) * 0.38;
+    // count roots first (bounded), then place around a ring.
+    let slot = min, n = 0;
+    if (min !== 0) { do { n++; slot = rightArr[slot]; } while (slot !== min && n < budget); }
+    slot = min; let k = 0;
+    while (k < n && k < budget) {
+        const a = (k / n) * TAU, x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
+        const r = 4 + (degree[slot] > 6 ? 6 : degree[slot]);
+        const code = slot === min ? 1 : mark[slot] ? 4 : 0;
+        putCircle(pool, off + k, x, y, r, code);
+        slot = rightArr[slot]; k++;
+    }
+    hideCircles(pool, off + k, off + budget);
+    hideLines(pool, off, off + budget);
+}
+
+function svgPairing(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, root = sn.root, child = sn.child, sibling = sn.sibling;
+    const cx = x0 + bw * 0.5, topY = y0 + 14, spike = M.world.lastOp === 2 ? 1 : 0;
+    let li = off, k = 0;
+    if (root !== 0 && k < budget) { putCircle(pool, off + k, cx, topY, 7, spike ? 1 : 3); k++; }
+    // one fanned row of the root's children (bounded)
+    let c = root !== 0 ? child[root] : 0, ci = 0, cnt = 0;
+    let t = c; while (t !== 0 && cnt < budget) { cnt++; t = sibling[t]; }
+    const rowY = y0 + bh - 16, xstep = bw / (cnt + 1);
+    while (c !== 0 && k < budget) {
+        const x = x0 + (ci + 1) * xstep;
+        if (li < off + budget) { putLine(pool, li, cx, topY, x, rowY); li++; }
+        putCircle(pool, off + k, x, rowY, 5, 0);
+        c = sibling[c]; ci++; k++;
+    }
+    hideCircles(pool, off + k, off + budget);
+    hideLines(pool, li, off + budget);
+}
+
+// Legible animating version DAG: the newest PST_VMAX versions as a well-spaced chain, the
+// newest root HOT (fresh path-copy spine) vs shared history dim, and the version READ this step
+// pulsed (warn). Versions mint every step and clear() cycles at the cap -> the chain scrolls.
+const PST_VMAX = 20;
+function svgPST(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const sn = M.world.snap, vcount = sn.vcount, curV = vcount - 1, qv = M.world.queriedV;
+    const cap = budget < PST_VMAX ? budget : PST_VMAX;
+    const n = vcount > cap ? cap : vcount, start = vcount - n; // newest window (legible count)
+    const cy = y0 + bh * 0.5, xstep = bw / (n + 1);
+    let li = off;
+    for (let k = 0; k < n; k++) {
+        const v = start + k, x = x0 + (k + 1) * xstep;
+        if (k > 0 && li < off + budget) { putLine(pool, li, x - xstep, cy, x, cy); li++; }
+        const r = v === curV ? 11 : v === qv ? 9 : 7;
+        const code = v === curV ? 1 : v === qv ? 4 : 2; // hot newest | warn queried | dim history
+        putCircle(pool, off + k, x, cy, r, code);
+    }
+    hideCircles(pool, off + n, off + budget);
+    hideLines(pool, li, off + budget);
+}
+
+function drawSvgMember(M, pool, off, budget, x0, y0, bw, bh, fid) {
+    const name = M.name;
+    if (name === 'BinomialHeap') svgBinomial(M, pool, off, budget, x0, y0, bw, bh, fid);
+    else if (name === 'FibonacciHeap') svgFibonacci(M, pool, off, budget, x0, y0, bw, bh, fid);
+    else if (name === 'PairingHeap') svgPairing(M, pool, off, budget, x0, y0, bw, bh, fid);
+    else if (name === 'SkipList') svgSkipList(M, pool, off, budget, x0, y0, bw, bh, fid);
+    else if (name === 'PersistentSegTree') svgPST(M, pool, off, budget, x0, y0, bw, bh, fid);
+    else svgBST(M, pool, off, budget, x0, y0, bw, bh, fid); // Treap / Scapegoat / SplayTree
+}
+
+// Per-scene draw: step every member of the scene, then render. Read canvas size ONCE (read phase).
+let W = 900, H = 360; // canvas backing size (fixed via width/height attrs)
+let svgFrameId = 0;   // running id stamped onto slots visited in the current SVG draw pass
+
+function renderScene(s) {
+    const g = s === 1 ? g1 : s === 2 ? g2 : s === 3 ? g3 : g4;
+    const pool = s === 1 ? POOL.s1 : s === 2 ? POOL.s2 : s === 3 ? POOL.s3 : POOL.s4;
+    clearCanvas(g, W, H);
+    let laneCount = 0;
+    for (let m = 0; m < MEMBERS.length; m++) if (MEMBERS[m].s === s && !MEMBERS[m].svg) laneCount++;
+    const laneH = H / (laneCount || 1);
+    // SVG members redraw at ~10Hz (the same (frame & 7) mask as the panel text); Canvas every frame.
+    const svgFrame = (frame & 7) === 0;
+    let lane = 0;
+    for (let m = 0; m < MEMBERS.length; m++) {
+        const M = MEMBERS[m];
+        if (M.s !== s) continue;
+        // --- step batch, timed (0 B/op) ---
+        const w = M.world;
+        const t0 = performance.now();
+        for (let b = 0; b < BATCH; b++) M.step(w);
+        const ns = (performance.now() - t0) * 1e6 / BATCH;
+        ringPush(M.ring, ns);
+        M.snap(w, w.snap);
+        // --- render ---
+        if (M.svg) {
+            if (svgFrame) {
+                // Per-member frame id: SVG members in a scene share the pool's slot-keyed
+                // stamp/px/py scratch, so each needs its own id to avoid cross-member link leaks.
+                svgFrameId = (svgFrameId + 1) | 0;
+                const cnt = M.svgCount, budget = (SVG_NODES / cnt) | 0;
+                // Scene 4: PST (the ONLY svg member here) takes the BOTTOM half; MST canvas the top,
+                // so the version DAG and the query never overlap in the shared stage.
+                let bandH = H / cnt, y0 = M.svgIndex * bandH;
+                if (s === 4) { bandH = H * 0.5; y0 = H * 0.5; }
+                const off = M.svgIndex * budget;
+                drawSvgMember(M, pool, off, budget, 8, y0 + 6, W - 16, bandH - 12, svgFrameId);
+            }
+        } else if (M.name === 'MergeSortTree') {
+            // Static structure -> animate the QUERY in the TOP half (see drawMST).
+            drawMST(g, M, 0, 0, W, H * 0.5);
+        } else {
+            const sn = w.snap;
+            const y0 = lane * laneH; lane++;
+            if (M.name === 'Fenwick2D') drawGrid(g, sn.t, sn.r, sn.c, sn.w, W, laneH, y0);
+            else if (M.name === 'SegmentTree2D') drawGrid(g, sn.t, sn.r, sn.c, sn.w, W, laneH, y0);
+            else if (M.name === 'Fenwick') drawStrip(g, sn.t, sn.n, W, H, y0, laneH, w.lastIdx);
+            else if (M.name === 'SegmentTree') drawStrip(g, sn.t, sn.n, W, H, y0, laneH, w.lastIdx);
+            else if (M.name === 'SortedArray') drawStrip(g, sn.key, sn.size, W, H, y0, laneH, w.probe | 0);
+            else drawStrip(g, sn.key, sn.n !== undefined ? sn.n : sn.size, W, H, y0, laneH, 0);
+        }
+    }
+    // foil timing (occasional, allocates ON PURPOSE -- the contrast)
+    if ((frame & 31) === 0) {
+        const ft0 = performance.now();
+        if (s === 1) K.foilLinearScanPQ(256);
+        else if (s === 2) K.foilSortedArrayInsertScan(256, 128);
+        else if (s === 3) { K.foilPrefixRebuild(256, frame & 255, 1); K.foilGridRebuild(24, 24); }
+        else { K.foilCopyOnWriteSnapshot(_foilPrev, frame & 63, frame); K.foilBruteRangeCount(_foilVals, 2, 200, 0, 1000); }
+        FOIL_NS[s] = (performance.now() - ft0) * 1e6;
+    }
+}
+const _foilPrev = new Float64Array(256), _foilVals = new Float64Array(256);
+
+// ---- Truth Panel text throttled to ~10Hz via a frame-counter mask ----------------------
+function updatePanel(s) {
+    for (let m = 0; m < MEMBERS.length; m++) {
+        const M = MEMBERS[m];
+        if (M.s !== s) continue;
+        M.$ns.textContent = ringMean(M.ring).toFixed(1);
+        if (M.s <= 2 && M.amortized) M.$max.textContent = (M.world.maxNs * 1e6).toFixed(0);
+    }
+}
+
+// ---- the single rAF driver -----------------------------------------------------------
+let active = 1;
+let frame = 0;
+function loop() {
+    // WRITE phase only: canvas/SVG attribute writes. No layout READ in this block (sizes are
+    // fixed via the canvas width/height attributes + the svg viewBox, read once at init).
+    renderScene(active);
+    if ((frame & 7) === 0) updatePanel(active); // ~10Hz text throttle (no toFixed elsewhere)
+    frame = (frame + 1) | 0;
+    requestAnimationFrame(loop);
+}
+
+// ---- tab switching (click = accessible activation) ------------------------------------
+$tabs.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab');
+    if (!btn) return;
+    const id = btn.getAttribute('data-tab');
+    for (let i = 0; i < $tabBtns.length; i++) $tabBtns[i].setAttribute('aria-selected', $tabBtns[i] === btn ? 'true' : 'false');
+    for (let i = 0; i < $scenes.length; i++) $scenes[i].setAttribute('data-active', $scenes[i].getAttribute('data-scene') === id ? 'true' : 'false');
+    active = id === 's1' ? 1 : id === 's2' ? 2 : id === 's3' ? 3 : 4;
+});
+
+// ---- #profile hash flag -> dev-only layout profiler (never a dependency, never in files[]) --
+if (location.hash === '#profile') {
+    import('@zakkster/lite-layout-profiler')
+        .then((mod) => { if (mod && mod.attach) mod.attach({ label: 'lite-logn-demo' }); })
+        .catch((err) => { console.warn('[lite-logn-demo] layout profiler unavailable:', err && err.message); });
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
