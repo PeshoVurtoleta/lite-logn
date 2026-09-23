@@ -741,3 +741,50 @@ export class MergeSortTree {
      *  O(n log n). Same fail-closed doors as the constructor. */
     static build(values: ArrayLike<number>): MergeSortTree;
 }
+
+/**
+ * A STATIC, IMMUTABLE WAVELET MATRIX for offline access / rank / select / quantile / rangeCount over a
+ * fixed sequence of finite numbers. Coordinate-compresses arbitrary finite numbers to distinct ranks at
+ * build (the MergeSortTree input contract) and stores level-wise flat bitvectors plus a per-level
+ * zero-count and a succinct O(1)-rank block index. `quantile(lo, hi, k)` is the k-th-smallest-in-range
+ * order statistic MergeSortTree deferred, and `rangeCount` runs in O(log n) (improving MergeSortTree's
+ * O(log^2 n)). Build-once (source COPIED in, NO mutators); build is O(n log sigma), space
+ * (n*ceil(log2 distinct) bits + rank index + remap table) a disclosed co-headline.
+ */
+export class WaveletTree {
+    /** Build the immutable wavelet matrix from a COPY of `values` (finite numbers, any order).
+     *  O(n log sigma). Non-array-like, a length outside [1, 2^31-1], a word product over 2^31-1, or any
+     *  non-finite entry (Symbol / BigInt / NaN / +-Infinity) throws before the structure is usable. */
+    constructor(values: ArrayLike<number>);
+
+    /** Element count (the source length). */
+    readonly length: number;
+    /** Element count -- the family-spine alias of `length`. */
+    readonly size: number;
+    /** Level count `ceil(log2 distinct)` (>= 1) -- the descent depth of every query. */
+    readonly levels: number;
+    /** Distinct value count (sigma) -- the compressed alphabet size. */
+    readonly distinct: number;
+    /** Total bitvector bit count (`n * levels`) -- the disclosed O(n log sigma) space co-headline. */
+    readonly bits: number;
+
+    /** The value stored at index `i`. Worst-case O(log sigma), 0 B/op. A non-integer / out-of-range i throws. */
+    access(i: number): number;
+    /** Occurrences of `value` in the prefix `[0, i)`. Worst-case O(log sigma), 0 B/op. A non-numeric
+     *  value or a non-integer i outside [0, length] throws. A value not present returns 0. */
+    rank(value: number, i: number): number;
+    /** Index of the k-th (0-based) occurrence of `value`, or `undefined` if `value` is absent or has
+     *  fewer than k+1 occurrences (a consistent read, NOT a throw). Worst-case O(log sigma . log n),
+     *  0 B/op. A non-numeric / NaN value or a negative / non-integer k throws. */
+    select(value: number, k: number): number | undefined;
+    /** The k-th smallest value (0-based) in the INDEX range [lo, hi] INCLUSIVE. Worst-case O(log sigma),
+     *  0 B/op. Non-integer / out-of-range lo or hi, lo > hi, or k outside [0, hi - lo] throws. */
+    quantile(lo: number, hi: number, k: number): number;
+    /** Count of stored values in the VALUE-window [vlo, vhi] INCLUSIVE within the INDEX range [lo, hi]
+     *  INCLUSIVE. Worst-case O(log sigma), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws. */
+    rangeCount(lo: number, hi: number, vlo: number, vhi: number): number;
+
+    /** Build the immutable wavelet matrix from a COPY of `values` (the idiomatic factory;
+     *  = new WaveletTree). O(n log sigma). Same fail-closed doors as the constructor. */
+    static build(values: ArrayLike<number>): WaveletTree;
+}

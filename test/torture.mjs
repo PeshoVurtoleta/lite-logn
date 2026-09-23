@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -248,6 +248,20 @@ async function main() {
             mst.countLE(10, 40, (i * 40503) & 0xffff);
             mst.rangeCount(0, 63, 100, 5000);
             tracker.track(mst, noopRelease, 15 * CYCLES + i, { audit: true });
+            // A fresh WaveletTree per cycle, built from a scratch array of coordinate-compressed values
+            // then exercised across the full surface (access / rank / select / quantile / rangeCount)
+            // then dropped. Same held-value contract: a WaveletTree owns only its flat _words / _blk /
+            // _Z / _remap typed arrays (no external resource), and it is IMMUTABLE (no mutators), so the
+            // no-op cleanup never defeats finalization.
+            const wtVals = new Float64Array(64);
+            for (let k = 0; k < 64; k++) wtVals[k] = (k * 2654435761) & 0x3f;
+            const wt = WaveletTree.build(wtVals);
+            wt.access(i & 63);
+            wt.rank(i & 0x3f, 64);
+            wt.select(i & 0x3f, 0);
+            wt.quantile(0, 63, i & 63);
+            wt.rangeCount(0, 63, 0, i & 0x3f);
+            tracker.track(wt, noopRelease, 16 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -961,6 +975,40 @@ async function main() {
         mstk = (mstk + 1) | 0;
     };
 
+    // WaveletTree: one out-of-loop IMMUTABLE matrix built once over CAP coordinate-compressed values.
+    // Every read lane is a real hot op that MUST allocate zero bytes -- the flat _words / _blk / _Z /
+    // _remap arrays are fixed at construction, and access / rank / select / quantile / rangeCount are
+    // read-only succinct-rank descents using only local scalars (0 B/op even where select does an UPWARD
+    // binary-search climb). There is NO mutation / clear lane (the member is build-once immutable).
+    const wtSrc = new Float64Array(CAP);
+    for (let i = 0; i < CAP; i++) wtSrc[i] = (i * 2654435761) & MASK;   // ~CAP distinct codes
+    const wt = WaveletTree.build(wtSrc);
+    let wtk = 0, wtacc = 0;
+    const stepWtAccess = () => {
+        wtacc = (wtacc + (wt.access(wtk & MASK) | 0)) | 0;
+        wtk = (wtk + 1) | 0;
+    };
+    const stepWtRank = () => {
+        wtacc = (wtacc + (wt.rank(wtk & MASK, (wtk & MASK) + 1) | 0)) | 0;
+        wtk = (wtk + 1) | 0;
+    };
+    // select: the UPWARD inverse descent (select0 / select1 binary searches over _rank1), folded in.
+    const stepWtSelect = () => {
+        const r = wt.select(wtk & MASK, 0);
+        wtacc = (wtacc + (r === undefined ? 0 : r | 0)) | 0;
+        wtk = (wtk + 1) | 0;
+    };
+    // quantile: the gated Witness op -- k-th smallest over a wide window for a cycling k, folded in.
+    const stepWtQuantile = () => {
+        wtacc = (wtacc + (wt.quantile(1, CAP - 2, wtk & (MASK >> 1)) | 0)) | 0;
+        wtk = (wtk + 1) | 0;
+    };
+    const stepWtRangeCount = () => {
+        const lo = wtk & (MASK >> 1);
+        wtacc = (wtacc + (wt.rangeCount(lo, lo + 100, 0, wtk & MASK) | 0)) | 0;
+        wtk = (wtk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -989,7 +1037,8 @@ async function main() {
         stepSt2Update, stepSt2Query, stepSt2At,
         stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor,
         stepPstQuery, stepPstAt, stepPstUpdate,
-        stepMstCountLE, stepMstRangeCount]) {
+        stepMstCountLE, stepMstRangeCount,
+        stepWtAccess, stepWtRank, stepWtSelect, stepWtQuantile, stepWtRangeCount]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -1036,6 +1085,7 @@ async function main() {
     if (safeAcc === 0x7fffffff) throw new Error('unreachable'); // keep safeAcc live
     if (psacc === 0x7fffffff) throw new Error('unreachable'); // keep psacc live
     if (mstacc === 0x7fffffff) throw new Error('unreachable'); // keep mstacc live
+    if (wtacc === 0x7fffffff) throw new Error('unreachable'); // keep wtacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1195,6 +1245,15 @@ async function main() {
         // read-only descent that must allocate zero bytes and trigger no major collection.
         sink = (sink + (mst.countLE(1, CAP - 2, i & 0xffff) | 0)) | 0;
         if ((i & 7) === 0) { const lo = i & (MASK >> 1); sink = (sink + (mst.rangeCount(lo, lo + 100, 0, i & 0xffff) | 0)) | 0; }
+        // WaveletTree churn every op: a wide-window quantile (the gated O(log sigma) read), plus an
+        // access every 4th, a rank every 8th, a select every 16th, and a value-window rangeCount every
+        // 32nd. The matrix is IMMUTABLE (no writes), so this is a pure read-only descent that must
+        // allocate zero bytes and trigger no major collection (select's upward climb included).
+        sink = (sink + (wt.quantile(1, CAP - 2, i & (MASK >> 1)) | 0)) | 0;
+        if ((i & 3) === 0) sink = (sink + (wt.access(i & MASK) | 0)) | 0;
+        if ((i & 7) === 0) sink = (sink + (wt.rank(i & MASK, (i & MASK) + 1) | 0)) | 0;
+        if ((i & 15) === 0) { const r = wt.select(i & MASK, 0); sink = (sink + (r === undefined ? 0 : r | 0)) | 0; }
+        if ((i & 31) === 0) { const lo = i & (MASK >> 1); sink = (sink + (wt.rangeCount(lo, lo + 100, 0, i & MASK) | 0)) | 0; }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1229,6 +1288,11 @@ async function main() {
     const abMstSrc = new Float64Array(1024);
     for (let i = 0; i < 1024; i++) abMstSrc[i] = (i * 2654435761) & 0xffff;
     const abMst = MergeSortTree.build(abMstSrc);
+    // WaveletTree is IMMUTABLE too: flat _words / _blk / _Z / _remap arrays fixed at construction. Built
+    // ONCE here and only READ in the soak below, so its backing stores trivially cannot grow.
+    const abWtSrc = new Float64Array(1024);
+    for (let i = 0; i < 1024; i++) abWtSrc[i] = (i * 2654435761) & 0x3ff;
+    const abWt = WaveletTree.build(abWtSrc);
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1324,6 +1388,19 @@ async function main() {
         for (let i = 0; i < 1024; i++) {
             const c = abMst.countLE(0, 1023, i & 0xffff);
             if (c < 0 || c > 1024) conservationOk = false;
+        }
+        // WaveletTree: IMMUTABLE, so it has no fill/clear cycle -- a batch of read-only queries over the
+        // pre-built matrix instead. Reads never grow the flat bitvector table (a botched grow-on-read
+        // would reallocate it here). Each result must stay within its structural bounds every call:
+        // quantile / access return a stored value; rangeCount stays in [0, 1024]; select is a valid index
+        // or undefined; and select is the exact inverse of rank (a round-trip conservation check).
+        for (let i = 0; i < 1024; i++) {
+            const q = abWt.quantile(0, 1023, i & 1023);
+            if (q < 0 || q > 1023) conservationOk = false;
+            const rc = abWt.rangeCount(0, 1023, 0, i & 1023);
+            if (rc < 0 || rc > 1024) conservationOk = false;
+            const idx = abWt.select(i & 1023, 0);
+            if (idx !== undefined && abWt.rank(i & 1023, idx) !== 0) conservationOk = false; // select/rank inverse
         }
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
@@ -1451,7 +1528,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

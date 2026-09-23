@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -401,6 +401,27 @@ function kMstCountLE(n) {
     return { obj: t, op: () => { SINK = (SINK + t.countLE(lo, hi, xs[i & (TARGETS - 1)])) | 0; i = (i + 1) | 0; } };
 }
 
+function kWtQuantile(n) {
+    // A STATIC, IMMUTABLE wavelet matrix over n seeded ~n-distinct values, built ONCE (no mutators). Each
+    // op reads the k-th smallest value over the widest gated index window [1, n-2] for a rotating rank --
+    // a SINGLE descent of the ceil(log2 sigma) levels with O(1) succinct-rank per level (the gated witness
+    // op, on the DEFAULT log2 axis). Zero allocation after construction: the rank is read from an
+    // Int32Array (Smi, never boxed) and SINK is kept a 32-bit Smi (`| 0`). A wavelet matrix has NO mutating
+    // op, so its representative "churn" op is this read query, not an insert/delete pair.
+    const vals = new Float64Array(n);
+    const rng = prng(0x1234 ^ n);
+    for (let i = 0; i < n; i++) vals[i] = rng() % n;   // ~n distinct -> sigma ~ n -> ~log2 n levels
+    const t = new WaveletTree(vals);
+    const lo = n > 2 ? 1 : 0, hi = n > 2 ? n - 2 : n - 1;
+    const span = hi - lo + 1;
+    const TARGETS = 1024;
+    const ks = new Int32Array(TARGETS);
+    const rk = prng(0x5A17 ^ n);
+    for (let i = 0; i < TARGETS; i++) ks[i] = rk() % span;
+    let i = 0;
+    return { obj: t, op: () => { SINK = (SINK + (t.quantile(lo, hi, ks[i & (TARGETS - 1)]) | 0)) | 0; i = (i + 1) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -432,6 +453,7 @@ export function makeOpKernel(member, op, n) {
         case 'SortedArray.get': return kSortedArrayGet(n);
         case 'PersistentSegTree.query': return kPstQuery(n);
         case 'MergeSortTree.countLE': return kMstCountLE(n);
+        case 'WaveletTree.quantile': return kWtQuantile(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -456,6 +478,8 @@ export function makeSubject(member, n) {
     // MergeSortTree is STATIC/IMMUTABLE (no mutating op); its representative steady op is the countLE
     // read query -- the only op-row it exposes.
     if (member === 'MergeSortTree') return kMstCountLE(n);
+    // WaveletTree is STATIC/IMMUTABLE too; its representative steady op is the quantile read query.
+    if (member === 'WaveletTree') return kWtQuantile(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -664,6 +688,11 @@ export function memberBytes(member, obj) {
             obj._right.buffer.byteLength + obj._roots.buffer.byteLength;
     }
     if (member === 'MergeSortTree') return obj._t.buffer.byteLength; // the flat (H+1) x n sorted-run table
+    if (member === 'WaveletTree') {
+        // level-packed bitvectors + the succinct block-popcount rank index + the coordinate-remap table
+        return obj._words.buffer.byteLength + obj._blk.buffer.byteLength +
+            obj._remap.buffer.byteLength + obj._Z.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -688,6 +717,10 @@ export function theoreticalMinPerLive(member) {
     // The (H+1) x table is the DISCLOSED O(n log n) space co-headline, surfaced as D3's overheadRatio
     // (bytesPerLive / 8 ~ ceil(log2 n) + 1), never hidden.
     if (member === 'MergeSortTree') return 8;
+    // WaveletTree stores the source as 8 B (one Float64) per element -- the minimum to hold the data.
+    // The level-packed bitvectors + succinct rank index are the DISCLOSED space co-headline, surfaced
+    // as D3's overheadRatio (bytesPerLive / 8), never hidden.
+    if (member === 'WaveletTree') return 8;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -698,6 +731,7 @@ function liveCount(member, obj) {
     if (member === 'SegmentTree2D') return obj.rows * obj.cols;              // every grid cell is live
     if (member === 'PersistentSegTree') return obj.length;                   // index-addressed: n leaves are the elements
     if (member === 'MergeSortTree') return obj.length;                       // static: the n source elements are the live set
+    if (member === 'WaveletTree') return obj.length;                         // static: the n source elements are the live set
     return obj.size;
 }
 
@@ -729,6 +763,8 @@ function fillMember(member, obj, count) {
     // MergeSortTree is STATIC/IMMUTABLE: it is built full at construction and has no clear()/mutators,
     // so "fill" is a no-op (the tree already holds all its elements). D3 constructs it full.
     if (member === 'MergeSortTree') return;
+    // WaveletTree is STATIC/IMMUTABLE too: built full at construction, no clear()/mutators -- "fill" is a no-op.
+    if (member === 'WaveletTree') return;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -847,6 +883,7 @@ export function D3(member, opts = {}) {
     else if (member === 'SortedArray') obj = new SortedArray(n);
     else if (member === 'PersistentSegTree') obj = new PersistentSegTree(n, PST_BENCH_VC, 'sum');
     else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
+    else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -881,7 +918,7 @@ export function D3(member, opts = {}) {
     // always live), so their curve is FLAT by design -- stated, not hidden.
     // MergeSortTree is positional + static: every source element is always live and its footprint is a
     // single fixed table, so its load-factor curve is FLAT by design too (like the index-addressed members).
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree');
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree' || member === 'WaveletTree');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -942,6 +979,18 @@ function denseIterNsPerElem(member, obj, reps) {
         const dtp = performance.now() - t0p;
         return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
     }
+    // WaveletTree has no forEach (static/immutable, no single-timeline traversal); its dense-iteration
+    // analogue is a full O(n) positional sweep of access(i) point reads (each an O(log sigma) top-down
+    // descent of the level-packed bitvectors). access returns a Smi so no HeapNumber is boxed.
+    if (member === 'WaveletTree') {
+        const L = obj.length, size0 = Math.max(1, L);
+        for (let i = 0; i < L; i++) acc = (acc + (obj.access(i) | 0)) | 0; // warm
+        const t0p = performance.now();
+        for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + (obj.access(i) | 0)) | 0;
+        SINK += acc;
+        const dtp = performance.now() - t0p;
+        return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
+    }
     const cb = (x) => { acc = (acc + (x | 0)) | 0; };
     obj.forEach(cb); // warm
     const size = Math.max(1, liveCount(member, obj));
@@ -985,6 +1034,9 @@ function randomLookupOp(member, obj, n, rng) {
     // MergeSortTree is index-addressed by position: a random singleton countLE(i, i, MAX) (its O(log^2 n)
     // point descent) is the analogue. MAX is a Smi so no HeapNumber is boxed.
     if (member === 'MergeSortTree') return () => { const i = rng() % n; SINK = (SINK + obj.countLE(i, i, 0x7fffffff)) | 0; };
+    // WaveletTree is index-addressed by position: a random access(i) point read (its O(log sigma)
+    // top-down descent) is the analogue. access returns a Smi so no HeapNumber is boxed.
+    if (member === 'WaveletTree') return () => { const i = rng() % n; SINK = (SINK + (obj.access(i) | 0)) | 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1015,6 +1067,9 @@ function seqLookupOp(member, obj, n) {
     if (member === 'PersistentSegTree') { const head = obj.versions - 1; return () => { SINK += obj.at(head, i) | 0; i++; if (i >= n) i = 0; }; }
     // MergeSortTree is index-addressed by position: a sequential singleton countLE(i, i, MAX) (row-major).
     if (member === 'MergeSortTree') return () => { SINK = (SINK + obj.countLE(i, i, 0x7fffffff)) | 0; i++; if (i >= n) i = 0; };
+    // WaveletTree is index-addressed by position: a sequential access(i) point read (row-major).
+    // access returns a Smi so no HeapNumber is boxed.
+    if (member === 'WaveletTree') return () => { SINK = (SINK + (obj.access(i) | 0)) | 0; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1056,6 +1111,7 @@ function buildFull(member, n) {
         for (let k = 0; k < PST_BENCH_VC; k++) cur = obj.update(cur, k % n, (k & 0xffff) + 1);
     }
     else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
+    else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1427,7 +1483,8 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
         member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' ||
         member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray' ||
-        member === 'PersistentSegTree' || member === 'MergeSortTree') mode = 0;
+        member === 'PersistentSegTree' || member === 'MergeSortTree' ||
+        member === 'WaveletTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

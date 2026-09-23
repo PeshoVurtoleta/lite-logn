@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-23
+
+### Added
+
+- **WaveletTree** -- the seventeenth member and the family's FIRST post-1.0 exotic: a STATIC,
+  IMMUTABLE WAVELET MATRIX for offline access / rank / select / quantile / rangeCount over a fixed
+  sequence of finite numbers. It COORDINATE-COMPRESSES arbitrary finite numbers to distinct ranks at
+  build (the MergeSortTree input contract) and stores the level-wise flat bitvectors plus a per-level
+  zero-count and a succinct O(1)-rank block index. Surface: `access(i)` (the value at index i),
+  `rank(value, i)` (occurrences of `value` in the prefix `[0, i)`), `select(value, k)` (the index of the
+  k-th occurrence of `value`), `quantile(lo, hi, k)` (the k-th smallest value in the INDEX range
+  `[lo, hi]` INCLUSIVE -- the order-statistic headline MergeSortTree deferred here), and
+  `rangeCount(lo, hi, vlo, vhi)` (count of values in the value-window over an index range) in O(log n)
+  -- an improvement on MergeSortTree's O(log^2 n) rangeCount. Getters: `length` / `size` / `levels` /
+  `distinct` / `bits`, and the static `WaveletTree.build(values)`. See `decisions/0019-wavelettree.md`.
+- **Wavelet matrix on the DEFAULT log2(n) witness axis (D-WT).** Unlike MergeSortTree (squared-log),
+  every WaveletTree query descends `levels = ceil(log2 distinct)` levels with O(1) succinct-rank work per
+  level, so it fits `nsPerOp = intercept + slope*log2(n)` -- the single-log axis. The gated witness op is
+  `quantile` (WORST-CASE O(log sigma), no RNG on the hot path); its O(n log n) linear-kth foil
+  (copy the window, sort, index k) leaves the line.
+- **STATIC / IMMUTABLE + coordinate-compression, fail closed.** The source is COPIED in at construction
+  (mutating the caller's array afterward changes nothing) and there are NO mutators. The source must be an
+  array-like of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN / +-Infinity fail closed),
+  the length an integer in `[1, WT_MAX_LENGTH]` (`0x7FFFFFFF`, 2^31-1), and the `levels * wordsPerLevel`
+  word product is guarded by a FLOAT multiply against `WT_MAX_CELLS` (`0x7FFFFFFF`) -- never `| 0`, which
+  would wrap a large product and fail OPEN.
+- **Space a DISCLOSED co-headline.** `n * ceil(log2 distinct)` bits for the level-packed bitvectors, plus
+  the succinct block-popcount rank index and the coordinate-remap table; disclosed via `bits`, never
+  hidden behind the fast query.
+
 ## [1.0.0] - 2026-09-23
 
 ### Changed

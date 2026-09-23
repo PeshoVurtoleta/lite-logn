@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The sixteen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree'];
+/** The seventeen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree'];
 
-/** The twenty-one gated D1 witness op-rows (member.op), in build order. */
+/** The twenty-two gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -44,6 +44,7 @@ export const OP_ROWS = [
     'SortedArray.get',
     'PersistentSegTree.query',
     'MergeSortTree.countLE',
+    'WaveletTree.quantile',
 ];
 
 /** The eight measurement dimensions. */
@@ -79,6 +80,7 @@ export const BASELINE = {
     SortedArray: 'linear-scan',
     PersistentSegTree: 'whole-tree-rebuild/scan-fold',
     MergeSortTree: 'linear-scan-count',
+    WaveletTree: 'linear-kth-sort',
 };
 
 /**
@@ -137,6 +139,10 @@ export const COUNTER_FOIL = {
     // "how many values <= x fall in an index range" at all, so there is no "faster but order-blind"
     // O(1) rival -- NA (the string, never 0).
     MergeSortTree: NA,
+    // WaveletTree is a STATIC wavelet matrix for range ORDER STATISTICS, not an ordered map; a Map cannot
+    // answer "the k-th smallest value in an index range" at all, so there is no "faster but order-blind"
+    // O(1) rival -- NA (the string, never 0).
+    WaveletTree: NA,
 };
 
 /**
@@ -267,6 +273,14 @@ export const RATIONALE = {
             'canonical-node descent + per-node binary search. This STATIC build-once member pays an ' +
             'O(n log n) build + space to buy offline range-rank queries; a Map cannot answer a ' +
             'count-in-value-window over an index range at all, so there is no order-blind O(1) counter-foil.',
+    },
+    WaveletTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'copying the index window, sorting it, and indexing the k-th (O(n log n) per query) is the ' +
+            'honest default before the wavelet trick -- the rival that motivates the O(log sigma) ' +
+            'succinct-rank descent for the range order statistic. This STATIC build-once member pays an ' +
+            'O(n log sigma) build + n*levels bits to buy access/rank/select/quantile/rangeCount; a Map ' +
+            'cannot answer the k-th smallest value in an index range at all, so no order-blind O(1) foil.',
     },
 };
 
@@ -451,6 +465,13 @@ export const OP_CLASS = Object.freeze({
     // two countLE descents (same class); build is O(n log n) (a one-time sort-merge), NOT an O(log)
     // class, so it is deliberately NOT in this table.
     'MergeSortTree.countLE': OLOGN2_WORST,   // O(log n) canonical nodes x O(log n) per-node binary search (the gated row)
+    // WaveletTree: quantile is a SINGLE descent of the ceil(log2 sigma) levels, each step an O(1) succinct
+    // _rank1 -> WORST-CASE O(log sigma) = O(log n) (a STATIC immutable matrix has no randomization /
+    // amortization). Unlike MergeSortTree.countLE there is NO per-node binary search (rank is O(1)), so it
+    // is the single-log OLOGN_WORST, NOT the squared-log OLOGN2_WORST. access / rank / rangeCount are the
+    // same class; select is O(log sigma . log n) (an upward select0/select1 climb) but is NOT the gated
+    // row, so it is not in this table. build is O(n log sigma), also NOT an O(log) class -> not listed.
+    'WaveletTree.quantile': OLOGN_WORST,     // one level descent x O(1) _rank1 per level (the gated row)
 });
 
 // ===========================================================================
@@ -458,7 +479,7 @@ export const OP_CLASS = Object.freeze({
 // first-class witness for the fifteen MUTABLE SUBJECTS: each returns the structure to
 // its pristine EMPTY invariant (heap/list size 0; index-addressed accumulators
 // zeroed), retains its fixed backing store (zero-alloc), and stays reusable. The
-// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable member -- verified against
+// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable members (MergeSortTree + WaveletTree) -- verified against
 // LogN.js (BinaryHeap:239, Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
 //
 // EXCLUDED (named with a reason, never silently dropped -- the same discipline as the
@@ -485,6 +506,10 @@ export const CLEAR_WITNESS_EXCLUDED = Object.freeze({
     MergeSortTree: 'STATIC, IMMUTABLE member (built once, source copied, no mutators, no clear()); ' +
         'IS a SUBJECT but has no fill/clear/refill invariant to witness -- the tree is never mutated ' +
         'after construction (the lite-o1 static-member contract), so there is nothing to clear + reuse',
+    WaveletTree: 'STATIC, IMMUTABLE member (wavelet matrix built once, source coordinate-compressed + ' +
+        'copied, no mutators, no clear()); IS a SUBJECT but has no fill/clear/refill invariant to ' +
+        'witness -- the matrix is never mutated after construction (the lite-o1 static-member contract), ' +
+        'so there is nothing to clear + reuse',
     NodePool: 'private/unexported free-list (SkipList\'s slot allocator, LogN.js:1053); ' +
         'NOT in SUBJECTS -- its clear() is an internal reset transitively covered by SkipList, ' +
         'never a public reuse invariant',

@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -418,6 +418,28 @@ export const PST_QUERY_SLOPE_HI = 54.95;      // median 39.25 * 1.4
 export const MST_COUNTLE_SLOPE_LO = 3.13;     // median 5.218 * 0.6
 export const MST_COUNTLE_SLOPE_HI = 7.31;     // median 5.218 * 1.4
 
+// --- WaveletTree (v1.1.0): shared R^2 floor, OWN quantile band on the DEFAULT log2 axis (0019) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide; WaveletTree's
+// gated op is quantile (the range k-th-smallest ORDER STATISTIC MergeSortTree deferred here). A quantile
+// is a SINGLE descent of the ceil(log2 sigma) levels, each step an O(1) succinct _rank1 -> WORST-case
+// O(log sigma) = O(log n) when sigma ~ n. So it fits the DEFAULT log2(n) axis (a single log, NOT the
+// squared-log MergeSortTree / Fenwick2D use -- there is no per-node binary search; _rank1 is O(1)). The
+// O(n log n) LINEAR-KTH foil (copy the index window, sort it, index the k-th) is EXPONENTIAL on the
+// log2(n) axis and MUST miss the floor. STATIC WORST-CASE member (a build-once immutable matrix has no
+// randomization / amortization), so there is deliberately NO max-single-op disclosure line (the
+// MergeSortTree / SortedArray-read precedent). A quantile touches TWO _rank1 reads per level across the
+// level-packed bitvectors + rank index, so its per-level slope sits ABOVE the contiguous-binary-search
+// SortedArray.get yet on the family shape; expected, which is why only the R^2 floor is shared. Band =
+// median-of-fit-runs * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a legitimately faster
+// future run is not false-failed; the R^2 floor independently rejects any non-log shape. Calibration
+// (this machine, median-of-9 fit runs on the log2 axis over lengths 2^12..2^18, 200000-iter
+// min-over-10-batches): 9 fit-run slopes (ns/level) 14.01 14.37 14.76 15.01 15.25 15.51 16.30 16.50
+// 16.57, MEDIAN slope = 15.248; single-fit R^2 min 0.9600, median 0.9766, 0/9 below the 0.958 floor.
+// Band = median 15.248 * [0.6, 1.4]. The lane opts into the median-of-fits WT_FIT_RUNS hook (like
+// MergeSortTree / PST) for post-torture thermal robustness (single-fit min sits near the floor).
+export const WT_QUANTILE_SLOPE_LO = 9.15;     // median 15.248 * 0.6
+export const WT_QUANTILE_SLOPE_HI = 21.35;    // median 15.248 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -524,6 +546,23 @@ const PST_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // linear-scan foil stays on the small O(n^2)-affordable sweep.
 const MST_SWEEP = [13, 14, 15, 16, 17, 18].map((k) => 2 ** k);
 const MST_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// WaveletTree's gated quantile sweep: EXACT powers of two 2^12..2^18. A quantile descends the
+// ceil(log2 sigma) levels; with sigma ~ n (a ~n-distinct source) the level count is floor(log2 n), so
+// exact powers keep it an integer and the staircase maps cleanly onto the continuous log2(n) axis. The
+// bottom starts at 2^12 (NOT 2^11): the 2^11 point is too fast + noisy and drops R^2 near the floor (the
+// SortedArray / SplayTree "drop the too-fast low point" lesson). The top is pinned at 2^18: above it the
+// level-packed bitvectors + rank index leave the steady cache band and DRAM latency curves the fit
+// (lite-o1 ADR-0004). It fits the DEFAULT log2(n) axis (a single log -- each level step is an O(1)
+// _rank1, NOT a per-node binary search, so NOT the squared-log MergeSortTree uses). Its O(n log n)
+// linear-kth foil stays on the small O(n^2)-affordable sweep.
+const WT_SWEEP = [12, 13, 14, 15, 16, 17, 18].map((k) => 2 ** k);
+const WT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// WaveletTree.quantile gates on the MEDIAN of WT_FIT_RUNS independent sweep-fits (the registry `fitRuns`
+// hook), same mechanism as MergeSortTree / PST: the witness runs right after torture (2M+ ops across 17
+// members), whose scheduler / thermal residue tilts the occasional sweep; the median-of-fits rejects it.
+// Odd so the median is a real sample. Measurement-quality only: the frozen 0.958 floor and the slope band
+// are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
+const WT_FIT_RUNS = 7;
 // MergeSortTree.countLE gates on the MEDIAN of MST_FIT_RUNS independent sweep-fits (the registry
 // `fitRuns` hook), same mechanism as Fenwick2D / SegmentTree.update / PST: the witness runs right after
 // torture (2M+ ops across 16 members), whose scheduler / thermal residue tilts the occasional sweep;
@@ -1431,6 +1470,69 @@ function measureMstCountLEFoil(n) {
     return elapsed / count;
 }
 
+// --- WaveletTree measurement (quantile hot op + its O(n log n) linear-kth foil) ---
+// The matrix is built OUTSIDE timing and held immutable at size n over a ~n-distinct source (so sigma ~ n
+// and the level count is floor(log2 n)); the timed window is the quantile descent only, over the WIDE
+// index window [1, n-2] with 1024 random order-statistic ranks k cycled so many descent paths are
+// averaged. Same min-over-batches discipline as SortedArray / MergeSortTree. WaveletTree has NO RNG on
+// the hot path, so its quantile line is a pure DETERMINISTIC worst-case O(log sigma) succinct-rank
+// descent (each level step is an O(1) _rank1, so it fits a SINGLE log, not the squared-log MST uses).
+const WT_ITERS = 200000;   // hammered ops per timed batch
+const WT_BATCH = 10;       // min-over-batches
+const WT_TARGETS = 1024;   // distinct random ranks cycled per batch (pow2 mask)
+
+// quantile: fold the widest gated window [1, n-2] for random order-statistic ranks. Return the MIN per-op.
+function measureWaveletQuantile(n) {
+    const rnd = mulberry32(0x1234 ^ n);
+    const vals = new Float64Array(n);
+    for (let i = 0; i < n; i++) vals[i] = (rnd() * n) | 0;   // ~n distinct -> sigma ~ n -> ~log2 n levels
+    const t = new WaveletTree(vals);
+    const lo = 1, hi = n - 2;
+    const span = hi - lo + 1;                                 // window size (>= 1 for n >= 3)
+    const ks = new Int32Array(WT_TARGETS);
+    const rk = mulberry32(0x5A17 ^ n);
+    for (let i = 0; i < WT_TARGETS; i++) ks[i] = (rk() * span) | 0;
+    let sink = 0;
+    for (let w = 0; w < WT_ITERS; w++) sink += t.quantile(lo, hi, ks[w & (WT_TARGETS - 1)]) | 0; // warm
+    let best = Infinity;
+    for (let b = 0; b < WT_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < WT_ITERS; i++) sink += t.quantile(lo, hi, ks[i & (WT_TARGETS - 1)]) | 0;
+        const e = (nowNs() - t0) / WT_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// quantile FOIL: the naive default before you know the wavelet trick -- copy the index window into a
+// scratch buffer, SORT it, and index the k-th. O(m log m) per query (m = window size ~ n), so on the
+// log2(n) axis its per-op cost is super-linear and a straight-line fit MUST MISS the R^2 floor. O(n^2 log
+// n) total, so the sweep stays small.
+function measureWaveletQuantileFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    const rnd = mulberry32(0x2c3d ^ n);
+    for (let i = 0; i < n; i++) a[i] = (rnd() * n) | 0;
+    const m = n - 2;                                          // window [1, n-2] size
+    const scratch = new Float64Array(m);
+    { for (let j = 0; j < m; j++) scratch[j] = a[1 + j]; scratch.sort(); if (scratch[0] < -1) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0, kk = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            for (let j = 0; j < m; j++) scratch[j] = a[1 + j];
+            scratch.sort();                                  // O(m log m)
+            sink += scratch[kk % m] | 0;
+            kk++;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- PersistentSegTree measurement (query hot op + its O(n) linear-scan foil) -
 // The tree is built OUTSIDE timing: v0 plus PST_VERS path-copying updates so several versions
 // coexist, then the timed window is the range query [1, n-2] over a RANDOM existing version
@@ -2214,10 +2316,27 @@ export const MEMBERS = [
         // median-of-MST_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
         fitRuns: MST_FIT_RUNS,
     },
+    {
+        name: 'WaveletTree',
+        op: 'quantile',
+        sweep: WT_SWEEP,
+        foilSweep: WT_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0019 inherits D-08)
+        slopeLo: WT_QUANTILE_SLOPE_LO,         // own band (DEFAULT log2 axis -- a single log)
+        slopeHi: WT_QUANTILE_SLOPE_HI,
+        run: measureWaveletQuantile,
+        foil: measureWaveletQuantileFoil,
+        foilName: 'linear-kth (copy window, sort, index k -- O(n log n) per query)',
+        // MEDIAN-OF-FITS (0019, measurement-quality only): a quantile descent reads TWO succinct ranks
+        // per level across the level-packed bitvectors + rank index, so a single fit's R^2 can dip below
+        // the floor in a minority of post-torture runs; the median-of-WT_FIT_RUNS clears it reliably.
+        // Floor + band unchanged; an O(n) shape fails every fit.
+        fitRuns: WT_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.0.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.1.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

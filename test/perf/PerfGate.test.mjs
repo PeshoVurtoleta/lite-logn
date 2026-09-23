@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1481,6 +1481,105 @@ const mstRangeCountChurn = {
     statsOf(s) { return { grows: mstGrows(s) }; },
 };
 
+/** WaveletTree's zero-alloc counter: its single flat Uint32Array bitvector word table, fixed at
+ *  construction and IMMUTABLE, so the delta across the window must be 0 -- access / rank / select /
+ *  quantile / rangeCount are read-only succinct-rank descents using only local scalars. */
+function wtGrows(s) { return s.wt._words.buffer.byteLength; }
+
+const WT_LEN = 1 << 12;         // 4096 elements
+const WTMASK = WT_LEN - 1;
+
+/** An immutable WaveletTree over WT_LEN values with ~WT_LEN distinct codes -- a warmed, stable matrix. */
+function wtFill() {
+    const vals = new Float64Array(WT_LEN);
+    for (let i = 0; i < WT_LEN; i++) vals[i] = (i * 2654435761) & WTMASK;
+    return WaveletTree.build(vals);
+}
+
+/** access churn: read the value at a cycling index -- a read-only O(log sigma) level descent, folded. */
+const wtAccessChurn = {
+    name: 'WaveletTree access churn (read-only, immutable matrix)',
+    setup() { return { wt: wtFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.wt;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.access(tick & WTMASK) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: wtGrows(s) }; },
+};
+
+/** rank churn: count a cycling value in a cycling prefix -- a read-only O(log sigma) range descent. */
+const wtRankChurn = {
+    name: 'WaveletTree rank churn (value-in-prefix count)',
+    setup() { return { wt: wtFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.wt;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.rank(tick & WTMASK, (tick & WTMASK) + 1) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: wtGrows(s) }; },
+};
+
+/** select churn: locate the 0th occurrence of a cycling value -- the UPWARD inverse descent (select0 /
+ *  select1 binary searches over _rank1), still zero-allocation (only local scalars). */
+const wtSelectChurn = {
+    name: 'WaveletTree select churn (inverse navigation)',
+    setup() { return { wt: wtFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.wt;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const r = t.select(tick & WTMASK, 0);
+            acc = (acc + (r === undefined ? 0 : r | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: wtGrows(s) }; },
+};
+
+/** quantile churn: the GATED witness op -- k-th smallest over a WIDE window for a cycling k, folded. */
+const wtQuantileChurn = {
+    name: 'WaveletTree quantile churn (range k-th smallest, the gated op)',
+    setup() { return { wt: wtFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.wt;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.quantile(1, WT_LEN - 2, tick & (WTMASK >> 1)) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: wtGrows(s) }; },
+};
+
+/** rangeCount churn: count a cycling value-window within a cycling index sub-range -- countLT(vhi) -
+ *  countLT(vlo) over the code range, read-only O(log sigma), zero-allocation. */
+const wtRangeCountChurn = {
+    name: 'WaveletTree rangeCount churn (value-window in index range)',
+    setup() { return { wt: wtFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.wt;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = tick & (WTMASK >> 1);
+            acc = (acc + (t.rangeCount(lo, lo + 100, 0, tick & WTMASK) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: wtGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1525,6 +1624,7 @@ zgcSuite({
         st2UpdateChurn, st2QueryChurn, st2AtQueryMix,
         saGetChurn, saSetChurn, saShiftChurn, saOrderMix,
         pstQueryChurn, pstAtChurn, pstUpdateChurn,
-        mstCountLEChurn, mstRangeCountChurn],
+        mstCountLEChurn, mstRangeCountChurn,
+        wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn],
     mustFail: [teethMustFailAlloc],
 });

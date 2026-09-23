@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 1.0.0 at the 1.0.0 release', () => {
-    assert.equal(VERSION, '1.0.0');
+test('VERSION is exactly 1.1.0 at the 1.1.0 release', () => {
+    assert.equal(VERSION, '1.1.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (16 members) --------
+// --- frozen export surface: VERSION + the shipped members (17 members) --------
 
-test('LogN.js exports exactly VERSION + the sixteen members at v1.0.0', () => {
+test('LogN.js exports exactly VERSION + the seventeen members at v1.1.0', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the sixteen members incl MergeSortTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the seventeen members incl WaveletTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -60,6 +60,7 @@ test('LogN.js exports exactly VERSION + the sixteen members at v1.0.0', () => {
     assert.equal(typeof LogNModule.SortedArray, 'function');
     assert.equal(typeof LogNModule.PersistentSegTree, 'function');
     assert.equal(typeof LogNModule.MergeSortTree, 'function');
+    assert.equal(typeof LogNModule.WaveletTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -965,4 +966,70 @@ test('MergeSortTree fails closed with a [lite-logn]-tagged throw on every coerci
     // MergeSortTree is STATIC / immutable: it deliberately has NO mutators / clear.
     assert.equal(typeof t.set, 'undefined', 'MergeSortTree has no set (immutable, build-once)');
     assert.equal(typeof t.clear, 'undefined', 'MergeSortTree has no clear (immutable, build-once)');
+});
+
+// --- WaveletTree (v1.1.0): coercion + [lite-logn] fail-closed tag --------------
+
+test('WaveletTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { WaveletTree } = LogNModule;
+    // build / ctor: non-array-like source (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [null, undefined, 42, 'abc', true, Symbol('x'), 5n, {}]) {
+        assert.throws(() => WaveletTree.build(bad), /\[lite-logn\]/, 'build ' + String(bad));
+        assert.throws(() => new WaveletTree(bad), /\[lite-logn\]/, 'ctor ' + String(bad));
+    }
+    // out-of-range length
+    assert.throws(() => WaveletTree.build([]), /\[lite-logn\]/, 'empty');
+    assert.throws(() => WaveletTree.build({ length: 1.5 }), /\[lite-logn\]/, 'length 1.5');
+    assert.throws(() => WaveletTree.build({ length: 0x80000000, 0: 1 }), /\[lite-logn\]/, 'length above 2^31-1');
+    // non-finite entry, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n, true]) {
+        assert.throws(() => WaveletTree.build([1, 2, bad, 4]), /\[lite-logn\]/, 'entry ' + String(bad));
+    }
+    const wt = WaveletTree.build([5, 3, 9, 1, 7, 3]);
+    // access bad index (typeof-first), out-of-range
+    for (const bad of [1.5, NaN, Infinity, '2', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => wt.access(bad), /\[lite-logn\]/, 'access ' + String(bad));
+    }
+    assert.throws(() => wt.access(-1), /\[lite-logn\]/, 'access lo < 0');
+    assert.throws(() => wt.access(6), /\[lite-logn\]/, 'access >= length');
+    // rank bad value / bad i; +-Infinity are legal absent-value queries
+    for (const bad of [NaN, '3', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => wt.rank(bad, 3), /\[lite-logn\]/, 'rank value ' + String(bad));
+    }
+    for (const bad of [1.5, NaN, Infinity, '3', null, undefined, {}, Symbol('i'), 3n, -1, 7]) {
+        assert.throws(() => wt.rank(3, bad), /\[lite-logn\]/, 'rank i ' + String(bad));
+    }
+    assert.equal(wt.rank(Infinity, 6), 0);
+    assert.equal(wt.rank(-Infinity, 6), 0);
+    // select bad value / bad k; absent value + OOB k are undefined (a consistent read, not a throw)
+    for (const bad of [NaN, '3', null, undefined, {}, Symbol('v'), 3n]) {
+        assert.throws(() => wt.select(bad, 0), /\[lite-logn\]/, 'select value ' + String(bad));
+    }
+    for (const bad of [-1, 1.5, NaN, Infinity, '0', null, undefined, {}, Symbol('k'), 3n]) {
+        assert.throws(() => wt.select(3, bad), /\[lite-logn\]/, 'select k ' + String(bad));
+    }
+    assert.equal(wt.select(42, 0), undefined, 'absent value -> undefined');
+    assert.equal(wt.select(3, 5), undefined, 'OOB k -> undefined');
+    // quantile bad indices / k, out-of-range, inverted range
+    for (const bad of [1.5, NaN, Infinity, '2', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => wt.quantile(bad, 4, 0), /\[lite-logn\]/, 'quantile lo ' + String(bad));
+        assert.throws(() => wt.quantile(0, bad, 0), /\[lite-logn\]/, 'quantile hi ' + String(bad));
+        assert.throws(() => wt.quantile(0, 4, bad), /\[lite-logn\]/, 'quantile k ' + String(bad));
+    }
+    assert.throws(() => wt.quantile(-1, 4, 0), /\[lite-logn\]/, 'quantile lo < 0');
+    assert.throws(() => wt.quantile(0, 6, 0), /\[lite-logn\]/, 'quantile hi >= length');
+    assert.throws(() => wt.quantile(3, 2, 0), /\[lite-logn\]/, 'quantile lo > hi');
+    assert.throws(() => wt.quantile(0, 4, 5), /\[lite-logn\]/, 'quantile k > hi - lo');
+    // rangeCount bad indices / NaN bounds / inverted window; +-Infinity legal
+    assert.throws(() => wt.rangeCount(1.5, 4, 1, 9), /\[lite-logn\]/, 'rangeCount lo non-integer');
+    assert.throws(() => wt.rangeCount(0, 6, 1, 9), /\[lite-logn\]/, 'rangeCount hi >= length');
+    assert.throws(() => wt.rangeCount(0, 4, NaN, 9), /\[lite-logn\]/, 'rangeCount vlo NaN');
+    assert.throws(() => wt.rangeCount(0, 4, 1, NaN), /\[lite-logn\]/, 'rangeCount vhi NaN');
+    assert.throws(() => wt.rangeCount(0, 4, Symbol('x'), 9), /\[lite-logn\]/, 'rangeCount vlo Symbol');
+    assert.throws(() => wt.rangeCount(0, 4, 1, 9n), /\[lite-logn\]/, 'rangeCount vhi BigInt');
+    assert.throws(() => wt.rangeCount(0, 4, 9, 1), /\[lite-logn\]/, 'rangeCount vlo > vhi');
+    assert.equal(wt.rangeCount(0, 5, -Infinity, Infinity), 6);
+    // WaveletTree is STATIC / immutable: it deliberately has NO mutators / clear.
+    assert.equal(typeof wt.set, 'undefined', 'WaveletTree has no set (immutable, build-once)');
+    assert.equal(typeof wt.clear, 'undefined', 'WaveletTree has no clear (immutable, build-once)');
 });

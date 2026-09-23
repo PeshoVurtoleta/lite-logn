@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -6722,6 +6722,550 @@ export class MergeSortTree {
     _badValueWindow(vlo, vhi) {
         throw new RangeError(
             '[lite-logn] MergeSortTree rangeCount needs vlo <= vhi, got vlo=' + String(vlo) +
+            ' vhi=' + String(vhi));
+    }
+}
+
+// WaveletTree (v1.1.0 session) -- a STATIC, IMMUTABLE WAVELET MATRIX for offline access / rank / select
+// / range k-th-smallest (quantile) / range value-window count over a fixed sequence, in O(log sigma).
+
+/**
+ * Max WaveletTree element count: `0x7FFFFFFF` (2^31 - 1). The real ceiling on a large instance is the
+ * level-packed bitvector WORD count (levels x ceil(n / 32) cells), guarded separately by WT_MAX_CELLS;
+ * this is the clean per-argument door for `length` (the source array's length) itself.
+ */
+const WT_MAX_LENGTH = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * Max WaveletTree bitvector WORD count: `0x7FFFFFFF` (2^31 - 1). Every 32-bit word is addressed by a
+ * flat offset into the single `_words` Uint32Array (`level * wordsPerLevel + w`), so the total must fit
+ * a positive int32. The word count is a PRODUCT (`levels * ceil(n / 32)`, levels = ceil(log2 distinct)),
+ * so the guard uses a FLOAT multiply (never `| 0`, which would wrap a large product to a small /
+ * negative int and pass the door -> under-allocation -> OOB): the float product is exact to 2^53, so a
+ * genuine overflow of this ceiling fails CLOSED (the MST_MAX_CELLS / PST_MAX_NODES lesson -- null is not
+ * zero).
+ */
+const WT_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/** Words per succinct rank BLOCK (128 bits = 4 x 32-bit words). The cumulative-popcount index stores one
+ *  running count per block, so its overhead is ~0.25x the bitvectors (total ~1.25x); `_rank1` sums at
+ *  most three whole-word popcounts + one partial-word popcount off a block base -- O(1), branch-light. */
+const WT_BLOCK_WORDS = 4;
+
+/**
+ * @private
+ * Broadword population count of a 32-bit pattern (the ONLY hot primitive `_rank1` leans on beyond a
+ * typed-array read). Uses `>>>` throughout so a word with bit 31 set (a JS number > 2^31, or an int32
+ * that went negative) counts correctly. Pure, allocation-free, branchless.
+ * @param {number} x
+ * @returns {number}
+ */
+function wtPopcount32(x) {
+    x = x - ((x >>> 1) & 0x55555555);
+    x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+    x = (x + (x >>> 4)) & 0x0f0f0f0f;
+    return (Math.imul(x, 0x01010101) >>> 24);
+}
+
+/**
+ * A STATIC, IMMUTABLE WAVELET MATRIX (Claude / Navarro): the family's FIRST post-1.0 exotic and its
+ * FIRST structure that answers the range ORDER STATISTIC (k-th smallest in an index range) -- the query
+ * MergeSortTree (decisions/0018) deliberately deferred here. It coordinate-compresses arbitrary FINITE
+ * numbers to distinct ranks at build, then lays the compressed sequence out as LEVEL-WISE flat
+ * bitvectors -- one concatenated n-bit bitvector per level (ceil(log2 distinct) levels), each with a
+ * per-level zero-count `Z[l]` and a succinct O(1)-rank index -- and answers, all zero-allocation:
+ *   - `access(i)`            -> the value at index i                                   (O(log sigma))
+ *   - `rank(value, i)`       -> count of `value` in the prefix [0, i)                  (O(log sigma))
+ *   - `select(value, k)`     -> index of the k-th (0-based) occurrence of `value`      (O(log sigma . log n))
+ *   - `quantile(lo, hi, k)`  -> the k-th smallest VALUE in INDEX range [lo, hi] INCL   (O(log sigma))
+ *   - `rangeCount(lo, hi, vlo, vhi)` -> count of values in [vlo, vhi] INCL among
+ *                               indices [lo, hi] INCL                                  (O(log sigma))
+ * It is a STATIC member under the family's static-member honesty contract (SparseTable / MergeSortTree /
+ * lite-o1 static-members-admitted): the source is COMPRESSED + COPIED in at construction, there are NO
+ * mutators, and every query is a read-only bitvector descent. BUILD is O(n log sigma) and SPACE is
+ * `n * levels` bits + the rank index (~1.25x the bitvectors) + the distinct remap table -- both a
+ * DISCLOSED co-headline, never hidden. sigma = distinct value count; levels = ceil(log2 sigma).
+ *
+ * THE LOAD-BEARING IDIOM (decisions/0019): the succinct BITVECTOR with O(1) rank. Each level's n bits
+ * live in a flat `Uint32Array` word region (`level * wordsPerLevel + w`); a cumulative block popcount
+ * index (`_blk`, one running count per WT_BLOCK_WORDS-word block) makes `_rank1(level, pos)` = "ones in
+ * [0, pos) of this level" an O(1) read + <=3 whole-word popcounts + one partial. access / rank / quantile
+ * / rangeCount are branchless level-descents over `_rank1` (0 B/op, no doors / throws INSIDE the
+ * descent -- all validation is at the method entry, on the cold path). `select` is the one NON-symmetric
+ * descent: it computes the code's block start at the bottom level, then climbs back UP with binary-search
+ * select0 / select1 primitives (rank-to-position inverses) -- O(log sigma . log n), still zero-alloc.
+ *
+ * Fail closed on every unverified state: the source must be an array-like of FINITE numbers (typeof-
+ * guarded FIRST -- Symbol / BigInt / NaN / +-Infinity each throw `[lite-logn]`; null is not zero), the
+ * length must be an integer in [1, WT_MAX_LENGTH], and the `levels * ceil(n / 32)` word product is
+ * guarded by a FLOAT multiply against WT_MAX_CELLS. Query bounds are integers with `0 <= lo <= hi < n`;
+ * a prefix `i` is an integer in `[0, n]`; a select `k` is a non-negative integer; a quantile `k` is an
+ * integer in `[0, hi - lo]`; value / bound args are numbers (NaN throws; +-Infinity is a legal
+ * threshold). A `value` not present yields rank 0 / select undefined (a consistent read, not a throw);
+ * bad indices / ranges / types throw `[lite-logn]` via cold-path builders off the hot body.
+ */
+export class WaveletTree {
+    /**
+     * Build the immutable wavelet matrix from a snapshot of `values` (coordinate-compressed + COPIED in
+     * -- mutating the caller's array afterward never changes a result). O(n log sigma) build. COLD path;
+     * fails closed BEFORE the structure is usable on a non-array-like input, a length outside
+     * [1, WT_MAX_LENGTH], a word product over WT_MAX_CELLS, or any non-finite entry (typeof-first).
+     * @param {ArrayLike<number>} values  finite numbers (any order); indexed 0..length-1
+     */
+    constructor(values) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError(
+                '[lite-logn] WaveletTree needs an array-like of finite numbers');
+        }
+        const n = values.length;
+        if (!Number.isInteger(n) || n < 1 || n > WT_MAX_LENGTH) {
+            throw new RangeError(
+                '[lite-logn] WaveletTree length must be an integer in [1, 2^31-1], got ' + String(n));
+        }
+        // Snapshot + validate finite (typeof-first; Symbol / BigInt / NaN / +-Infinity fail closed).
+        const src = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] WaveletTree value must be a finite number, got ' + String(v));
+            }
+            src[i] = v;
+        }
+        // Coordinate-compress: sort a copy, dedupe in place -> the distinct remap table (sorted ascending).
+        const sorted = src.slice();
+        sorted.sort();                        // TypedArray.sort is NUMERIC (no comparator needed)
+        let sigma = 0;
+        for (let i = 0; i < n; i++) {
+            const v = sorted[i];
+            if (sigma === 0 || v !== sorted[sigma - 1]) sorted[sigma++] = v;
+        }
+        const remap = sorted.slice(0, sigma); // the actual distinct values, ascending; code == index here
+        // levels = ceil(log2 sigma) via an EXACT float loop (never `1 << k`, which wraps at k >= 31, and
+        // never Math.log2, which can mis-round a power of two). At least ONE level so the layout is uniform.
+        let bitlen = 0;
+        while (2 ** bitlen < sigma) bitlen++;
+        const L = bitlen === 0 ? 1 : bitlen;
+        const wpl = Math.ceil(n / 32);        // 32-bit words per level's bitvector
+        // FLOAT product guard (never `| 0`): the exact word product fails CLOSED on overflow.
+        const cells = L * wpl;
+        if (cells > WT_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] WaveletTree word budget ' + cells + ' (levels ' + L +
+                ' x wordsPerLevel ' + wpl + ') exceeds ' + WT_MAX_CELLS);
+        }
+        const blocks = Math.ceil(wpl / WT_BLOCK_WORDS);
+        const blkStride = blocks + 1;         // +1 for the per-level total sentinel (= rank1(l, n))
+        const words = new Uint32Array(cells);
+        const Z = new Int32Array(L);
+        const blk = new Uint32Array(L * blkStride);
+        // Compress every source value to its code (its index in `remap`, an exact-match binary search).
+        const codes = new Int32Array(n);
+        for (let i = 0; i < n; i++) {
+            const v = src[i];
+            let lo = 0, hi = sigma;
+            while (lo < hi) { const mid = (lo + hi) >>> 1; if (remap[mid] < v) lo = mid + 1; else hi = mid; }
+            codes[i] = lo;                    // remap[lo] === v (v is present by construction)
+        }
+        // Build the matrix level by level (MSB first): set each level's bits, count zeros, then STABLE-
+        // partition the codes (bit-0 elements first, bit-1 after, order-preserving) into the next level.
+        let cur = codes;
+        let nxt = new Int32Array(n);
+        for (let l = 0; l < L; l++) {
+            const bit = L - 1 - l;            // bit position tested at this level (MSB at level 0)
+            const base = l * wpl;
+            let zeros = 0;
+            for (let i = 0; i < n; i++) {
+                const b = (cur[i] >>> bit) & 1;
+                if (b) words[base + (i >>> 5)] |= (1 << (i & 31));
+                else zeros++;
+            }
+            Z[l] = zeros;
+            let z = 0, o = zeros;             // stable partition destinations
+            for (let i = 0; i < n; i++) {
+                const c = cur[i];
+                if ((c >>> bit) & 1) nxt[o++] = c;
+                else nxt[z++] = c;
+            }
+            const t = cur; cur = nxt; nxt = t;
+        }
+        // Build the cumulative block-popcount rank index: blk[l*stride + b] = ones in level l words
+        // [0, b*BLOCK_WORDS); blk[l*stride + blocks] = the level total (the rank1(l, n) sentinel).
+        for (let l = 0; l < L; l++) {
+            const base = l * wpl;
+            const bbase = l * blkStride;
+            let acc = 0;
+            for (let b = 0; b < blocks; b++) {
+                blk[bbase + b] = acc;
+                const w0 = b * WT_BLOCK_WORDS;
+                const w1 = w0 + WT_BLOCK_WORDS < wpl ? w0 + WT_BLOCK_WORDS : wpl;
+                for (let w = w0; w < w1; w++) acc += wtPopcount32(words[base + w]);
+            }
+            blk[bbase + blocks] = acc;
+        }
+        this._n = n;                          // element count (fixed)
+        this._sigma = sigma;                  // distinct value count
+        this._levels = L;                     // ceil(log2 sigma), >= 1
+        this._wpl = wpl;                      // 32-bit words per level
+        this._blkStride = blkStride;          // blocks + 1
+        this._blocks = blocks;                // blocks per level
+        this._bits = n * L;                   // disclosed bit count (n per level x levels)
+        this._words = words;                  // the flat level-packed bitvectors
+        this._blk = blk;                      // the cumulative block-popcount rank index
+        this._Z = Z;                          // per-level zero count
+        this._remap = remap;                  // sorted distinct values (code -> value)
+    }
+
+    /** Element count (the source length). O(1). */
+    get length() { return this._n; }
+
+    /** Element count -- the family-spine alias of `length`. O(1). */
+    get size() { return this._n; }
+
+    /** Level count `ceil(log2 distinct)` (>= 1) -- the descent depth of every query. O(1). */
+    get levels() { return this._levels; }
+
+    /** Distinct value count (sigma) -- the compressed alphabet size. O(1). */
+    get distinct() { return this._sigma; }
+
+    /** Total bitvector bit count (`n * levels`) -- the disclosed O(n log sigma) space co-headline. O(1). */
+    get bits() { return this._bits; }
+
+    /**
+     * @private
+     * THE hot primitive: count of set bits (ones) in level `level`'s bitvector positions `[0, pos)`.
+     * O(1): a cumulative block-popcount read + at most WT_BLOCK_WORDS-1 whole-word popcounts + one
+     * partial-word popcount. No validation, no allocation -- callers validate at their (cold) entry.
+     * @param {number} level  level index in [0, levels)
+     * @param {number} pos    bit position in [0, n]
+     * @returns {number} ones in [0, pos)
+     */
+    _rank1(level, pos) {
+        const words = this._words;
+        const base = level * this._wpl;
+        const w = pos >>> 5;                              // word holding bit `pos`
+        const b = w >>> 2;                                // block index (WT_BLOCK_WORDS = 4 words)
+        let r = this._blk[level * this._blkStride + b];
+        const wend = base + w;
+        for (let k = base + (b << 2); k < wend; k++) r += wtPopcount32(words[k]);
+        const rem = pos & 31;
+        if (rem !== 0) r += wtPopcount32(words[base + w] & ((1 << rem) - 1));
+        return r;
+    }
+
+    /**
+     * @private
+     * Position of the (`j`)-th ONE (0-based) in level `level`'s bitvector. Binary search over `_rank1`
+     * (O(log n), each step O(1)); zero-allocation. Caller guarantees 0 <= j < ones-in-level.
+     * @param {number} level
+     * @param {number} j
+     * @returns {number}
+     */
+    _select1(level, j) {
+        let lo = 0, hi = this._n - 1;
+        const target = j + 1;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (this._rank1(level, mid + 1) >= target) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
+
+    /**
+     * @private
+     * Position of the (`j`)-th ZERO (0-based) in level `level`'s bitvector. The rank0 twin of `_select1`
+     * (rank0(l, p) = p - rank1(l, p)). Binary search, O(log n); zero-allocation.
+     * @param {number} level
+     * @param {number} j
+     * @returns {number}
+     */
+    _select0(level, j) {
+        let lo = 0, hi = this._n - 1;
+        const target = j + 1;
+        while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if ((mid + 1) - this._rank1(level, mid + 1) >= target) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
+
+    /**
+     * The VALUE stored at index `i`. Worst-case O(log sigma): descend the levels, at each choosing the
+     * 0- or 1-branch by the bit under `i`, then un-map the accumulated code to the actual value. Zero-
+     * allocation. Fails closed: `i` must be an integer in `[0, length)`. typeof-guarded FIRST.
+     * @param {number} i  index, integer in [0, length)
+     * @returns {number} the value at index i
+     */
+    access(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i)) return this._badIndex('access', i);
+        const n = this._n;
+        if (i < 0 || i >= n) return this._badIndex('access', i);
+        const L = this._levels, Z = this._Z;
+        let pos = i, code = 0;
+        for (let l = 0; l < L; l++) {
+            const bit = (this._words[l * this._wpl + (pos >>> 5)] >>> (pos & 31)) & 1;
+            if (bit) pos = Z[l] + this._rank1(l, pos);
+            else pos = pos - this._rank1(l, pos);
+            code = (code << 1) | bit;
+        }
+        return this._remap[code];
+    }
+
+    /**
+     * Count of `value` in the PREFIX `[0, i)`. Worst-case O(log sigma): map `value` to its code (exact-
+     * match binary search over the remap; absent -> 0) then track the range `[0, i)` down the levels.
+     * Zero-allocation. Fails closed: `value` a number (NaN throws; +-Infinity legal), `i` an integer in
+     * `[0, length]`. typeof-guarded FIRST.
+     * @param {number} value  the value to count (need not be present)
+     * @param {number} i      prefix end (exclusive), integer in [0, length]
+     * @returns {number} occurrences of `value` in indices [0, i)
+     */
+    rank(value, i) {
+        if (typeof value !== 'number' || Number.isNaN(value) ||
+            typeof i !== 'number' || !Number.isInteger(i)) return this._badRank(value, i);
+        const n = this._n;
+        if (i < 0 || i > n) return this._badRank(value, i);
+        const code = this._codeOf(value);
+        if (code < 0 || i === 0) return 0;
+        const L = this._levels, Z = this._Z;
+        let lo = 0, hi = i;
+        for (let l = 0; l < L; l++) {
+            const bit = (code >>> (L - 1 - l)) & 1;
+            if (bit) { lo = Z[l] + this._rank1(l, lo); hi = Z[l] + this._rank1(l, hi); }
+            else { lo = lo - this._rank1(l, lo); hi = hi - this._rank1(l, hi); }
+        }
+        return hi - lo;
+    }
+
+    /**
+     * Index of the k-th (0-based) occurrence of `value`, or `undefined` if `value` is absent or has
+     * fewer than k+1 occurrences (a consistent read, NOT a throw -- the "value not present" contract).
+     * Worst-case O(log sigma . log n): find the code's block start at the bottom level, then climb UP
+     * with binary-search select0 / select1 inverses (the one non-symmetric descent). Zero-allocation.
+     * Fails closed on a BAD ARGUMENT (throws): `value` a number (NaN throws), `k` a non-negative integer.
+     * @param {number} value  the value whose occurrence to locate
+     * @param {number} k      occurrence index, 0-based non-negative integer
+     * @returns {number|undefined} the index, or undefined if absent / out of range
+     */
+    select(value, k) {
+        if (typeof value !== 'number' || Number.isNaN(value) ||
+            typeof k !== 'number' || !Number.isInteger(k) || k < 0) return this._badSelect(value, k);
+        const code = this._codeOf(value);
+        if (code < 0) return undefined;
+        if (k >= this.rank(value, this._n)) return undefined;   // fewer than k+1 occurrences
+        const L = this._levels, Z = this._Z;
+        // Descend to the code's block START at the bottom level (rank from 0 down the code's branches).
+        let cur = 0;
+        for (let l = 0; l < L; l++) {
+            const bit = (code >>> (L - 1 - l)) & 1;
+            if (bit) cur = Z[l] + this._rank1(l, cur);
+            else cur = cur - this._rank1(l, cur);
+        }
+        // The k-th occurrence is bottom position cur + k; climb back up, inverting each level's transform.
+        let pos = cur + k;
+        for (let l = L - 1; l >= 0; l--) {
+            const bit = (code >>> (L - 1 - l)) & 1;
+            if (bit) pos = this._select1(l, pos - Z[l]);
+            else pos = this._select0(l, pos);
+        }
+        return pos;
+    }
+
+    /**
+     * The k-th smallest VALUE (0-based) in the INDEX range `[lo, hi]` INCLUSIVE. THE gated witness op:
+     * worst-case O(log sigma) -- descend the levels, at each counting the range's 0-branch size and going
+     * left if `k` lands there, else subtracting it and going right; the accumulated code un-maps to the
+     * actual value. Zero-allocation. Fails closed: `lo` / `hi` integers with `0 <= lo <= hi < length`;
+     * `k` an integer in `[0, hi - lo]`. typeof-guarded FIRST.
+     * @param {number} lo  index range start, integer in [0, length)
+     * @param {number} hi  index range end (inclusive), integer in [lo, length)
+     * @param {number} k   order statistic, integer in [0, hi - lo]
+     * @returns {number} the k-th smallest value in indices [lo, hi]
+     */
+    quantile(lo, hi, k) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi) ||
+            typeof k !== 'number' || !Number.isInteger(k)) return this._badQuantile(lo, hi, k);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi || k < 0 || k > hi - lo) return this._badQuantileRange(lo, hi, k);
+        const L = this._levels, Z = this._Z;
+        let a = lo, b = hi + 1, code = 0, kk = k;
+        for (let l = 0; l < L; l++) {
+            const a1 = this._rank1(l, a), b1 = this._rank1(l, b);
+            const zerosInRange = (b - a) - (b1 - a1);       // 0-branch size within [a, b)
+            if (kk < zerosInRange) {
+                a = a - a1; b = b - b1;                       // go left (rank0)
+                code = code << 1;
+            } else {
+                kk -= zerosInRange;
+                a = Z[l] + a1; b = Z[l] + b1;                // go right (rank1)
+                code = (code << 1) | 1;
+            }
+        }
+        return this._remap[code];
+    }
+
+    /**
+     * Count of stored values in the VALUE-window `[vlo, vhi]` INCLUSIVE within the INDEX range
+     * `[lo, hi]` INCLUSIVE. Worst-case O(log sigma): `countLT(vhi_upper) - countLT(vlo)` over the code
+     * range, each an O(log sigma) branch walk. Zero-allocation. Fails closed: `lo` / `hi` integers with
+     * `0 <= lo <= hi < length`; `vlo` / `vhi` numbers (not NaN) with `vlo <= vhi`. typeof-guarded FIRST.
+     * @param {number} lo   index range start, integer in [0, length)
+     * @param {number} hi   index range end (inclusive), integer in [lo, length)
+     * @param {number} vlo  value-window lower bound (inclusive; not NaN)
+     * @param {number} vhi  value-window upper bound (inclusive; not NaN)
+     * @returns {number} count of values in [vlo, vhi] among indices [lo, hi]
+     */
+    rangeCount(lo, hi, vlo, vhi) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi) ||
+            typeof vlo !== 'number' || Number.isNaN(vlo) ||
+            typeof vhi !== 'number' || Number.isNaN(vhi)) return this._badWindow(lo, hi, vlo, vhi);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi) return this._badRangeIdx(lo, hi);
+        if (vlo > vhi) return this._badValueWindow(vlo, vhi);
+        // Map the value window to a half-open CODE range [cLo, cHi): distinct values strictly < vlo, and
+        // distinct values <= vhi. Values in [vlo, vhi] are exactly the codes in [cLo, cHi).
+        const cLo = this._lowerCode(vlo);
+        const cHi = this._upperCode(vhi);
+        if (cLo >= cHi) return 0;
+        const a = lo, b = hi + 1;
+        return this._countLT(a, b, cHi) - this._countLT(a, b, cLo);
+    }
+
+    /**
+     * @private
+     * Count of elements in positions `[a, b)` whose code is strictly `< c` (c a code threshold in
+     * `[0, sigma]`). O(log sigma): follow c's bits, adding the whole 0-branch whenever c's bit is 1.
+     * Zero-allocation.
+     * @param {number} a  range start (inclusive)
+     * @param {number} b  range end (exclusive)
+     * @param {number} c  code threshold
+     * @returns {number}
+     */
+    _countLT(a, b, c) {
+        if (c <= 0) return 0;
+        if (c >= this._sigma) return b - a;
+        const L = this._levels, Z = this._Z;
+        let res = 0;
+        for (let l = 0; l < L; l++) {
+            const a1 = this._rank1(l, a), b1 = this._rank1(l, b);
+            const a0 = a - a1, b0 = b - b1;                 // 0-branch positions
+            if ((c >>> (L - 1 - l)) & 1) {
+                res += b0 - a0;                             // whole 0-branch is < c; then follow the 1-branch
+                a = Z[l] + a1; b = Z[l] + b1;
+            } else {
+                a = a0; b = b0;                             // follow the 0-branch; 1-branch is > c
+            }
+        }
+        return res;
+    }
+
+    /**
+     * @private
+     * Code (index into `_remap`) of `value` by exact-match binary search, or -1 if `value` is not a
+     * stored distinct value. Off the hot descent (called once per rank / select entry).
+     * @param {number} value
+     * @returns {number}
+     */
+    _codeOf(value) {
+        const r = this._remap, s = this._sigma;
+        let lo = 0, hi = s;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (r[mid] < value) lo = mid + 1; else hi = mid; }
+        return (lo < s && r[lo] === value) ? lo : -1;
+    }
+
+    /**
+     * @private
+     * Count of distinct values strictly `< value` (the code range's lower bound). O(log sigma).
+     * @param {number} value
+     * @returns {number}
+     */
+    _lowerCode(value) {
+        const r = this._remap;
+        let lo = 0, hi = this._sigma;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (r[mid] < value) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+
+    /**
+     * @private
+     * Count of distinct values `<= value` (the code range's exclusive upper bound). O(log sigma).
+     * @param {number} value
+     * @returns {number}
+     */
+    _upperCode(value) {
+        const r = this._remap;
+        let lo = 0, hi = this._sigma;
+        while (lo < hi) { const mid = (lo + hi) >>> 1; if (r[mid] <= value) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+
+    /**
+     * Build the immutable wavelet matrix from `values` (a snapshot is coordinate-compressed + COPIED in).
+     * The idiomatic factory; equal to `new WaveletTree(values)`. O(n log sigma). Same fail-closed doors.
+     * @param {ArrayLike<number>} values  finite numbers (any order)
+     * @returns {WaveletTree}
+     */
+    static build(values) {
+        return new WaveletTree(values);
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badIndex(op, i) {
+        throw new RangeError(
+            '[lite-logn] WaveletTree ' + op + ' needs an integer index in [0, ' + this._n +
+            '), got ' + String(i));
+    }
+
+    /** @private */
+    _badRank(value, i) {
+        throw new TypeError(
+            '[lite-logn] WaveletTree rank needs a numeric value and an integer i in [0, ' + this._n +
+            '], got value=' + String(value) + ' i=' + String(i));
+    }
+
+    /** @private */
+    _badSelect(value, k) {
+        throw new TypeError(
+            '[lite-logn] WaveletTree select needs a numeric value and a non-negative integer k, got value=' +
+            String(value) + ' k=' + String(k));
+    }
+
+    /** @private */
+    _badQuantile(lo, hi, k) {
+        throw new TypeError(
+            '[lite-logn] WaveletTree quantile needs integer lo / hi / k, got lo=' + String(lo) +
+            ' hi=' + String(hi) + ' k=' + String(k));
+    }
+
+    /** @private */
+    _badQuantileRange(lo, hi, k) {
+        throw new RangeError(
+            '[lite-logn] WaveletTree quantile needs 0 <= lo <= hi < ' + this._n +
+            ' and 0 <= k <= hi - lo, got lo=' + String(lo) + ' hi=' + String(hi) + ' k=' + String(k));
+    }
+
+    /** @private */
+    _badWindow(lo, hi, vlo, vhi) {
+        throw new TypeError(
+            '[lite-logn] WaveletTree rangeCount needs integer indices and numeric bounds, got lo=' +
+            String(lo) + ' hi=' + String(hi) + ' vlo=' + String(vlo) + ' vhi=' + String(vhi));
+    }
+
+    /** @private */
+    _badRangeIdx(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] WaveletTree needs integer indices 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badValueWindow(vlo, vhi) {
+        throw new RangeError(
+            '[lite-logn] WaveletTree rangeCount needs vlo <= vhi, got vlo=' + String(vlo) +
             ' vhi=' + String(vhi));
     }
 }
