@@ -2217,7 +2217,7 @@ export const MEMBERS = [
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.16.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.0.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

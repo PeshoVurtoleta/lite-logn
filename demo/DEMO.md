@@ -1,7 +1,7 @@
 # lite-logn demo -- blueprint (DEMO.md)
 
 Repo-only dev artifact (NEVER in package.json `files[]`). The demo demonstrates all
-SIXTEEN shipped members of `../LogN.js` (v0.16.0) across four thematic scenes, refactored
+SIXTEEN shipped members of `../LogN.js` (v1.0.0) across four thematic scenes, refactored
 onto the proven 4-file architecture of the lite-o1 demo. `LogN.js` stays BYTE-IDENTICAL:
 the demo READS the shipped classes, never modifies or re-implements them.
 
@@ -48,7 +48,7 @@ the demo READS the shipped classes, never modifies or re-implements them.
   EXPECTED/AMORTIZED members). `#profile` hash flag gates `@zakkster/lite-layout-profiler`
   (dev-only, never a dependency, never in `files[]`).
 - **`Demo.test.mjs`** -- the node:test HONESTY GATE: (a) FAITHFULNESS (16 oracle suites),
-  (b) VERSION-TRINITY (`kernels.VERSION === LogN.VERSION === package.json.version === '0.16.0'`),
+  (b) VERSION-TRINITY (`kernels.VERSION === LogN.VERSION === package.json.version === '1.0.0'`),
   (c) 0-B/op on every hot kernel (foils excluded + asserted to be the only allocators),
   (d) LAYOUT-DRIFT guard pinning the exact internal `_field` names each snapshot reads, so a
   future `LogN.js` rename fails loudly. Behind an entry-point guard, an opt-in headless
@@ -222,7 +222,7 @@ over randomized (lo,hi,x) triples; plus mutate-the-caller-array-after-build prov
 13. `index.html:profile` -- `#profile` hash flag dynamically importing
     `@zakkster/lite-layout-profiler` (dev-only, never a dependency, never in files[]).
 14. `Demo.test.mjs:faithfulness` -- the 16 per-member oracle suites above.
-15. `Demo.test.mjs:trinity` -- `kernels.VERSION === LogN.VERSION === package.json === '0.16.0'`.
+15. `Demo.test.mjs:trinity` -- `kernels.VERSION === LogN.VERSION === package.json === '1.0.0'`.
 16. `Demo.test.mjs:alloc` -- 0-B/op over every `stepXWorld` and every `snapshotX`; foils
     explicitly excluded AND asserted to be the only allocators.
 17. `Demo.test.mjs:pins` -- the layout-drift guard asserting each pinned `_field` exists and has
@@ -247,7 +247,7 @@ over randomized (lo,hi,x) triples; plus mutate-the-caller-array-after-build prov
    returns to zero (`_pool` active 0 for SkipList/Treap/Scapegoat/SplayTree/BinomialHeap/
    PairingHeap/FibonacciHeap), `size === 0` for all 16, PST `_next`/`_vcount` back to the fresh
    v0 state after `clear()`, heapUsed after cycle 10 within 64 KB of cycle 1.
-4. Version trinity is exactly `'0.16.0'` at all three sites, and `git diff --stat LogN.js` is
+4. Version trinity is exactly `'1.0.0'` at all three sites, and `git diff --stat LogN.js` is
    empty.
 5. Layout-drift pins pass for all 16; a scripted rename of any single pinned field makes
    Demo.test.mjs FAIL with a `[lite-logn-demo]` message -- verified by injection on >= 4

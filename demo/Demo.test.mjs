@@ -48,10 +48,10 @@ function u32(s) {
 // (b) VERSION TRINITY
 // =======================================================================================
 
-test('version trinity: kernels.VERSION === LogN.VERSION === package.json.version === 0.16.0', () => {
+test('version trinity: kernels.VERSION === LogN.VERSION === package.json.version === 1.0.0', () => {
     assert.equal(K.VERSION, LOGN_VERSION, 'kernels re-export must equal LogN.VERSION');
     assert.equal(K.VERSION, PKG.version, 'kernels VERSION must equal package.json version');
-    assert.equal(K.VERSION, '0.16.0', 'the version trinity must be exactly 0.16.0');
+    assert.equal(K.VERSION, '1.0.0', 'the version trinity must be exactly 1.0.0');
 });
 
 test('index.html reads VERSION via import, never a hardcoded version literal', () => {

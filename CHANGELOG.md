@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-23
+
+### Changed
+
+- **Promoted to 1.0.0 -- API stable, sixteen members frozen.** No shipped-code change since 0.16.0
+  other than the `VERSION` bump: `LogN.js` is byte-identical apart from the `VERSION` constant, and
+  all sixteen classes (BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap,
+  SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray,
+  PersistentSegTree, MergeSortTree) are unchanged.
+- **Docs capstone.** README benchmark section resynced to sixteen subjects / twenty-one gated
+  op-rows / 128 cells (D1 table completed with `PersistentSegTree.query` + `MergeSortTree.countLE`;
+  D3 / D5 / D7 / D8 extended to all sixteen members; SegmentTree2D D1 slopes resynced to
+  `benchmark/results.json` at 6.4 / 5.8). GUIDE "measured cost" ladder completed to the full gated
+  op set.
+
+### Added
+
+- **Interactive demo (repo-only, not shipped).** An interactive demo covering all sixteen members
+  (`demo/`, the 4-file `kernels.mjs` + `index.html` + `Demo.test.mjs` + `serve.mjs`). Repo-only:
+  never in the npm tarball / `package.json` `files[]`.
+
+### Fixed
+
+- None (shipped code).
+
+### Removed
+
+- None.
+
 ## [0.16.0] - 2026-09-22
 
 ### Added
