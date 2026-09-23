@@ -688,8 +688,11 @@ export function stepPersistentSegTreeWorld(w) {
     const i = nextU32(w.rng) % n;
     const v = (nextU32(w.rng) & 255);
     w.curV = p.update(from, i, v);
-    // Query a random OLD version (history provably live).
-    const qv = nextU32(w.rng) % p.versions;
+    // Query an OLD version within the newest ~20 -- the window the demo draws -- so the queried
+    // version highlights a VISIBLE dot in the chain and the highlight moves each frame. Still a
+    // genuine read of a past, usually non-newest version (history provably live), just recent.
+    const recent = p.versions < 20 ? p.versions : 20;
+    const qv = (p.versions - 1 - (nextU32(w.rng) % recent)) | 0;
     const lo = nextU32(w.rng) % n; const hi = lo + (nextU32(w.rng) % (n - lo));
     w.queriedV = qv;
     w.qResult = p.query(qv, lo, hi);
