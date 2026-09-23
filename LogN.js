@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '0.15.0';
+export const VERSION = '0.16.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -6430,5 +6430,298 @@ export class PersistentSegTree {
     _fullNodes() {
         throw new RangeError(
             '[lite-logn] PersistentSegTree node arena full (budget ' + this._budget + ')');
+    }
+}
+
+// MergeSortTree (v0.16.0 session) -- a STATIC, IMMUTABLE merge sort tree for offline range-rank
+// (count values <= x, or in a value-window, over an INDEX range) in O(log^2 n) (BELOW).
+
+/**
+ * Max MergeSortTree element count: `0x7FFFFFFF` (2^31 - 1). The real ceiling on a large instance is
+ * the flat run TABLE (n * (ceil(log2 n) + 1) cells), guarded separately by MST_MAX_CELLS; this is the
+ * clean per-argument door for `length` (the source array's length) itself.
+ */
+const MST_MAX_LENGTH = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * Max MergeSortTree run-table cell count: `0x7FFFFFFF` (2^31 - 1). Every cell is addressed by a flat
+ * offset into the single `_t` Float64Array (`level * n + i`), so the total must fit a positive int32.
+ * The cell count is a PRODUCT (`(H + 1) * n`, H = ceil(log2 n)), so the guard uses a FLOAT multiply
+ * (never `| 0`, which would wrap a large product to a small / negative int and pass the door ->
+ * under-allocation -> OOB): the float product is exact to 2^53, so a genuine overflow of this ceiling
+ * fails CLOSED (the PST_MAX_NODES / S2D_MAX_CELLS / F2D_MAX_CELLS lesson -- null is not zero).
+ */
+const MST_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A STATIC, IMMUTABLE MERGE SORT TREE: an offline range-rank structure that answers, over any INDEX
+ * range `[lo, hi]` of a fixed sequence, "how many stored values are <= x" (`countLE`) or "how many
+ * fall in the value-window `[vlo, vhi]`" (`rangeCount`) in worst-case O(log^2 n), zero-allocation.
+ * It is the family's SECOND static member (SortedArray was read-optimized-but-mutable; this one is
+ * build-once and never mutated -- the SparseTable / lite-o1 static-member honesty contract): the
+ * source values are COPIED in at construction, there are NO mutators, and every query is a read-only
+ * descent. BUILD is O(n log n) and SPACE is O(n log n) -- both a DISCLOSED co-headline, never hidden.
+ *
+ * The idiom (decisions/0018): a segment tree whose every node stores the SORTED array of its
+ * index-range, packed by LEVEL into ONE flat preallocated Float64Array `_t`. The tree is laid over a
+ * power-of-two slot count `m = 2^H` (H = ceil(log2 n)); at depth `d` the tree partitions `[0, m)` into
+ * `2^d` slots, and the REAL elements (indices `[0, n)`) whose index falls in each slot form that
+ * node's sorted run. Every level holds all n real elements once (concatenated in index order), so the
+ * table is exactly `(H + 1)` levels x `n` cells = `n * (ceil(log2 n) + 1)`. A node covering real index
+ * range `[rl, rr)` at level d has its sorted run at flat offset `d * n + rl` (length `rr - rl`) -- the
+ * "level * n + nodeStart" address. The leaf level (d = H) is the source in index order (each a
+ * trivially-sorted single-element run); each higher level is built BOTTOM-UP by MERGING each node's
+ * two adjacent child runs (which live in the NEXT level's region, so the merge writes into a disjoint
+ * region -- no scratch buffer needed), giving the O(n log n) build.
+ *
+ * Query (read-only, 0 B/op): `countLE(lo, hi, x)` descends from the root, and at each of the O(log n)
+ * CANONICAL nodes fully inside `[lo, hi]` runs a branch-free binary search of that node's sorted run
+ * for the count of values <= x -- O(log n) nodes x O(log n) per search = O(log^2 n). `rangeCount(lo,
+ * hi, vlo, vhi)` is `countLE(..., vhi) - countLT(..., vlo)` via a private STRICT-less descent so the
+ * inclusive value-window is exact for floats. The lower-bound midpoint idiom (`s + ((e - s) >>> 1)`,
+ * SortedArray's) keeps both searches overflow-safe and branch-light.
+ *
+ * kth-in-range (the order statistic) is DELIBERATELY NOT shipped: it is a different algorithm (a
+ * fractional-cascading or wavelet descent) that this plain O(log^2 n) layout cannot answer in one
+ * pass -- routed to a future WaveletTree (see What this is not). This member ships the range-RANK
+ * primitives only, and it is PLAIN O(log^2 n) (NO fractional cascading -- the honest, teachable form).
+ *
+ * Fail closed on every unverified state: the source must be an array-like of FINITE numbers (typeof-
+ * guarded FIRST -- Symbol / BigInt / NaN / +-Infinity each throw `[lite-logn]`; null is not zero), the
+ * length must be an integer in [1, MST_MAX_LENGTH], and the `(H + 1) * n` cell product is guarded by a
+ * FLOAT multiply against MST_MAX_CELLS. Query bounds are integers in `[0, n)` with `lo <= hi`, and the
+ * value-window needs `vlo <= vhi` -- each an invalid state that throws, never a silent wrong answer.
+ */
+export class MergeSortTree {
+    /**
+     * Build the immutable tree from a snapshot of `values` (COPIED in -- mutating the caller's array
+     * afterward never changes a result). O(n log n) build. COLD path; fails closed BEFORE the tree is
+     * usable on a non-array-like input, a length outside [1, MST_MAX_LENGTH], a cell product over
+     * MST_MAX_CELLS, or any non-finite entry (typeof-guarded first).
+     * @param {ArrayLike<number>} values  finite numbers (any order); indexed 0..length-1
+     */
+    constructor(values) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError(
+                '[lite-logn] MergeSortTree needs an array-like of finite numbers');
+        }
+        const n = values.length;
+        if (!Number.isInteger(n) || n < 1 || n > MST_MAX_LENGTH) {
+            throw new RangeError(
+                '[lite-logn] MergeSortTree length must be an integer in [1, 2^31-1], got ' + String(n));
+        }
+        // H = ceil(log2 n) via an exact integer loop (never Math.log2, which can mis-round a power of
+        // two). Levels 0..H (H + 1 of them); m = 2^H slots the perfect tree is laid over.
+        let H = 0;
+        while (2 ** H < n) H++;
+        const levels = H + 1;
+        // FLOAT product guard (never `| 0`): the exact product fails CLOSED on overflow.
+        const cells = levels * n;
+        if (cells > MST_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] MergeSortTree cell budget ' + cells + ' (levels ' + levels +
+                ' x n ' + n + ') exceeds ' + MST_MAX_CELLS);
+        }
+        const t = new Float64Array(cells);
+        // Leaf level (d = H): the source in INDEX order, validated finite (typeof-first). Each single
+        // element is a trivially-sorted 1-element run.
+        const hBase = H * n;
+        for (let i = 0; i < n; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] MergeSortTree value must be a finite number, got ' + String(v));
+            }
+            t[hBase + i] = v;
+        }
+        // Build bottom-up: level d's node runs are the MERGE of its two adjacent child runs in level
+        // d+1. The source region ((d+1)*n) and the dest region (d*n) are disjoint, so no scratch is
+        // needed. A node at level d covers slot [lo, lo+w); its children split at mid = lo + w/2. Real
+        // elements are clamped to [0, n), so a node past n merges empty runs (a no-op).
+        for (let d = H - 1; d >= 0; d--) {
+            const w = 2 ** (H - d);          // slot width at level d (a power of two)
+            const half = w >>> 1;
+            const childBase = (d + 1) * n;
+            const base = d * n;
+            for (let lo = 0; lo < n; lo += w) {
+                const mid = lo + half < n ? lo + half : n;
+                const hi = lo + w < n ? lo + w : n;
+                let a = lo, b = mid, o = lo;  // two-pointer merge of [lo,mid) and [mid,hi)
+                while (a < mid && b < hi) {
+                    const va = t[childBase + a], vb = t[childBase + b];
+                    if (va <= vb) { t[base + o++] = va; a++; }
+                    else { t[base + o++] = vb; b++; }
+                }
+                while (a < mid) t[base + o++] = t[childBase + a++];
+                while (b < hi) t[base + o++] = t[childBase + b++];
+            }
+        }
+        this._n = n;                          // element count (fixed)
+        this._h = H;                          // ceil(log2 n)
+        this._m = 2 ** H;                     // power-of-two slot count the tree is laid over
+        this._t = t;                          // the flat (H+1) x n sorted-run table
+        this._cells = cells;                  // t.length
+    }
+
+    /** Element count (the source length). O(1). */
+    get length() { return this._n; }
+
+    /** Element count -- the family-spine alias of `length`. O(1). */
+    get size() { return this._n; }
+
+    /** The flat run-table cell count (`(ceil(log2 n) + 1) * n`) -- the disclosed O(n log n) space. O(1). */
+    get cells() { return this._cells; }
+
+    /**
+     * Count of stored values `<= x` within the INDEX range `[lo, hi]` INCLUSIVE. THE PRIMITIVE:
+     * worst-case O(log^2 n) -- descend the O(log n) canonical nodes covering `[lo, hi]`, branch-free
+     * binary-search each node's sorted run. Zero-allocation (a read-only descent). Fails closed: `lo`
+     * / `hi` must be integers with `0 <= lo <= hi < length`, and `x` must be a number (NaN throws;
+     * +-Infinity is a legal threshold). typeof-guarded FIRST.
+     * @param {number} lo  index, integer in [0, length)
+     * @param {number} hi  index, integer in [lo, length)
+     * @param {number} x   value threshold (finite or +-Infinity; not NaN)
+     * @returns {number} count of values <= x in indices [lo, hi]
+     */
+    countLE(lo, hi, x) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi) ||
+            typeof x !== 'number' || Number.isNaN(x)) return this._badQuery(lo, hi, x);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi) return this._badRange(lo, hi);
+        return this._rec(0, 0, this._m, lo, hi, x, false);
+    }
+
+    /**
+     * Count of stored values in the VALUE-window `[vlo, vhi]` INCLUSIVE within the INDEX range
+     * `[lo, hi]` INCLUSIVE. Worst-case O(log^2 n): `countLE(vhi) - countLT(vlo)` over the same
+     * canonical decomposition, so the inclusive window is exact even for float bounds. Zero-allocation.
+     * Fails closed: `lo` / `hi` integers with `0 <= lo <= hi < length`; `vlo` / `vhi` numbers (not NaN)
+     * with `vlo <= vhi`. typeof-guarded FIRST.
+     * @param {number} lo   index, integer in [0, length)
+     * @param {number} hi   index, integer in [lo, length)
+     * @param {number} vlo  value-window lower bound (inclusive; not NaN)
+     * @param {number} vhi  value-window upper bound (inclusive; not NaN)
+     * @returns {number} count of values in [vlo, vhi] among indices [lo, hi]
+     */
+    rangeCount(lo, hi, vlo, vhi) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi) ||
+            typeof vlo !== 'number' || Number.isNaN(vlo) ||
+            typeof vhi !== 'number' || Number.isNaN(vhi)) return this._badWindow(lo, hi, vlo, vhi);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi) return this._badRange(lo, hi);
+        if (vlo > vhi) return this._badValueWindow(vlo, vhi);
+        const m = this._m;
+        return this._rec(0, 0, m, lo, hi, vhi, false) - this._rec(0, 0, m, lo, hi, vlo, true);
+    }
+
+    /**
+     * @private
+     * Recursive canonical-node descent over the segment tree laid on `[0, m)`. `nl` / `nr` are the
+     * node's SLOT bounds; real elements are clamped to `[0, n)`. At a node fully inside the query
+     * index range, binary-search its sorted run (strict `<` when `strict`, else `<=`). O(log n) nodes.
+     * @param {number} d       level (depth) of this node
+     * @param {number} nl      node slot start
+     * @param {number} nr      node slot end (exclusive)
+     * @param {number} ql      query index low (inclusive)
+     * @param {number} qh      query index high (inclusive)
+     * @param {number} x       value threshold
+     * @param {boolean} strict true -> count `< x`; false -> count `<= x`
+     * @returns {number}
+     */
+    _rec(d, nl, nr, ql, qh, x, strict) {
+        const n = this._n;
+        const rl = nl < n ? nl : n;           // real element range [rl, rr) in this node
+        const rr = nr < n ? nr : n;
+        if (rl >= rr || qh < rl || ql > rr - 1) return 0; // empty or disjoint
+        if (ql <= rl && qh >= rr - 1) {                   // fully covered -> one binary search
+            const base = d * n;
+            return strict ? this._lt(base + rl, base + rr, x) : this._lb(base + rl, base + rr, x);
+        }
+        const mid = nl + ((nr - nl) >>> 1);   // overflow-safe midpoint (slot bounds are pow2-aligned)
+        return this._rec(d + 1, nl, mid, ql, qh, x, strict) +
+            this._rec(d + 1, mid, nr, ql, qh, x, strict);
+    }
+
+    /**
+     * @private
+     * Count of run cells `_t[s..e)` that are `<= x` (= index of the first cell `> x`, minus s).
+     * Branch-free lower-bound (never early-exits on equality), overflow-safe midpoint. Hot: no
+     * validation, no allocation.
+     * @param {number} s  run start offset
+     * @param {number} e  run end offset (exclusive)
+     * @param {number} x  threshold
+     * @returns {number}
+     */
+    _lb(s, e, x) {
+        const T = this._t;
+        let lo = s, hi = e;
+        while (lo < hi) {
+            const mid = lo + ((hi - lo) >>> 1);
+            if (T[mid] <= x) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo - s;
+    }
+
+    /**
+     * @private
+     * Count of run cells `_t[s..e)` that are STRICTLY `< x` (= index of the first cell `>= x`, minus
+     * s). The strict twin of `_lb`, so `rangeCount`'s inclusive value-window is exact for floats.
+     * @param {number} s  run start offset
+     * @param {number} e  run end offset (exclusive)
+     * @param {number} x  threshold
+     * @returns {number}
+     */
+    _lt(s, e, x) {
+        const T = this._t;
+        let lo = s, hi = e;
+        while (lo < hi) {
+            const mid = lo + ((hi - lo) >>> 1);
+            if (T[mid] < x) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo - s;
+    }
+
+    /**
+     * Build the immutable tree from `values` (a snapshot is COPIED in). The idiomatic factory; equal
+     * to `new MergeSortTree(values)`. O(n log n). Same fail-closed doors as the constructor.
+     * @param {ArrayLike<number>} values  finite numbers (any order)
+     * @returns {MergeSortTree}
+     */
+    static build(values) {
+        return new MergeSortTree(values);
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badQuery(lo, hi, x) {
+        throw new TypeError(
+            '[lite-logn] MergeSortTree countLE needs integer indices and a numeric x, got lo=' +
+            String(lo) + ' hi=' + String(hi) + ' x=' + String(x));
+    }
+
+    /** @private */
+    _badWindow(lo, hi, vlo, vhi) {
+        throw new TypeError(
+            '[lite-logn] MergeSortTree rangeCount needs integer indices and numeric bounds, got lo=' +
+            String(lo) + ' hi=' + String(hi) + ' vlo=' + String(vlo) + ' vhi=' + String(vhi));
+    }
+
+    /** @private */
+    _badRange(lo, hi) {
+        throw new RangeError(
+            '[lite-logn] MergeSortTree needs integer indices 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badValueWindow(vlo, vhi) {
+        throw new RangeError(
+            '[lite-logn] MergeSortTree rangeCount needs vlo <= vhi, got vlo=' + String(vlo) +
+            ' vhi=' + String(vhi));
     }
 }

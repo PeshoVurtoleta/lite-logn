@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The fifteen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree'];
+/** The sixteen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree'];
 
-/** The twenty gated D1 witness op-rows (member.op), in build order. */
+/** The twenty-one gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -43,6 +43,7 @@ export const OP_ROWS = [
     'SegmentTree2D.update', 'SegmentTree2D.query',
     'SortedArray.get',
     'PersistentSegTree.query',
+    'MergeSortTree.countLE',
 ];
 
 /** The eight measurement dimensions. */
@@ -77,6 +78,7 @@ export const BASELINE = {
     SegmentTree2D: '2d-grid-rebuild/rect-scan',
     SortedArray: 'linear-scan',
     PersistentSegTree: 'whole-tree-rebuild/scan-fold',
+    MergeSortTree: 'linear-scan-count',
 };
 
 /**
@@ -131,6 +133,10 @@ export const COUNTER_FOIL = {
     // answer a range min/max/sum/gcd at all (let alone across versions), so there is no "faster but
     // order-blind" O(1) rival -- NA (the string, never 0).
     PersistentSegTree: NA,
+    // MergeSortTree is a STATIC offline range-RANK structure, not an ordered map; a Map cannot answer
+    // "how many values <= x fall in an index range" at all, so there is no "faster but order-blind"
+    // O(1) rival -- NA (the string, never 0).
+    MergeSortTree: NA,
 };
 
 /**
@@ -254,6 +260,14 @@ export const RATIONALE = {
             'whose update preserves every prior version in O(log n). A Map cannot answer a range fold ' +
             'across versions at all, so there is no order-blind O(1) counter-foil.',
     },
+    MergeSortTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a naive linear scan counting values <= x over the index range (O(n) per query) is the ' +
+            'honest default before the merge-sort-tree trick -- the rival that motivates the O(log^2 n) ' +
+            'canonical-node descent + per-node binary search. This STATIC build-once member pays an ' +
+            'O(n log n) build + space to buy offline range-rank queries; a Map cannot answer a ' +
+            'count-in-value-window over an index range at all, so there is no order-blind O(1) counter-foil.',
+    },
 };
 
 /**
@@ -304,7 +318,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (15 x 8 = 120 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (16 x 8 = 128 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -430,33 +444,47 @@ export const OP_CLASS = Object.freeze({
     // seed), not an O(log n) class, so it is deliberately NOT in this table.
     'PersistentSegTree.query': OLOGN_WORST, // read-only range descent over the version's DAG (the gated row)
     'PersistentSegTree.update': OLOGN_WORST, // path-copy the O(log n) root-to-leaf path, share off-path subtrees
+    // MergeSortTree: countLE descends the O(log n) canonical nodes covering the index range and runs an
+    // O(log n) binary search of each node's sorted run -> WORST-CASE O(log^2 n) (a STATIC immutable tree
+    // has no randomization / amortization). Same squared-log honesty hook as Fenwick2D / SegmentTree2D:
+    // the per-node search is not free, so OLOGN2_WORST, never the single-log OLOGN_WORST. rangeCount is
+    // two countLE descents (same class); build is O(n log n) (a one-time sort-merge), NOT an O(log)
+    // class, so it is deliberately NOT in this table.
+    'MergeSortTree.countLE': OLOGN2_WORST,   // O(log n) canonical nodes x O(log n) per-node binary search (the gated row)
 });
 
 // ===========================================================================
 // clear() invariance witness (Bench v3, RE-WIRED per Table B). ELEVATED to a
-// first-class witness for EXACTLY the four SUBJECTS: each returns the structure to
+// first-class witness for the fifteen MUTABLE SUBJECTS: each returns the structure to
 // its pristine EMPTY invariant (heap/list size 0; index-addressed accumulators
 // zeroed), retains its fixed backing store (zero-alloc), and stays reusable. The
-// CLEAR_WITNESS set is EXACTLY SUBJECTS -- verified against LogN.js (BinaryHeap:239,
-// Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
+// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable member -- verified against
+// LogN.js (BinaryHeap:239, Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
 //
 // EXCLUDED (named with a reason, never silently dropped -- the same discipline as the
-// NA-never-0 rule): NodePool is the PRIVATE, unexported free-list SkipList owns; it
-// HAS a clear() (LogN.js:1053) but is not a SUBJECT and its reset is transitively
-// covered by SkipList (its sole owner). The read/traverse surface (peek/topKey/size/
-// length/prefix/query/get/has + forEach/rangeIter) is not a reuse invariant at all.
+// NA-never-0 rule): MergeSortTree is a STATIC, IMMUTABLE member (built once, no mutators,
+// no clear()); there is no fill/clear/refill invariant to witness because the tree is
+// never mutated after construction (the SparseTable / lite-o1 static-member contract). It
+// IS a SUBJECT (benchmarked across every dimension) but not a clear-witness. NodePool is
+// the PRIVATE, unexported free-list SkipList owns; it HAS a clear() (LogN.js:1053) but is
+// not a SUBJECT and its reset is transitively covered by SkipList (its sole owner). The
+// read/traverse surface (peek/topKey/size/length/prefix/query/get/has + forEach/rangeIter)
+// is not a reuse invariant at all.
 // ===========================================================================
 
-/** The members whose clear()+reuse cycle is an elevated first-class witness (= SUBJECTS). */
+/** The members whose clear()+reuse cycle is an elevated first-class witness (= the mutable SUBJECTS). */
 export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree'];
 
 /**
- * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. Keys are
- * NOT SUBJECTS (unlike the in-set): NodePool is a private internal, and the getters/
- * traversals are ops, not members -- so the excluded set names WHY the witness is the
- * four SUBJECTS and nothing else, not a per-member membership list.
+ * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. MergeSortTree is
+ * a SUBJECT but not a clear-witness (static/immutable, no clear()); NodePool is a private
+ * internal; the getters/traversals are ops, not members -- so the excluded set names WHY the
+ * witness is the mutable SUBJECTS and nothing else, not a per-member membership list.
  */
 export const CLEAR_WITNESS_EXCLUDED = Object.freeze({
+    MergeSortTree: 'STATIC, IMMUTABLE member (built once, source copied, no mutators, no clear()); ' +
+        'IS a SUBJECT but has no fill/clear/refill invariant to witness -- the tree is never mutated ' +
+        'after construction (the lite-o1 static-member contract), so there is nothing to clear + reuse',
     NodePool: 'private/unexported free-list (SkipList\'s slot allocator, LogN.js:1053); ' +
         'NOT in SUBJECTS -- its clear() is an internal reset transitively covered by SkipList, ' +
         'never a public reuse invariant',

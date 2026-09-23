@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree, MergeSortTree } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -387,3 +387,20 @@ new PersistentSegTree(8, 4);
 
 // @ts-expect-error -- PersistentSegTree is not an ordered map: no get by key.
 pst.get(3);
+
+// --- MergeSortTree ----------------------------------------------------------
+const mst = new MergeSortTree([5, 3, 9, 1, 7]);
+const mstLen: number = mst.length;
+const mstSize: number = mst.size;
+const mstCells: number = mst.cells;
+const mstCountLE: number = mst.countLE(0, 4, 6);
+const mstRangeCount: number = mst.rangeCount(0, 4, 2, 8);
+const mstBuilt: MergeSortTree = MergeSortTree.build([3, 1, 2]);
+const mstFromTyped: MergeSortTree = MergeSortTree.build(Float64Array.of(1, 2, 3));
+void mstLen; void mstSize; void mstCells; void mstCountLE; void mstRangeCount; void mstBuilt; void mstFromTyped;
+
+// @ts-expect-error -- countLE takes (lo, hi, x) numbers, not a string x.
+mst.countLE(0, 4, 'x');
+
+// @ts-expect-error -- MergeSortTree is immutable: no set.
+mst.set(0, 1);

@@ -6,6 +6,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-22
+
+### Added
+
+- **MergeSortTree** -- the sixteenth member and the family's FIRST truly IMMUTABLE member and its FIRST
+  offline range-RANK structure: a STATIC merge sort tree that answers, over any INDEX range `[lo, hi]` of
+  a fixed sequence, `countLE(lo, hi, x)` (how many stored values are <= x) and `rangeCount(lo, hi, vlo,
+  vhi)` (how many fall in the value-window `[vlo, vhi]`) in WORST-CASE O(log^2 n), zero-allocation. It is
+  the SECOND static member after SortedArray, but the first that is truly immutable: SortedArray is
+  read-optimized-but-mutable, whereas MergeSortTree COPIES its source in at construction and has NO
+  mutators (the SparseTable / lite-o1 static-member honesty contract). Surface: `countLE` / `rangeCount`,
+  `length` / `size` / `cells` getters, and the static `MergeSortTree.build(values)`. See
+  `decisions/0018-mergesorttree.md`.
+- **Segment tree of SORTED runs in ONE flat Float64Array (D-MST2, the load-bearing idiom).** Every node
+  stores the SORTED array of its index-range, packed by LEVEL into ONE preallocated `Float64Array` of
+  exactly `n * (ceil(log2 n) + 1)` cells (a node at level d covering real index range `[rl, rr)` has its
+  run at flat offset `d * n + rl`). The leaf level is the source in index order; each higher level is
+  built BOTTOM-UP by MERGING each node's two adjacent child runs into a disjoint region (no scratch
+  buffer), giving the O(n log n) build. countLE descends the O(log n) CANONICAL nodes fully inside
+  `[lo, hi]` and branch-free binary-searches each node's sorted run (O(log n) nodes x O(log n) per search
+  = O(log^2 n)); rangeCount is `countLE(vhi) - countLT(vlo)` over the same decomposition (a private
+  STRICT-less descent), exact even for float bounds.
+- **PLAIN O(log^2 n), NO fractional cascading (D-MST4).** Fractional cascading would buy O(log n) queries
+  but requires interleaved bridge pointers that wreck the flat, pointer-free zero-GC layout and the clean
+  space bound, and is far harder to teach -- rejected for the honest, teachable plain form. The
+  kth-smallest-in-range ORDER STATISTIC is DELIBERATELY NOT shipped (a different algorithm; routed to a
+  future WaveletTree) -- this member ships the range-RANK primitives only.
+- **STATIC / IMMUTABLE + a FLOAT-product cell guard, fail closed (D-MST1, D-MST5).** The source is COPIED
+  in at construction (mutating the caller's array afterward changes nothing) and there are NO mutators.
+  The source must be an array-like of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN /
+  +-Infinity fail closed), the length an integer in `[1, MST_MAX_LENGTH]` (`0x7FFFFFFF`, 2^31-1), and the
+  `(H+1)*n` cell product is guarded by a FLOAT multiply against `MST_MAX_CELLS` (`0x7FFFFFFF`) -- never
+  `| 0`, which would wrap a large product and fail OPEN (the PST_MAX_NODES / S2D_MAX_CELLS precedent).
+  Query bounds are integers with `0 <= lo <= hi < length`; the value-window needs `vlo <= vhi`.
+- **O(n log n) BUILD and O(n log n) SPACE a DISCLOSED co-headline.** The tree is `n * (ceil(log2 n) + 1)`
+  cells; the fast query is never allowed to hide the build + space cost.
+
+### Changed
+
+- Witness harness gates twenty-one ops (was twenty): MergeSortTree `countLE` on the SQUARED-log axis
+  (`nsPerOp = intercept + slope*(log2 n)^2`, the family's THIRD such lane after Fenwick2D / SegmentTree2D)
+  -- shared R^2 floor 0.958, OWN slope band `[3.13, 7.31]` ns per (log2 n)^2 unit (median ~5.2, MEDIAN of
+  7 sweep-fits), sweep `[2^13, 2^18]`; its O(n) linear-scan-count foil is exponential on that axis and
+  leaves the line. WORST-CASE member: no max-single-op line.
+- Benchmark applicability matrix + dimensions cover 16 subjects (was 15), 21 gated op-rows (was 20),
+  16 x 8 = 128 cells (was 120). MergeSortTree is a SUBJECT but NOT a clear-witness (static/immutable, no
+  clear()) -- named in `CLEAR_WITNESS_EXCLUDED` with a reason, never silently dropped.
+- `package.json` keywords add `merge-sort-tree`, `range-rank`, `offline-range-query`, `static`; the
+  description enumerates MergeSortTree.
+
+### Fixed
+
+- Nothing (additive minor).
+
+### Removed
+
+- Nothing.
+
 ## [0.15.0] - 2026-09-22
 
 ### Added

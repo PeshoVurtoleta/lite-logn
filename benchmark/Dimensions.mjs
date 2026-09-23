@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -381,6 +381,26 @@ function kSegTree2DQuery(n) {
     return { obj: st, op: () => { SINK = (SINK + (st.query(0, 0, i, i) | 0)) | 0; i++; if (i >= side) i = 0; } };
 }
 
+function kMstCountLE(n) {
+    // A STATIC, IMMUTABLE merge sort tree of n seeded values, built ONCE (no mutators). Each op counts
+    // values <= a rotating Smi threshold over the widest gated index window [1, n-2] -- the O(log^2 n)
+    // canonical-node descent + per-node binary search (the same wide-window discipline the witness uses).
+    // Zero allocation after construction: the threshold is read from a Uint32Array (Smi, never boxed) and
+    // SINK is kept a 32-bit Smi (`| 0`), so no HeapNumber is created per op. A merge sort tree has NO
+    // mutating op, so its representative "churn" op is this read query, not an insert/delete pair.
+    const vals = new Float64Array(n);
+    const rng = prng(0x1234 ^ n);
+    for (let i = 0; i < n; i++) vals[i] = rng() & 0xffff;
+    const t = new MergeSortTree(vals);
+    const TARGETS = 1024;
+    const xs = new Uint32Array(TARGETS);
+    const rx = prng(0x5A17 ^ n);
+    for (let i = 0; i < TARGETS; i++) xs[i] = rx() & 0xffff;
+    const lo = n > 2 ? 1 : 0, hi = n > 2 ? n - 2 : n - 1;
+    let i = 0;
+    return { obj: t, op: () => { SINK = (SINK + t.countLE(lo, hi, xs[i & (TARGETS - 1)])) | 0; i = (i + 1) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -411,6 +431,7 @@ export function makeOpKernel(member, op, n) {
         case 'SegmentTree2D.query': return kSegTree2DQuery(n);
         case 'SortedArray.get': return kSortedArrayGet(n);
         case 'PersistentSegTree.query': return kPstQuery(n);
+        case 'MergeSortTree.countLE': return kMstCountLE(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -432,6 +453,9 @@ export function makeSubject(member, n) {
     if (member === 'SegmentTree2D') return kSegTree2DUpdate(n);
     if (member === 'SortedArray') return kSortedArraySet(n);
     if (member === 'PersistentSegTree') return kPstUpdate(n);
+    // MergeSortTree is STATIC/IMMUTABLE (no mutating op); its representative steady op is the countLE
+    // read query -- the only op-row it exposes.
+    if (member === 'MergeSortTree') return kMstCountLE(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -639,6 +663,7 @@ export function memberBytes(member, obj) {
         return obj._val.buffer.byteLength + obj._left.buffer.byteLength +
             obj._right.buffer.byteLength + obj._roots.buffer.byteLength;
     }
+    if (member === 'MergeSortTree') return obj._t.buffer.byteLength; // the flat (H+1) x n sorted-run table
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -659,6 +684,10 @@ export function theoreticalMinPerLive(member) {
     if (member === 'SegmentTree2D') return 32; // four Float64 tree cells (4RC array) per grid cell
     if (member === 'SortedArray') return 16; // key (Float64, 8) + value (Float64, 8) per live entry
     if (member === 'PersistentSegTree') return 32; // the v0 tree is ~2 nodes/element * 16 B (val 8 + 2 child ptrs 8)
+    // MergeSortTree stores the source as 8 B (one Float64) per element -- the minimum to hold the data.
+    // The (H+1) x table is the DISCLOSED O(n log n) space co-headline, surfaced as D3's overheadRatio
+    // (bytesPerLive / 8 ~ ceil(log2 n) + 1), never hidden.
+    if (member === 'MergeSortTree') return 8;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -668,6 +697,7 @@ function liveCount(member, obj) {
     if (member === 'Fenwick2D') return obj.rows * obj.cols;                  // every grid cell is live
     if (member === 'SegmentTree2D') return obj.rows * obj.cols;              // every grid cell is live
     if (member === 'PersistentSegTree') return obj.length;                   // index-addressed: n leaves are the elements
+    if (member === 'MergeSortTree') return obj.length;                       // static: the n source elements are the live set
     return obj.size;
 }
 
@@ -696,12 +726,16 @@ function fillMember(member, obj, count) {
         for (let k = 0; k < m; k++) cur = obj.update(cur, k % L, (k & 0xffff) + 1);
         return;
     }
+    // MergeSortTree is STATIC/IMMUTABLE: it is built full at construction and has no clear()/mutators,
+    // so "fill" is a no-op (the tree already holds all its elements). D3 constructs it full.
+    if (member === 'MergeSortTree') return;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
 // ===========================================================================
 // clear() invariance witness (Bench v3). A first-class, member-scoped witness for
-// EXACTLY the four Matrix.CLEAR_WITNESS members (= SUBJECTS): clear() returns the
+// the fifteen MUTABLE Matrix.CLEAR_WITNESS members (SUBJECTS minus the static,
+// immutable MergeSortTree): clear() returns the
 // structure to its pristine EMPTY invariant, retains its fixed backing store across
 // many fill/clear cycles (zero-alloc), and leaves it reusable. This is the same
 // retention contract the torture gate proves at 0 B/op; here it is surfaced as a
@@ -812,6 +846,7 @@ export function D3(member, opts = {}) {
     else if (member === 'SegmentTree2D') { const side = f2dSide(n); obj = new SegmentTree2D(side, side, 'sum'); }
     else if (member === 'SortedArray') obj = new SortedArray(n);
     else if (member === 'PersistentSegTree') obj = new PersistentSegTree(n, PST_BENCH_VC, 'sum');
+    else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -831,8 +866,9 @@ export function D3(member, opts = {}) {
     const bytesRefill = memberBytes(member, obj);
     const highWater = Math.max(bytesFull, bytesRefill);
 
-    // After clear(): backing buffers are retained (fixed capacity) -- deliberate.
-    obj.clear();
+    // After clear(): backing buffers are retained (fixed capacity) -- deliberate. The static
+    // MergeSortTree has no clear() (immutable, nothing to reset), so the reset is skipped for it.
+    if (typeof obj.clear === 'function') obj.clear();
     gcNow();
     const heapAfterClear = process.memoryUsage().heapUsed;
 
@@ -843,7 +879,9 @@ export function D3(member, opts = {}) {
     // + SkipList shrink their live set (bytes-per-live RISES ~1/loadFactor over the
     // fixed backing store); Fenwick + SegmentTree are INDEX-ADDRESSED (every cell is
     // always live), so their curve is FLAT by design -- stated, not hidden.
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree');
+    // MergeSortTree is positional + static: every source element is always live and its footprint is a
+    // single fixed table, so its load-factor curve is FLAT by design too (like the index-addressed members).
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -853,7 +891,7 @@ export function D3(member, opts = {}) {
         const bpl = b / lc;
         loadFactorCurve.push({ loadFactor: lf, bytesPerLive: bpl, overheadRatio: bpl / theoMin });
     }
-    obj.clear();
+    if (typeof obj.clear === 'function') obj.clear();
 
     return {
         dim: 'D3', member, baseline: baselineFor(member, 'D3'), unit: 'bytes',
@@ -888,6 +926,18 @@ function denseIterNsPerElem(member, obj, reps) {
         for (let i = 0; i < L; i++) acc = (acc + (obj.at(head, i) | 0)) | 0; // warm
         const t0p = performance.now();
         for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + (obj.at(head, i) | 0)) | 0;
+        SINK += acc;
+        const dtp = performance.now() - t0p;
+        return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
+    }
+    // MergeSortTree has no forEach (static/immutable, no single-timeline traversal); its dense-iteration
+    // analogue is a full O(n) positional sweep of singleton countLE(i, i, MAX) descents (each an
+    // O(log^2 n) read of position i). MAX is a Smi so no HeapNumber is boxed.
+    if (member === 'MergeSortTree') {
+        const L = obj.length, size0 = Math.max(1, L), X = 0x7fffffff;
+        for (let i = 0; i < L; i++) acc = (acc + obj.countLE(i, i, X)) | 0; // warm
+        const t0p = performance.now();
+        for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + obj.countLE(i, i, X)) | 0;
         SINK += acc;
         const dtp = performance.now() - t0p;
         return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
@@ -932,6 +982,9 @@ function randomLookupOp(member, obj, n, rng) {
     // PersistentSegTree is index-addressed: a random single-leaf read of the HEAD version (its O(log n)
     // point descent) is the analogue.
     if (member === 'PersistentSegTree') { const head = obj.versions - 1; return () => { SINK += obj.at(head, rng() % n) | 0; }; }
+    // MergeSortTree is index-addressed by position: a random singleton countLE(i, i, MAX) (its O(log^2 n)
+    // point descent) is the analogue. MAX is a Smi so no HeapNumber is boxed.
+    if (member === 'MergeSortTree') return () => { const i = rng() % n; SINK = (SINK + obj.countLE(i, i, 0x7fffffff)) | 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -960,6 +1013,8 @@ function seqLookupOp(member, obj, n) {
     if (member === 'SortedArray') return () => { const v = obj.get(i); if (v !== undefined) SINK += v; i++; if (i >= n) i = 0; };
     // PersistentSegTree is index-addressed: a sequential single-leaf read of the HEAD version (row-major).
     if (member === 'PersistentSegTree') { const head = obj.versions - 1; return () => { SINK += obj.at(head, i) | 0; i++; if (i >= n) i = 0; }; }
+    // MergeSortTree is index-addressed by position: a sequential singleton countLE(i, i, MAX) (row-major).
+    if (member === 'MergeSortTree') return () => { SINK = (SINK + obj.countLE(i, i, 0x7fffffff)) | 0; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1000,6 +1055,7 @@ function buildFull(member, n) {
         let cur = 0;
         for (let k = 0; k < PST_BENCH_VC; k++) cur = obj.update(cur, k % n, (k & 0xffff) + 1);
     }
+    else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1371,7 +1427,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' ||
         member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' ||
         member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray' ||
-        member === 'PersistentSegTree') mode = 0;
+        member === 'PersistentSegTree' || member === 'MergeSortTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

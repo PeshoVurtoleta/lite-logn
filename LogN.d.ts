@@ -710,3 +710,34 @@ export class PersistentSegTree {
      *  non-finite entry, or (gcd) a negative/non-integer entry throws before the tree is usable. */
     static build(values: ArrayLike<number>, versionCapacity: number, kind: 'min' | 'max' | 'sum' | 'gcd'): PersistentSegTree;
 }
+
+/**
+ * A STATIC, IMMUTABLE merge sort tree for offline range-rank: `countLE(lo, hi, x)` counts stored
+ * values <= x in the INDEX range [lo, hi], and `rangeCount(lo, hi, vlo, vhi)` counts a VALUE-window,
+ * both worst-case O(log^2 n) and zero-allocation. Build-once (source COPIED in, NO mutators); build
+ * and space are O(n log n), a disclosed co-headline. PLAIN O(log^2 n) (no fractional cascading).
+ */
+export class MergeSortTree {
+    /** Build the immutable tree from a COPY of `values` (finite numbers, any order). O(n log n).
+     *  Non-array-like, a length outside [1, 2^31-1], a cell product over 2^31-1, or any non-finite
+     *  entry throws before the tree is usable. */
+    constructor(values: ArrayLike<number>);
+
+    /** Element count (the source length). */
+    readonly length: number;
+    /** Element count -- the family-spine alias of `length`. */
+    readonly size: number;
+    /** The flat run-table cell count ((ceil(log2 n) + 1) * n) -- the disclosed O(n log n) space. */
+    readonly cells: number;
+
+    /** Count of stored values <= x within the INDEX range [lo, hi] INCLUSIVE. Worst-case O(log^2 n),
+     *  0 B/op. Non-integer / out-of-range lo or hi, lo > hi, or a NaN x throws (+-Infinity is legal). */
+    countLE(lo: number, hi: number, x: number): number;
+    /** Count of stored values in the VALUE-window [vlo, vhi] INCLUSIVE within the INDEX range
+     *  [lo, hi] INCLUSIVE. Worst-case O(log^2 n), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws. */
+    rangeCount(lo: number, hi: number, vlo: number, vhi: number): number;
+
+    /** Build the immutable tree from a COPY of `values` (the idiomatic factory; = new MergeSortTree).
+     *  O(n log n). Same fail-closed doors as the constructor. */
+    static build(values: ArrayLike<number>): MergeSortTree;
+}

@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v0.15.0 fifteen members have
+avoid, and how to measure the logarithm yourself. At v0.16.0 sixteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
-SegmentTree2D, SortedArray and PersistentSegTree -- so this guide carries their per-member sections. It is NOT an API
+SegmentTree2D, SortedArray, PersistentSegTree and MergeSortTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -33,7 +33,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v0.15.0 all fifteen members have
+`(am)` = amortized, `(exp)` = expected. At v0.16.0 all sixteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -86,9 +86,13 @@ START -- what do you need?
 |   index + the fastest ordered iteration (a sorted array)?  -> SortedArray (wc)   [v0.14.0]
 |
 +-- An associative range fold (min / max / sum / gcd) where
-    EVERY PAST VERSION must stay queryable + branchable
-    (time-travel / undo / audit: update returns a new version,
-    it never mutates the old one)?                           -> PersistentSegTree (wc) [v0.15.0]
+|   EVERY PAST VERSION must stay queryable + branchable
+|   (time-travel / undo / audit: update returns a new version,
+|   it never mutates the old one)?                           -> PersistentSegTree (wc) [v0.15.0]
+|
++-- OFFLINE range-RANK over a FIXED sequence: how many values
+    <= x (or in a value-window [vlo, vhi]) fall in an INDEX
+    range [lo, hi]? (build ONCE, then query forever; immutable)-> MergeSortTree (wc)   [v0.16.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -175,10 +179,11 @@ the leanest iteration); reach for a BST when inserts and deletes are frequent.
 | 2D grid RECTANGLE MIN / MAX / GCD / SUM under point updates (a general 2D fold; ~4x the space of a 2D BIT) | SegmentTree2D | O(log^2 n) update / query | 0.13.0 |
 | Read-optimized ordered map (reads dominate, writes rare); O(1) select / min / max + fastest iteration | SortedArray | O(log n) get / rank / successor; O(1) select / keyAt / valueAt / min / max; O(n) set / delete | 0.14.0 |
 | Associative range fold where EVERY PAST VERSION stays queryable + branchable (time-travel / undo / audit) | PersistentSegTree | O(log n) query / at / update (update -> a new version, sharing off-path subtrees) | 0.15.0 |
+| OFFLINE range-RANK over a FIXED sequence: how many values <= x (or in a value-window) fall in an INDEX range; build once, immutable | MergeSortTree | O(log^2 n) countLE / rangeCount; O(n log n) build + space (disclosed) | 0.16.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's and PersistentSegTree's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's and MergeSortTree's are below).
 
 ---
 
@@ -824,6 +829,48 @@ member: every op is worst-case O(log n), so there is no MAX-single-op line. `nod
 test/torture.mjs` proves query / at / update at 0 B/op -- `update` bump-allocates ONLY
 preallocated slots (no `new`, no typed-array growth), so even an update storm (refreshed via
 `clear()` so the fixed arena never overflows) allocates nothing.
+
+---
+
+## MergeSortTree -- the offline range-RANK tree (count values <= x in an index range)
+
+**Reach for it when** you have a FIXED sequence and need to answer, many times, "how many of
+the values at indices `[lo, hi]` are <= x?" (`countLE`) or "how many fall in the value-window
+`[vlo, vhi]`?" (`rangeCount`) -- worst-case O(log^2 n), zero-allocation. This is the OFFLINE
+range-rank / count-in-window primitive: you build ONCE from a snapshot (the source is COPIED
+in) and query forever; the structure is IMMUTABLE (no mutators). Canonical uses: "how many
+measurements in this time-window were below the threshold", competitive-programming offline
+range-rank queries, counting inversions-style analytics over a static array, a building block
+for range-median / order-statistic pipelines. It is the family's FIRST truly immutable member
+and its SECOND static member after **SortedArray** (which is read-optimized but mutable).
+
+**Avoid it when:**
+
+- Your data CHANGES (inserts / deletes / updates). MergeSortTree is build-once immutable -- a
+  mutation means rebuilding the whole tree (O(n log n)). For a mutable ordered map with `rank`
+  (count of keys < x across the WHOLE set, not an index range) use **Treap** / **Scapegoat** /
+  **SortedArray**.
+- You need the k-th SMALLEST value in a range (the order statistic), not the COUNT. This member
+  ships range-RANK only; kth-in-range is a different algorithm deferred to a future WaveletTree.
+- You only ever query the WHOLE array (not an arbitrary index sub-range). A single sorted copy +
+  a binary search (**SortedArray**) answers whole-array rank in O(log n) with far less space.
+- Memory is tight. The tree is `n * (ceil(log2 n) + 1)` cells (O(n log n) space) -- a DISCLOSED
+  co-headline, the honest price of the per-node sorted runs; a plain sorted array is O(n).
+
+**Measure it yourself:** `npm run witness` fits `countLE` (over the widest index window
+`[1, n-2]` with cycled random thresholds) against the SQUARED-log axis,
+`nsPerOp = intercept + slope*(log2 n)^2` (its `countLE` descends O(log n) canonical nodes and
+binary-searches each node's run -- O(log^2 n), NOT a single log); it must clear the shared R^2
+floor (0.958) and sit inside its band (`[3.13, 7.31]` ns per (log2 n)^2 unit; median slope
+~5.2), over exact power-of-two sizes `[2^13, 2^18]`, while the O(n) linear-scan-count foil is
+exponential on that axis and leaves the line. Because a query binary-searches scattered node
+runs across a large flat table, this lane opts into the MEDIAN of 7 independent sweep-fits as
+measurement-quality insurance -- the frozen 0.958 floor and slope band are UNTOUCHED (see
+[`decisions/0018-mergesorttree.md`](./decisions/0018-mergesorttree.md)). STATIC + WORST-CASE
+member (build-once immutable, no randomization / amortization): there is no MAX-single-op line.
+`node --expose-gc test/torture.mjs` proves countLE / rangeCount at 0 B/op -- each query is a
+read-only descent over the flat table (recursion on the native call stack), so even a query
+storm allocates nothing.
 
 ---
 

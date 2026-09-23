@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -237,6 +237,17 @@ async function main() {
             pst.query(0, 10, 40);   // an OLD version stays queryable
             pst.at(pv, 7);
             tracker.track(pst, noopRelease, 14 * CYCLES + i, { audit: true });
+            // A fresh MergeSortTree per cycle, built from a scratch array of values then exercised
+            // (range-rank reads over index + value windows) then dropped. Same held-value contract: a
+            // MergeSortTree owns only its flat _t Float64Array run table (no external resource), and it
+            // is IMMUTABLE (no mutators), so the no-op cleanup never defeats finalization.
+            const mstVals = new Float64Array(64);
+            for (let k = 0; k < 64; k++) mstVals[k] = (k * 2654435761) & 0xffff;
+            const mst = MergeSortTree.build(mstVals);
+            mst.countLE(0, 63, i & 0xffff);
+            mst.countLE(10, 40, (i * 40503) & 0xffff);
+            mst.rangeCount(0, 63, 100, 5000);
+            tracker.track(mst, noopRelease, 15 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -929,6 +940,27 @@ async function main() {
         pstuk = (pstuk + 1) | 0;
     };
 
+    // MergeSortTree: one out-of-loop IMMUTABLE tree built once over CAP random values. Every read lane
+    // is a real hot op that MUST allocate zero bytes -- the flat _t run table is fixed at construction,
+    // countLE / rangeCount are read-only recursive descents that binary-search sorted runs using only
+    // local scalars (0 B/op even though the descent is O(log^2 n)). There is NO mutation / clear lane
+    // (the member is build-once immutable), which is exactly its static-member contract.
+    const mstSrc = new Float64Array(CAP);
+    for (let i = 0; i < CAP; i++) mstSrc[i] = (i * 2654435761) & 0xffff;
+    const mst = MergeSortTree.build(mstSrc);
+    let mstk = 0, mstacc = 0;
+    // countLE: a wide-window range-rank over a cycling threshold (the gated Witness op), folded in.
+    const stepMstCountLE = () => {
+        mstacc = (mstacc + (mst.countLE(1, CAP - 2, mstk & 0xffff) | 0)) | 0;
+        mstk = (mstk + 1) | 0;
+    };
+    // rangeCount: a value-window range-rank over a cycling sub-index-range, folded in.
+    const stepMstRangeCount = () => {
+        const lo = mstk & (MASK >> 1);
+        mstacc = (mstacc + (mst.rangeCount(lo, lo + 100, (mstk & 0xff) << 4, ((mstk & 0xff) << 4) + 8000) | 0)) | 0;
+        mstk = (mstk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -956,7 +988,8 @@ async function main() {
         stepF2Update, stepF2RectSum, stepF2Prefix, stepF2At, stepF2Set,
         stepSt2Update, stepSt2Query, stepSt2At,
         stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor,
-        stepPstQuery, stepPstAt, stepPstUpdate]) {
+        stepPstQuery, stepPstAt, stepPstUpdate,
+        stepMstCountLE, stepMstRangeCount]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -1002,6 +1035,7 @@ async function main() {
     if (saacc === 0x7fffffff) throw new Error('unreachable'); // keep saacc live
     if (safeAcc === 0x7fffffff) throw new Error('unreachable'); // keep safeAcc live
     if (psacc === 0x7fffffff) throw new Error('unreachable'); // keep psacc live
+    if (mstacc === 0x7fffffff) throw new Error('unreachable'); // keep mstacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1156,6 +1190,11 @@ async function main() {
         pstuv = pstU.update((i & 3) ? pstuv : 0, i & MASK, i & 0xffff);
         { const ver = i % PSTQ_VERSIONS; const lo = i & (MASK >> 1); sink = (sink + (pstQ.query(ver, lo, lo + 100) | 0)) | 0; }
         if ((i & 7) === 0) { const ver = i % PSTQ_VERSIONS; sink = (sink + (pstQ.at(ver, i & MASK) | 0)) | 0; }
+        // MergeSortTree churn every op: a wide-window countLE range-rank (the gated O(log^2 n) read),
+        // plus a value-window rangeCount every 8th. The tree is IMMUTABLE (no writes), so this is a pure
+        // read-only descent that must allocate zero bytes and trigger no major collection.
+        sink = (sink + (mst.countLE(1, CAP - 2, i & 0xffff) | 0)) | 0;
+        if ((i & 7) === 0) { const lo = i & (MASK >> 1); sink = (sink + (mst.rangeCount(lo, lo + 100, 0, i & 0xffff) | 0)) | 0; }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1184,6 +1223,12 @@ async function main() {
     const abSt2 = new SegmentTree2D(32, 32, 'sum'); // 4096 cells; one flat Float64Array, reused
     const abSa = new SortedArray(1024); // two Float64Arrays, reused across the soak (copyWithin in place)
     const abPst = new PersistentSegTree(1024, 256, 'sum'); // node columns + _roots, reused (bump + clear in place)
+    // MergeSortTree is IMMUTABLE (build-once, no mutators): one flat _t run table, fixed at
+    // construction. Built ONCE here and only READ in the soak below, so its backing store trivially
+    // cannot grow -- the static-member analogue of the fill/clear reuse the mutable members prove.
+    const abMstSrc = new Float64Array(1024);
+    for (let i = 0; i < 1024; i++) abMstSrc[i] = (i * 2654435761) & 0xffff;
+    const abMst = MergeSortTree.build(abMstSrc);
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1273,6 +1318,13 @@ async function main() {
         if (abPst.query(abpv, 0, 1023) < 0) conservationOk = false; // reachable head stays queryable
         abPst.clear();
         if (abPst.versions !== 1 || abPst._next !== 1 + (2 * 1024 - 1)) conservationOk = false; // rewound
+        // MergeSortTree: IMMUTABLE, so it has no fill/clear cycle -- a batch of read-only range-rank
+        // queries over the pre-built tree instead. Reads never grow the flat _t table (a botched
+        // grow-on-read would reallocate it here). The result must stay in [0, length] every call.
+        for (let i = 0; i < 1024; i++) {
+            const c = abMst.countLE(0, 1023, i & 0xffff);
+            if (c < 0 || c > 1024) conservationOk = false;
+        }
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
         // half the slots, then a refill (splaying), then clear -- the invariant must hold
@@ -1399,7 +1451,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

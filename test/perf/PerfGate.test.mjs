@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1424,6 +1424,63 @@ const pstUpdateChurn = {
     statsOf(s) { return { grows: pstGrows(s) }; },
 };
 
+/** MergeSortTree's zero-alloc counter: its single flat Float64Array run table, fixed at
+ *  construction and IMMUTABLE, so the delta across the window must be 0 -- countLE / rangeCount are
+ *  read-only recursive descents that binary-search sorted runs using only local scalars. */
+function mstGrows(s) { return s.mst._t.buffer.byteLength; }
+
+const MST_LEN = 1 << 12;        // 4096 elements
+const MSTMASK = MST_LEN - 1;
+
+/** An immutable MergeSortTree over MST_LEN random values -- a warmed, stable run table for reads. */
+function mstFill() {
+    const vals = new Float64Array(MST_LEN);
+    for (let i = 0; i < MST_LEN; i++) vals[i] = (i * 2654435761) & 0xffff;
+    return MergeSortTree.build(vals);
+}
+
+/**
+ * countLE churn: each op range-ranks a WIDE index window [1, MST_LEN-2] for a cycling value
+ * threshold -- a read-only O(log^2 n) descent that binary-searches each canonical node's sorted run,
+ * folded into an int32 accumulator. The GATED O(log^2 n) Witness op; zero allocation. (This lane was
+ * the qa gap the prior cycle missed -- countLE MUST have its own zero-alloc perf scenario.)
+ */
+const mstCountLEChurn = {
+    name: 'MergeSortTree countLE churn (read-only, immutable run table)',
+    setup() { return { mst: mstFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.mst;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.countLE(1, MST_LEN - 2, tick & 0xffff) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: mstGrows(s) }; },
+};
+
+/**
+ * rangeCount churn: each op counts a VALUE-window within a cycling sub-index-range -- countLE(vhi) -
+ * countLT(vlo) over the same canonical decomposition, folded into an int32 accumulator. Read-only,
+ * zero allocation.
+ */
+const mstRangeCountChurn = {
+    name: 'MergeSortTree rangeCount churn (value-window read)',
+    setup() { return { mst: mstFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.mst;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = tick & (MSTMASK >> 1);
+            acc = (acc + (t.rangeCount(lo, lo + 100, 0, tick & 0xffff) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: mstGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1467,6 +1524,7 @@ zgcSuite({
         f2UpdateChurn, f2RectSumChurn, f2PrefixAtSetMix,
         st2UpdateChurn, st2QueryChurn, st2AtQueryMix,
         saGetChurn, saSetChurn, saShiftChurn, saOrderMix,
-        pstQueryChurn, pstAtChurn, pstUpdateChurn],
+        pstQueryChurn, pstAtChurn, pstUpdateChurn,
+        mstCountLEChurn, mstRangeCountChurn],
     mustFail: [teethMustFailAlloc],
 });

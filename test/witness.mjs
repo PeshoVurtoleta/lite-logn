@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -396,6 +396,28 @@ export const SA_GET_SLOPE_HI = 1.38;          // median 0.984 * 1.4
 export const PST_QUERY_SLOPE_LO = 23.55;      // median 39.25 * 0.6
 export const PST_QUERY_SLOPE_HI = 54.95;      // median 39.25 * 1.4
 
+// --- MergeSortTree (v0.16.0): shared R^2 floor, OWN countLE band on the SQUARED-log axis (0018) --
+// The family's THIRD squared-log witness member (Fenwick2D / SegmentTree2D were the first two). A
+// MergeSortTree countLE descends the O(log n) CANONICAL nodes covering the index range and runs a
+// binary search of each node's sorted run -- O(log n) nodes x O(log n) per search = O(log^2 n), NOT
+// O(log n). So the honest fit is nsPerOp = intercept + slope*(log2 n)^2 -- a STRAIGHT line on the
+// SAME (log2 n)^2 x-axis (the `xOf` registry hook Fenwick2D introduced; every 1D single-log lane
+// keeps the default xOf = log2). The shared R^2 floor (0.958, D-02) is UNCHANGED; this op declares
+// its OWN slope band (per-level^2 cost) = median-of-15 fit-runs * [0.6, 1.4] on this machine. STATIC
+// WORST-CASE member (a build-once immutable tree has no randomization / amortization), so there is
+// deliberately NO max-single-op disclosure line (the Fenwick2D / SegmentTree2D / SortedArray-read
+// precedent). The O(n) LINEAR-SCAN foil (a naive count of values <= x over the index range) is
+// EXPONENTIAL on the (log2 n)^2 axis and MUST miss the floor. Calibration (this machine, median-of-15
+// fit runs on the (log2 n)^2 axis over lengths 2^12..2^18): the band values below are CALIBRATED
+// inline. Band = median * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a legitimately
+// faster future run is not false-failed; the R^2 floor rejects non-squared-log shapes. Calibration
+// (this machine, median-of-9 fit runs on the (log2 n)^2 axis over lengths 2^13..2^18, 60000-iter
+// min-over-10-batches): median fit-run slope 5.218 ns/level^2 (single-fit R^2 min 0.9687, median
+// 0.9752, 0/9 below the 0.958 floor -- but the lane opts into the median-of-fits MST_FIT_RUNS hook
+// like Fenwick2D / PST for post-torture thermal robustness). Band = median 5.218 * [0.6, 1.4].
+export const MST_COUNTLE_SLOPE_LO = 3.13;     // median 5.218 * 0.6
+export const MST_COUNTLE_SLOPE_HI = 7.31;     // median 5.218 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -490,6 +512,24 @@ const SA_FIT_RUNS = 7;
 // rejects any non-log shape.
 const PST_QUERY_SWEEP = [11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
 const PST_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// MergeSortTree's gated countLE sweep: EXACT powers of two 2^13..2^18. countLE binary-searches each
+// canonical node's sorted run, so its cells reach across a table of (H+1)*n Float64 = up to ~19 * 2^18
+// * 8 B ~ 40 MB at the top -- pinned at 2^18 so the read stays in the steady band (above it the table
+// leaves cache and DRAM latency curves the (log2 n)^2 fit -- lite-o1 ADR-0004). The bottom starts at
+// 2^13 (NOT 2^12): the 2^12 point's lower-order constant terms visibly bend the squared-log line and
+// drop R^2 toward the floor (calibration measured single-fit R^2 median ~0.956 with 2^12 in vs ~0.975
+// without -- the SortedArray/SplayTree "drop the too-fast low point" lesson). Exact powers keep the
+// canonical-node count regular so the (log2 n)^2 staircase maps cleanly onto the continuous squared-log
+// axis. It fits the (log2 n)^2 axis (the Fenwick2D / SegmentTree2D hook), NOT a single log. Its O(n)
+// linear-scan foil stays on the small O(n^2)-affordable sweep.
+const MST_SWEEP = [13, 14, 15, 16, 17, 18].map((k) => 2 ** k);
+const MST_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// MergeSortTree.countLE gates on the MEDIAN of MST_FIT_RUNS independent sweep-fits (the registry
+// `fitRuns` hook), same mechanism as Fenwick2D / SegmentTree.update / PST: the witness runs right after
+// torture (2M+ ops across 16 members), whose scheduler / thermal residue tilts the occasional sweep;
+// the median-of-fits rejects it. Odd so the median is a real sample. Measurement-quality only: the frozen
+// 0.958 floor and the slope band are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
+const MST_FIT_RUNS = 7;
 // PersistentSegTree.query gates on the MEDIAN of PST_FIT_RUNS independent sweep-fits (the registry
 // `fitRuns` hook), same mechanism as SegmentTree.update / PairingHeap / FibonacciHeap: the witness
 // runs right after torture (2M+ ops across 15 members), whose scheduler / thermal residue tilts the
@@ -1333,6 +1373,64 @@ function measureSortedArrayGetFoil(n) {
     return elapsed / count;
 }
 
+// --- MergeSortTree measurement (countLE hot op + its O(n) linear-scan foil) ---
+// The tree is built OUTSIDE timing and held immutable at size n; the timed window is the countLE
+// descent only, over a WIDE index window [1, n-2] (a regular ~2*log2(n) canonical-node decomposition)
+// with 1024 random value thresholds cycled so many search paths are averaged. Same min-over-batches
+// discipline as SortedArray/SegmentTree.query. MergeSortTree has NO RNG on the hot path, so its
+// countLE line is a pure DETERMINISTIC worst-case O(log^2 n) descent + per-node binary search.
+const MST_ITERS = 60000;   // hammered ops per timed batch
+const MST_BATCH = 10;      // min-over-batches
+const MST_TARGETS = 1024;  // distinct random value thresholds cycled per batch (pow2 mask)
+
+// countLE: fold the widest gated window [1, n-2] for random thresholds. Return the MIN per-op time.
+function measureMstCountLE(n) {
+    const rnd = mulberry32(0x1234 ^ n);
+    const vals = new Float64Array(n);
+    for (let i = 0; i < n; i++) vals[i] = (rnd() * 65536) | 0;
+    const t = new MergeSortTree(vals);
+    const xs = new Float64Array(MST_TARGETS);
+    const rx = mulberry32(0x5A17 ^ n);
+    for (let i = 0; i < MST_TARGETS; i++) xs[i] = (rx() * 65536) | 0;
+    const lo = 1, hi = n - 2;
+    let sink = 0;
+    for (let w = 0; w < MST_ITERS; w++) sink += t.countLE(lo, hi, xs[w & (MST_TARGETS - 1)]); // warm
+    let best = Infinity;
+    for (let b = 0; b < MST_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < MST_ITERS; i++) sink += t.countLE(lo, hi, xs[i & (MST_TARGETS - 1)]);
+        const e = (nowNs() - t0) / MST_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return best;
+}
+
+// countLE FOIL: a naive LINEAR SCAN counting values <= x over [1, n-2] of a plain Float64Array =
+// O(n) per query (the default before you know the merge-sort-tree trick). Exponential on the
+// (log2 n)^2 axis, so a straight-line fit MUST MISS the R^2 floor. O(n^2) total.
+function measureMstCountLEFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const a = new Float64Array(n);
+    const rnd = mulberry32(0x2c3d ^ n);
+    for (let i = 0; i < n; i++) a[i] = (rnd() * 65536) | 0;
+    const x = 32768;
+    { let c = 0; for (let k = 1; k <= n - 2; k++) if (a[k] <= x) c++; if (c < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let c = 0;
+            for (let k = 1; k <= n - 2; k++) if (a[k] <= x) c++; // O(n) scan-count
+            sink += c;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- PersistentSegTree measurement (query hot op + its O(n) linear-scan foil) -
 // The tree is built OUTSIDE timing: v0 plus PST_VERS path-copying updates so several versions
 // coexist, then the timed window is the range query [1, n-2] over a RANDOM existing version
@@ -2098,11 +2196,29 @@ export const MEMBERS = [
         // O(n) shape fails every fit.
         fitRuns: PST_FIT_RUNS,
     },
+    {
+        name: 'MergeSortTree',
+        op: 'countLE',
+        sweep: MST_SWEEP,
+        foilSweep: MST_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0018 inherits D-08)
+        slopeLo: MST_COUNTLE_SLOPE_LO,         // own band on the (log2 n)^2 axis
+        slopeHi: MST_COUNTLE_SLOPE_HI,
+        run: measureMstCountLE,
+        foil: measureMstCountLEFoil,
+        foilName: 'linear scan-count (O(n) per query)',
+        xOf: (x) => Math.log2(x) ** 2,         // the SQUARED-log axis (Fenwick2D introduced it)
+        unit: 'ns/level^2',
+        // MEDIAN-OF-FITS (0018, measurement-quality only): countLE binary-searches scattered node runs
+        // across a large table, so a single fit's R^2 can dip below the floor in a minority of runs; the
+        // median-of-MST_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
+        fitRuns: MST_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v0.15.0\n');
-    process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D: slope * (log2 n)^2)\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v0.16.0\n');
+    process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
     // which leaves scheduler / thermal residue that tilts the shallow, sub-4ns fast

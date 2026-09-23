@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 0.15.0 at the PersistentSegTree release', () => {
-    assert.equal(VERSION, '0.15.0');
+test('VERSION is exactly 0.16.0 at the MergeSortTree release', () => {
+    assert.equal(VERSION, '0.16.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (15 members) --------
+// --- frozen export surface: VERSION + the shipped members (16 members) --------
 
-test('LogN.js exports exactly VERSION + the fifteen members at v0.15.0 (adds PersistentSegTree)', () => {
+test('LogN.js exports exactly VERSION + the sixteen members at v0.16.0 (adds MergeSortTree)', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the fifteen members incl PersistentSegTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the sixteen members incl MergeSortTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -59,6 +59,7 @@ test('LogN.js exports exactly VERSION + the fifteen members at v0.15.0 (adds Per
     assert.equal(typeof LogNModule.SegmentTree2D, 'function');
     assert.equal(typeof LogNModule.SortedArray, 'function');
     assert.equal(typeof LogNModule.PersistentSegTree, 'function');
+    assert.equal(typeof LogNModule.MergeSortTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -917,4 +918,51 @@ test('PersistentSegTree fails closed with a [lite-logn]-tagged throw on every co
     assert.equal(typeof t.get, 'undefined', 'PersistentSegTree has no get by key (not an ordered map)');
     assert.equal(typeof t.forEach, 'undefined', 'PersistentSegTree has no forEach (a persistent DAG has no single live timeline)');
     void v1;
+});
+
+// --- MergeSortTree (v0.16.0): coercion + [lite-logn] fail-closed tag -----------
+
+test('MergeSortTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { MergeSortTree } = LogNModule;
+    // build / ctor: non-array-like source (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [null, undefined, 42, 'abc', true, Symbol('x'), 5n, {}]) {
+        assert.throws(() => MergeSortTree.build(bad), /\[lite-logn\]/, 'build ' + String(bad));
+        assert.throws(() => new MergeSortTree(bad), /\[lite-logn\]/, 'ctor ' + String(bad));
+    }
+    // out-of-range length
+    assert.throws(() => MergeSortTree.build([]), /\[lite-logn\]/, 'empty');
+    assert.throws(() => MergeSortTree.build({ length: 1.5 }), /\[lite-logn\]/, 'length 1.5');
+    assert.throws(() => MergeSortTree.build({ length: 0x80000000, 0: 1 }), /\[lite-logn\]/, 'length above 2^31-1');
+    // non-finite entry, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n, true]) {
+        assert.throws(() => MergeSortTree.build([1, 2, bad, 4]), /\[lite-logn\]/, 'entry ' + String(bad));
+    }
+    // the (H+1)*n cell product is FLOAT-guarded: a length that would wrap under `| 0` fails CLOSED.
+    assert.throws(() => MergeSortTree.build({ length: 1 << 28 }), /\[lite-logn\]/, 'cell overflow fails closed');
+    const t = MergeSortTree.build([5, 3, 9, 1, 7]);
+    // countLE bad indices / threshold (typeof-first), out-of-range, inverted range
+    for (const bad of [1.5, NaN, Infinity, '2', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => t.countLE(bad, 4, 3), /\[lite-logn\]/, 'countLE lo ' + String(bad));
+        assert.throws(() => t.countLE(0, bad, 3), /\[lite-logn\]/, 'countLE hi ' + String(bad));
+    }
+    for (const bad of [NaN, '3', null, undefined, {}, Symbol('x'), 3n]) {
+        assert.throws(() => t.countLE(0, 4, bad), /\[lite-logn\]/, 'countLE x ' + String(bad));
+    }
+    assert.throws(() => t.countLE(-1, 4, 3), /\[lite-logn\]/, 'countLE lo < 0');
+    assert.throws(() => t.countLE(0, 5, 3), /\[lite-logn\]/, 'countLE hi >= length');
+    assert.throws(() => t.countLE(3, 2, 3), /\[lite-logn\]/, 'countLE lo > hi');
+    // countLE accepts +-Infinity thresholds (legal, not NaN)
+    assert.equal(t.countLE(0, 4, Infinity), 5);
+    assert.equal(t.countLE(0, 4, -Infinity), 0);
+    // rangeCount bad indices / NaN bounds / inverted value-window
+    assert.throws(() => t.rangeCount(1.5, 4, 1, 9), /\[lite-logn\]/, 'rangeCount lo non-integer');
+    assert.throws(() => t.rangeCount(0, 5, 1, 9), /\[lite-logn\]/, 'rangeCount hi >= length');
+    assert.throws(() => t.rangeCount(0, 4, NaN, 9), /\[lite-logn\]/, 'rangeCount vlo NaN');
+    assert.throws(() => t.rangeCount(0, 4, 1, NaN), /\[lite-logn\]/, 'rangeCount vhi NaN');
+    assert.throws(() => t.rangeCount(0, 4, Symbol('x'), 9), /\[lite-logn\]/, 'rangeCount vlo Symbol');
+    assert.throws(() => t.rangeCount(0, 4, 1, 9n), /\[lite-logn\]/, 'rangeCount vhi BigInt');
+    assert.throws(() => t.rangeCount(0, 4, 9, 1), /\[lite-logn\]/, 'rangeCount vlo > vhi');
+    // MergeSortTree is STATIC / immutable: it deliberately has NO mutators / clear.
+    assert.equal(typeof t.set, 'undefined', 'MergeSortTree has no set (immutable, build-once)');
+    assert.equal(typeof t.clear, 'undefined', 'MergeSortTree has no clear (immutable, build-once)');
 });

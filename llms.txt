@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 0.15.0
+Version: 0.16.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -28,7 +28,10 @@ READ-OPTIMIZED ordered map: O(log n) get/rank/successor/predecessor + O(1)
 select/keyAt/valueAt/min/max over two parallel sorted arrays, O(n) writes disclosed);
 v0.15.0 adds PersistentSegTree (the family's FIRST persistent / branching structure and
 its FIRST bump/append allocator: a FULLY PERSISTENT segment tree via path-copying where
-every past version stays queryable and any version can be branched off).
+every past version stays queryable and any version can be branched off); v0.16.0 adds
+MergeSortTree (the family's FIRST truly IMMUTABLE member and FIRST offline range-RANK
+structure: a STATIC merge sort tree answering countLE / rangeCount over an index range in
+worst-case O(log^2 n)).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -281,6 +284,31 @@ The roster (one member per session, each landing append-only):
   WORST-CASE O(log n) and is the gated Witness op on the DEFAULT log2(n) axis; `at(version, i)` is the
   O(log n) point read. Recursion (build / query / path-copy) runs on the native call stack, so every
   hot op is 0 B/op. `PST_MAX_LENGTH = 2^30-1`.
+
+- MergeSortTree (v0.16.0) -- the family's FIRST truly IMMUTABLE member and its FIRST offline range-RANK
+  structure: a STATIC merge sort tree that answers, over any INDEX range `[lo, hi]` of a fixed sequence,
+  `countLE(lo, hi, x)` (how many stored values are <= x) and `rangeCount(lo, hi, vlo, vhi)` (how many
+  fall in the value-window `[vlo, vhi]`) in WORST-CASE O(log^2 n), zero-allocation. It is the family's
+  SECOND static member after SortedArray, but the FIRST that is truly immutable: SortedArray is
+  read-optimized-but-mutable, whereas MergeSortTree COPIES its source in at construction and has NO
+  mutators (the SparseTable / lite-o1 static-member contract). THE LOAD-BEARING IDIOM (decisions/0018):
+  a segment tree whose every node stores the SORTED array of its index-range, packed by LEVEL into ONE
+  flat preallocated `Float64Array` of `n * (ceil(log2 n) + 1)` cells (a node at level d covering real
+  index range `[rl, rr)` has its run at flat offset `d * n + rl`). The leaf level is the source in index
+  order; each higher level is built BOTTOM-UP by MERGING each node's two adjacent child runs (into a
+  disjoint region, so no scratch buffer), giving the O(n log n) build. countLE descends the O(log n)
+  CANONICAL nodes fully inside `[lo, hi]` and branch-free binary-searches each node's sorted run
+  (O(log n) nodes x O(log n) per search = O(log^2 n)); rangeCount is `countLE(vhi) - countLT(vlo)` over
+  the same decomposition (a private STRICT-less descent), exact for float bounds. It is PLAIN O(log^2 n)
+  with NO fractional cascading (rejected: buys O(log n) but wrecks the flat, pointer-free zero-GC
+  layout). The kth-smallest-in-range ORDER STATISTIC is DELIBERATELY NOT shipped (a different algorithm;
+  routed to a future WaveletTree) -- this member ships the range-RANK primitives only. O(n log n) BUILD
+  and O(n log n) SPACE are a DISCLOSED co-headline, never hidden. Fail closed: the source must be an
+  array-like of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN / +-Infinity fail closed),
+  the length an integer in [1, MST_MAX_LENGTH], and the `(H+1)*n` cell product guarded by a FLOAT
+  multiply against MST_MAX_CELLS. Query bounds are integers with `0 <= lo <= hi < length`; the
+  value-window needs `vlo <= vhi`. WORST-CASE (no max-single-op line); its witness is the family's THIRD
+  on the SQUARED-log axis ((log2 n)^2). Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -679,6 +707,28 @@ The roster (one member per session, each landing append-only):
   - `PersistentSegTree.build(values, versionCapacity, kind)` -> PersistentSegTree. O(n) seed of version
     0 from an array-like (a snapshot, NOT n updates); fails closed BEFORE the tree is usable on a
     non-array-like, any non-finite entry, or (gcd kind) any negative / non-integer entry.
+
+- `MergeSortTree` -- class. A STATIC, IMMUTABLE offline range-rank tree: over any INDEX range of a
+  fixed sequence it answers `countLE` (how many values <= x) and `rangeCount` (how many in a
+  value-window) in WORST-CASE O(log^2 n), zero-allocation. A segment tree of SORTED runs packed by level
+  into ONE flat `Float64Array` of `n * (ceil(log2 n) + 1)` cells; the source is COPIED in at
+  construction and there are NO mutators. PLAIN O(log^2 n) (no fractional cascading); kth-in-range
+  deferred to a future WaveletTree. O(n log n) build + space a DISCLOSED co-headline.
+  - `new MergeSortTree(values)` -- values an array-like of finite numbers (any order), length an integer
+    in [1, MST_MAX_LENGTH] (2^31-1). COPIES a snapshot in (later mutating the caller's array changes
+    nothing). O(n log n) build. Throws (typeof-guarded FIRST) on a non-array-like, an out-of-range
+    length, a `(H+1)*n` cell product over MST_MAX_CELLS (FLOAT-product guard), or any non-finite entry.
+  - `MergeSortTree.build(values)` -> MergeSortTree. The idiomatic factory; equal to
+    `new MergeSortTree(values)`, same fail-closed doors.
+  - `countLE(lo, hi, x)` -> number. Count of stored values <= x within the INDEX range [lo, hi]
+    INCLUSIVE. WORST-CASE O(log^2 n), 0 B/op (a read-only descent). Fails closed: lo / hi integers with
+    `0 <= lo <= hi < length`; x a number (NaN throws; +-Infinity is a legal threshold), typeof-first.
+  - `rangeCount(lo, hi, vlo, vhi)` -> number. Count of stored values in the VALUE-window [vlo, vhi]
+    INCLUSIVE within the INDEX range [lo, hi] INCLUSIVE. WORST-CASE O(log^2 n), 0 B/op. Fails closed:
+    lo / hi integers with `0 <= lo <= hi < length`; vlo / vhi numbers (not NaN) with `vlo <= vhi`.
+  - `length` / `size` getters -> the element count (the source length); `cells` getter -> the flat
+    run-table cell count (`(ceil(log2 n) + 1) * n`, the disclosed O(n log n) space). All O(1). There is
+    NO clear / mutator / forEach (static + immutable).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.
