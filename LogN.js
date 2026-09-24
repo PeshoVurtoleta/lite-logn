@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -7562,5 +7562,469 @@ export class CartesianTree {
     _badKind(kind) {
         throw new RangeError(
             '[lite-logn] CartesianTree kind must be \'min\' or \'max\', got ' + String(kind));
+    }
+}
+
+// LinkCutTree (v1.3.0 session) -- a DYNAMIC forest: link / cut / evert / path-aggregate in amortized O(log n) (BELOW).
+
+/**
+ * Max LinkCutTree capacity (vertex count): `0x7FFFFFFF` (2^31 - 1). Every vertex is a
+ * fixed SLOT index in the eight pointer-free columns (`_val` / `_agg` Float64, `_l` /
+ * `_r` / `_p` Uint32, `_rev` Uint8); a caller vertex id in `[0, capacity)` maps to slot
+ * `id + 1` so that `NIL = 0` reserves slot 0 and live slots run `[1, capacity]`. The
+ * Uint32 slot arithmetic (child / parent indices + `NIL = 0`), not the byte count, is
+ * the hard ceiling -- the same "the arithmetic caps it" reasoning as SplayTree /
+ * BinomialHeap. (Named distinctly to avoid a module-scope redeclaration of the
+ * identically-valued SplayTree / CartesianTree constants.)
+ */
+const LCT_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A LINK-CUT TREE: the family's first FULLY DYNAMIC forest -- a rooted forest whose
+ * edges are added (`link`) and removed (`cut`) online, re-rooted (`evert` / makeRoot),
+ * and whose path fold (min / max / sum / gcd) between any two connected vertices is
+ * answered in AMORTIZED O(log n). Where SplayTree / Treap are ORDERED MAPS over one
+ * tree and CartesianTree is a STATIC offline RMQ, a link-cut tree maintains an evolving
+ * FOREST: it is the structure behind dynamic connectivity, dynamic MST (link / cut on
+ * the tree edges), and online lowest-common-ancestor / path queries.
+ *
+ * Preferred-path decomposition over SPLAY trees (the Sleator-Tarjan design, the exact
+ * amortized-O(log n) mechanism SplayTree v0.8.0 uses on one tree, reused as the PATTERN
+ * -- NOT the literal top-down code -- here as a bottom-up splay with parent pointers):
+ * the represented forest is partitioned into vertex-disjoint PREFERRED PATHS, each held
+ * as a splay tree keyed by DEPTH (an in-order walk of a path's splay tree yields its
+ * vertices shallow-to-deep). Splay trees are stitched by PATH-PARENT pointers stored in
+ * the SAME `_p` column as splay-tree parents; a node is distinguished as a splay ROOT
+ * (its `_p` is a path-parent, not a real parent) by the standard test "it is not a
+ * child of its parent" (`_l[p] !== x && _r[p] !== x`) -- so no separate column is spent.
+ *
+ * The four hot bodies, all iterative + zero-allocation (native-stack-free, the
+ * SplayTree D-SP1 precedent):
+ *   - `_push(x)` -- resolve the LAZY subtree-reversal flag `_rev` on the way DOWN before
+ *     touching children: swap `_l[x]` / `_r[x]` and TOGGLE each child's `_rev`. Because
+ *     min / max / sum / gcd are all COMMUTATIVE, reversing a path leaves its fold
+ *     unchanged: `_agg` is reversal-INVARIANT, so `_push` NEVER touches `_agg` (there is
+ *     no mirrored aggregate to maintain -- the load-bearing simplification, 0021).
+ *   - `_pull(x)` -- recompute `_agg[x] = fold(_agg[_l[x]], _val[x], _agg[_r[x]])` via the
+ *     ctor-frozen inline `_k` switch (no closure, no function ref); `_agg[NIL]` is the
+ *     fold identity so a missing child folds away.
+ *   - `_splay(x)` -- bottom-up splay of `x` to its splay-tree root: first walk `x` up to
+ *     the root pushing each ancestor onto the preallocated `_stk` scratch, then `_push`
+ *     them top-down (lazy flags must fire before any rotation), then zig / zig-zig /
+ *     zig-zag with parent pointers.
+ *   - `_access(x)` -- make the root-to-`x` path preferred and splay `x` to the top: after
+ *     `_access`, `x`'s splay tree IS the path from its tree root to `x`, so `_agg[x]` is
+ *     the fold over that whole path.
+ *
+ * Surface: `link(child, parent)` / `cut(node)` / `evert(u)` / `findRoot(u)` /
+ * `connected(u, v)` / `pathAggregate(u[, v])` / `setValue(id, v)` / `at(id)` plus the
+ * `capacity` / `kind` / `edges` getters. The fold `kind` ('min' | 'max' | 'sum' | 'gcd')
+ * is FROZEN at construction (a ctor-cached small-int `_k` drives the hot combine); `gcd`
+ * REJECTS negative / non-integer values (the SegmentTree / PersistentSegTree domain
+ * contract). Vertex values are FINITE numbers (typeof-guarded BEFORE coercion; null is
+ * not zero); `setValue` fails closed on a non-finite (or out-of-domain gcd) value. The
+ * vertex set is FIXED at `[0, capacity)` -- `link` / `cut` flip EDGES only, so there is
+ * NO per-op allocation, NO free-list, NO bump allocator; the columns are preallocated
+ * once. `connected(u, v)` is `findRoot(u) === findRoot(v)`.
+ *
+ * Fail-closed doors (all COLD, hoisted OUT of the splay loop): an out-of-range or
+ * non-integer vertex id, a cycle-creating `link` (linking two already-connected
+ * vertices), a self `link`, `cut` of a vertex with no parent edge (a tree root), a
+ * non-finite / out-of-domain value, a bad `kind`, and capacity overflow each throw
+ * `[lite-logn]`. Reads that MUTATE (splay) -- `findRoot` / `pathAggregate` / `connected`
+ * -- validate their ids FIRST, before any splay (the SplayTree 0010 fail-OPEN
+ * precedent). NOT-FOR: this member answers PATH folds only; a SUBTREE aggregate is the
+ * future EulerTourTree's job (decisions/0021). Every hot op allocates ZERO bytes after
+ * construction.
+ */
+export class LinkCutTree {
+    /**
+     * @param {number} capacity  exact vertex count; integer in [1, 2^31-1]. Vertex ids are [0, capacity).
+     * @param {'min'|'max'|'sum'|'gcd'} [kind='min']  the frozen associative + commutative path fold.
+     */
+    constructor(capacity, kind = 'min') {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > LCT_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] LinkCutTree capacity must be an integer in [1, 2^31-1], got ' +
+                String(capacity));
+        }
+        const k = kind === 'min' ? 0 : kind === 'max' ? 1 : kind === 'sum' ? 2 :
+            kind === 'gcd' ? 3 : -1;
+        if (k === -1) this._badKind(kind);
+        this._cap = capacity;                          // vertex count (fixed)
+        this._k = k;                                   // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
+        this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity (agg of NIL)
+        const s = capacity + 1;                        // slot 0 reserved NIL; live slots [1, cap]
+        this._val = new Float64Array(s);               // per-vertex value (default 0)
+        this._agg = new Float64Array(s);               // fold over the splay subtree at slot
+        this._l = new Uint32Array(s);                  // splay left child; NIL = 0
+        this._r = new Uint32Array(s);                  // splay right child; NIL = 0
+        this._p = new Uint32Array(s);                  // splay parent OR path-parent; NIL = 0
+        this._rev = new Uint8Array(s);                 // lazy subtree-reversal flag
+        this._stk = new Uint32Array(s);                // splay push-down scratch (preallocated)
+        this._edges = 0;                               // live edge count
+        // NIL's aggregate is the fold identity so a missing child folds away (min +Inf / max -Inf;
+        // sum / gcd identity is 0, already the Float64Array default). Real singleton nodes have
+        // agg = val = 0 (both defaults), consistent for a one-node splay tree.
+        if (this._idv !== 0) this._agg[0] = this._idv;
+    }
+
+    /** The fixed vertex count (capacity) this forest was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen path fold, 'min' | 'max' | 'sum' | 'gcd'. O(1). */
+    get kind() {
+        const k = this._k;
+        return k === 0 ? 'min' : k === 1 ? 'max' : k === 2 ? 'sum' : 'gcd';
+    }
+
+    /** The number of edges currently in the forest (link increments, cut decrements). O(1). */
+    get edges() { return this._edges; }
+
+    /**
+     * Add the edge `child -> parent`, making `child` a child of `parent`. Amortized O(log n):
+     * evert `child` to root its own tree, then hang it under `parent` by a single path-parent
+     * pointer (edges flip only -- no allocation). Fails closed: a bad vertex id, a self-link, or
+     * a CYCLE-creating link (the two vertices are already connected) each throw `[lite-logn]` as a
+     * no-op. Ids are typeof-guarded BEFORE any splay.
+     * @param {number} child   vertex id in [0, capacity)
+     * @param {number} parent  vertex id in [0, capacity)
+     * @returns {this}
+     */
+    link(child, parent) {
+        const cs = this._slot('link', child);
+        const ps = this._slot('link', parent);
+        if (cs === ps) this._badLink(child, parent);
+        if (this._rootSlot(cs) === this._rootSlot(ps)) this._badLink(child, parent);
+        this._evert(cs);
+        this._p[cs] = ps;                              // path-parent link: attach cs's tree under parent
+        this._edges = (this._edges + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove the edge between `node` and its parent (toward the current root). Amortized O(log n):
+     * access `node`, then split off its shallower (parent-side) subtree. Fails closed: a bad vertex
+     * id, or cutting a vertex that has NO parent edge (a tree root) each throw `[lite-logn]` as a
+     * no-op. Id typeof-guarded BEFORE the splay.
+     * @param {number} node  vertex id in [0, capacity)
+     * @returns {this}
+     */
+    cut(node) {
+        const xs = this._slot('cut', node);
+        this._access(xs);
+        const l = this._l[xs];
+        if (l === 0) this._badCut(node);              // no parent edge -> node is its tree's root
+        this._l[xs] = 0;
+        this._p[l] = 0;
+        this._pull(xs);
+        this._edges = (this._edges - 1) | 0;
+        return this;
+    }
+
+    /**
+     * Re-root the tree containing `u` at `u` (makeRoot). Amortized O(log n): access `u` then flip the
+     * lazy reversal flag of its splay tree, reversing the root-to-`u` path so `u` becomes the shallowest.
+     * Fails closed on a bad id (typeof-guarded FIRST). @param {number} u vertex id in [0, capacity)
+     * @returns {this}
+     */
+    evert(u) {
+        this._evert(this._slot('evert', u));
+        return this;
+    }
+
+    /**
+     * The root vertex of the tree containing `u` (under the current rooting). Amortized O(log n): a
+     * MUTATING read -- access `u`, walk to the shallowest (min-depth) node of its splay tree, splay it.
+     * Fails closed on a bad id BEFORE any splay (the 0010 fail-OPEN precedent).
+     * @param {number} u  vertex id in [0, capacity)
+     * @returns {number} the root vertex id
+     */
+    findRoot(u) {
+        return this._rootSlot(this._slot('findRoot', u)) - 1;
+    }
+
+    /**
+     * True iff `u` and `v` are in the SAME tree (`findRoot(u) === findRoot(v)`). Amortized O(log n): a
+     * MUTATING read (both accesses splay). Fails closed on a bad id BEFORE any splay.
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {boolean}
+     */
+    connected(u, v) {
+        const us = this._slot('connected', u);
+        const vs = this._slot('connected', v);
+        if (us === vs) return true;
+        return this._rootSlot(us) === this._rootSlot(vs);
+    }
+
+    /**
+     * The path fold. With ONE argument: the fold over the path from the tree ROOT to `u` (access `u`,
+     * read its aggregate). With TWO arguments: the fold over the path `u..v` -- evert `u` (making it the
+     * root), access `v`, read `v`'s aggregate = the fold over `u..v` INCLUSIVE of both endpoints. Both
+     * are AMORTIZED O(log n) MUTATING reads. Fails closed on a bad id BEFORE any splay; a two-argument
+     * call with `u`, `v` in DIFFERENT trees throws `[lite-logn]` (no path exists).
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} [v]  vertex id in [0, capacity); when present, fold the path u..v
+     * @returns {number} the fold over the path
+     */
+    pathAggregate(u, v) {
+        const us = this._slot('pathAggregate', u);
+        // A MISSING second endpoint (`v === undefined`) selects the one-endpoint root-to-`u` fold. This is the
+        // GATED witness hot path, so the branch is VALUE-based: reading `arguments.length` here materialized the
+        // arguments object on the optimized path (a per-call transient the perf gate caught), so it is gone.
+        // Consequence (JS default-parameter semantics -- an explicit `undefined` IS "omitted"): a call
+        // `pathAggregate(u, undefined)` resolves to this one-endpoint form, NOT a fail-closed bad-id throw.
+        // Every OTHER non-integer second id (null, NaN, a string, an object, ...) is `!== undefined` and still
+        // fails closed via `_slot` in the two-endpoint branch below.
+        if (v === undefined) {
+            this._access(us);
+            return this._agg[us];
+        }
+        const vs = this._slot('pathAggregate', v);
+        if (us === vs) return this._val[us];
+        // Connectivity door FIRST (only splays -- the logical forest is unchanged): a two-endpoint fold
+        // across different trees has no path. Fails closed cleanly, before any evert half-mutates.
+        if (this._rootSlot(us) !== this._rootSlot(vs)) this._badPath(u, v);
+        this._evert(us);
+        this._access(vs);
+        return this._agg[vs];
+    }
+
+    /**
+     * Set vertex `id`'s value to `value` (ABSOLUTE), then fix the aggregate. Amortized O(log n): access
+     * `id`, write `_val`, `_pull`. Fails closed: a bad vertex id, a non-finite value, or (gcd kind) a
+     * negative / non-integer value each throw `[lite-logn]` as a no-op. Value typeof-guarded FIRST.
+     * @param {number} id     vertex id in [0, capacity)
+     * @param {number} value  a finite number (nonnegative integer for the gcd kind)
+     * @returns {this}
+     */
+    setValue(id, value) {
+        if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
+        if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        const xs = this._slot('setValue', id);
+        this._access(xs);
+        this._val[xs] = value;
+        this._pull(xs);
+        return this;
+    }
+
+    /**
+     * Vertex `id`'s stored value. O(1), NON-mutating (no splay). Fails closed on a bad id.
+     * @param {number} id  vertex id in [0, capacity)
+     * @returns {number}
+     */
+    at(id) {
+        return this._val[this._slot('at', id)];
+    }
+
+    /**
+     * Reset the forest to isolated singleton vertices: every edge is dropped (`_l` / `_r` / `_p` -> NIL),
+     * every lazy reversal flag is cleared, every value + subtree aggregate returns to the fold identity, and
+     * the edge count returns to 0 -- the exact pristine state of a freshly constructed instance. O(n) over the
+     * fixed columns, ZERO allocation (the preallocated buffers are reset IN PLACE, never reallocated), so the
+     * instance is immediately reusable. @returns {this}
+     */
+    clear() {
+        this._l.fill(0);
+        this._r.fill(0);
+        this._p.fill(0);
+        this._rev.fill(0);
+        this._val.fill(0);
+        this._agg.fill(0);
+        if (this._idv !== 0) this._agg[0] = this._idv; // NIL's aggregate stays the fold identity (min +Inf / max -Inf)
+        this._edges = 0;
+        return this;
+    }
+
+    // ---- private hot bodies (zero allocation) --------------------------------
+
+    /**
+     * @private True iff slot `x` is the ROOT of its splay tree: its `_p` is a PATH-parent (or NIL), not
+     * a real splay-tree parent -- i.e. `x` is not a child of `_p[x]`. NIL's columns stay 0 so a NIL
+     * parent (slot 0) returns true for any real `x >= 1`. The standard preferred-path root test.
+     */
+    _isRoot(x) {
+        const p = this._p[x];
+        return this._l[p] !== x && this._r[p] !== x;
+    }
+
+    /**
+     * @private Resolve the lazy subtree-reversal flag on slot `x` on the way DOWN (before children are
+     * touched): swap the two children and TOGGLE each real child's `_rev`. `_agg` is untouched --
+     * min / max / sum / gcd are commutative, so a reversed path folds to the same value (0021). Guards
+     * NIL children so slot 0's columns stay clean. 0 B/op.
+     */
+    _push(x) {
+        if (this._rev[x] !== 0) {
+            const l = this._l[x], r = this._r[x];
+            this._l[x] = r; this._r[x] = l;
+            if (l !== 0) this._rev[l] ^= 1;
+            if (r !== 0) this._rev[r] ^= 1;
+            this._rev[x] = 0;
+        }
+    }
+
+    /**
+     * @private Recompute `_agg[x]` from its children and own value via the ctor-frozen inline `_k`
+     * switch (no closure / function ref). `_agg[NIL]` is the fold identity so a missing child folds
+     * away. 0 B/op.
+     */
+    _pull(x) {
+        const l = this._l[x], r = this._r[x], k = this._k;
+        const al = this._agg[l], ar = this._agg[r], v = this._val[x];
+        let a;
+        if (k === 0) { a = al < v ? al : v; a = a < ar ? a : ar; }
+        else if (k === 1) { a = al > v ? al : v; a = a > ar ? a : ar; }
+        else if (k === 2) { a = al + v + ar; }
+        else { a = segGcd(segGcd(al, v), ar); }
+        this._agg[x] = a;
+    }
+
+    /**
+     * @private One splay-tree rotation lifting `x` above its parent `p` (with parent pointers). Rewires
+     * the moved middle subtree, fixes `p`'s grandparent link ONLY when `p` was a real child of `g`
+     * (else `x` inherits `g` as a PATH-parent, already set by `_p[x] = g`), then `_pull`s `p` and `x`.
+     * 0 B/op.
+     */
+    _rotate(x) {
+        const p = this._p[x], g = this._p[p];
+        if (this._l[p] === x) {                        // x is p's left child: rotate right
+            const b = this._r[x];
+            this._r[x] = p; this._l[p] = b;
+            if (b !== 0) this._p[b] = p;
+        } else {                                       // x is p's right child: rotate left
+            const b = this._l[x];
+            this._l[x] = p; this._r[p] = b;
+            if (b !== 0) this._p[b] = p;
+        }
+        this._p[p] = x;
+        this._p[x] = g;
+        if (g !== 0) {                                 // fix g's child pointer only if p was a real child
+            if (this._l[g] === p) this._l[g] = x;
+            else if (this._r[g] === p) this._r[g] = x;
+        }
+        this._pull(p);
+        this._pull(x);
+    }
+
+    /**
+     * @private Bottom-up splay of `x` to the root of its splay tree. First walk `x` up to the root,
+     * pushing each ancestor onto the preallocated `_stk` scratch, then `_push` them TOP-DOWN so every
+     * lazy reversal fires before any rotation touches a child. Then zig / zig-zig / zig-zag until `x`
+     * is the splay root. NO recursion, NO per-op allocation. 0 B/op.
+     */
+    _splay(x) {
+        let top = 0;
+        let y = x;
+        this._stk[top++] = y;
+        while (!this._isRoot(y)) { y = this._p[y]; this._stk[top++] = y; }
+        while (top > 0) this._push(this._stk[--top]);
+        while (!this._isRoot(x)) {
+            const p = this._p[x], g = this._p[p];
+            if (!this._isRoot(p)) {
+                // zig-zig (x and p same side): rotate p first; else zig-zag: rotate x.
+                if ((this._l[g] === p) === (this._l[p] === x)) this._rotate(p);
+                else this._rotate(x);
+            }
+            this._rotate(x);
+        }
+    }
+
+    /**
+     * @private Make the path from `x`'s tree root to `x` preferred, and splay `x` to the top of the
+     * resulting splay tree. After it, `x`'s splay tree IS that root-to-`x` path (so `_agg[x]` is the
+     * path fold and `_l[x]` leads to the shallowest node). 0 B/op.
+     */
+    _access(x) {
+        this._splay(x);
+        this._r[x] = 0;                               // drop the deeper preferred child (becomes a path-child)
+        this._pull(x);
+        while (this._p[x] !== 0) {                    // climb path-parent links, switching preferred children
+            const w = this._p[x];
+            this._splay(w);
+            this._r[w] = x;                           // x becomes w's preferred (deeper) child
+            this._pull(w);
+            this._splay(x);
+        }
+    }
+
+    /**
+     * @private Re-root `x`'s tree at `x`: access then flip the lazy reversal flag of the whole root-to-`x`
+     * splay tree. 0 B/op.
+     */
+    _evert(x) {
+        this._access(x);
+        this._rev[x] ^= 1;
+    }
+
+    /**
+     * @private The slot of the root vertex of `x`'s tree: access `x`, walk to the shallowest node
+     * (min depth = leftmost, pushing lazy flags on the way down), splay it, return it. 0 B/op.
+     */
+    _rootSlot(x) {
+        this._access(x);
+        let r = x;
+        this._push(r);
+        while (this._l[r] !== 0) { r = this._l[r]; this._push(r); }
+        this._splay(r);
+        return r;
+    }
+
+    // ---- cold path only: id resolution + throw builders ----------------------
+
+    /** @private Validate a public vertex id (typeof-first) and map it to its slot `id + 1`. */
+    _slot(op, id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(op, id);
+        }
+        return id + 1;
+    }
+
+    /** @private */
+    _badId(op, id) {
+        throw new RangeError(
+            '[lite-logn] LinkCutTree ' + op + ' needs an integer vertex id in [0, ' + this._cap +
+            '), got ' + String(id));
+    }
+
+    /** @private */
+    _badLink(child, parent) {
+        throw new Error(
+            '[lite-logn] LinkCutTree link(' + String(child) + ', ' + String(parent) +
+            ') would create a cycle or self-loop (vertices already connected)');
+    }
+
+    /** @private */
+    _badCut(node) {
+        throw new Error(
+            '[lite-logn] LinkCutTree cut(' + String(node) + ') has no parent edge (it is a tree root)');
+    }
+
+    /** @private */
+    _badPath(u, v) {
+        throw new Error(
+            '[lite-logn] LinkCutTree pathAggregate(' + String(u) + ', ' + String(v) +
+            ') vertices are in different trees (no path)');
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] LinkCutTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badGcdValue(value) {
+        throw new RangeError(
+            '[lite-logn] LinkCutTree gcd value must be a nonnegative integer, got ' + String(value));
+    }
+
+    /** @private */
+    _badKind(kind) {
+        throw new RangeError(
+            '[lite-logn] LinkCutTree kind must be "min", "max", "sum" or "gcd", got ' + String(kind));
     }
 }

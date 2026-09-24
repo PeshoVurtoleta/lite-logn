@@ -1,10 +1,11 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v1.2.0 eighteen members have
+avoid, and how to measure the logarithm yourself. At v1.3.0 nineteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
-SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree and CartesianTree -- so this guide carries their per-member sections. It is NOT an API
+SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree,
+CartesianTree and LinkCutTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -33,7 +34,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v1.2.0 all eighteen members have
+`(am)` = amortized, `(exp)` = expected. At v1.3.0 all nineteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -100,9 +101,14 @@ START -- what do you need?
 |   (build ONCE, then query forever; immutable)               -> WaveletTree (wc)     [v1.1.0]
 |
 +-- OFFLINE range MINIMUM / MAXIMUM over a FIXED sequence: the
-    INDEX (or value) of the extreme in an INDEX range (RMQ),
-    AND you want a walkable parent/child/depth tree (RMQ = LCA)?
-    (build ONCE, then query forever; immutable)               -> CartesianTree (wc)   [v1.2.0]
+|   INDEX (or value) of the extreme in an INDEX range (RMQ),
+|   AND you want a walkable parent/child/depth tree (RMQ = LCA)?
+|   (build ONCE, then query forever; immutable)               -> CartesianTree (wc)   [v1.2.0]
+|
++-- A DYNAMIC FOREST of rooted trees under LINK / CUT (plus
+    evert / reroot) where you fold a PATH (min / max / sum /
+    gcd) or ask connectivity as the tree SHAPE changes edge by
+    edge? (dynamic connectivity / dynamic MST / LCA under edits) -> LinkCutTree (amortized) [v1.3.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -192,10 +198,11 @@ the leanest iteration); reach for a BST when inserts and deletes are frequent.
 | OFFLINE range-RANK over a FIXED sequence: how many values <= x (or in a value-window) fall in an INDEX range; build once, immutable | MergeSortTree | O(log^2 n) countLE / rangeCount; O(n log n) build + space (disclosed) | 0.16.0 |
 | OFFLINE range ORDER STATISTIC over a FIXED sequence: k-th smallest value in an INDEX range (quantile / median), plus access / rank / select + O(log n) rangeCount; build once, immutable | WaveletTree | O(log n) access / rank / select / quantile / rangeCount; O(n log sigma) build + space (disclosed) | 1.1.0 |
 | OFFLINE range MINIMUM / MAXIMUM over a FIXED sequence: the INDEX (or value) of the extreme in an INDEX range (RMQ), AND you want a walkable parent/child/depth tree (RMQ = LCA); build once, immutable | CartesianTree | O(log n) rangeMinIndex / rangeMin via an LCA climb; O(1) at / parent / left / right / depth / root; O(n) build + O(n log n) lift + space (disclosed) | 1.2.0 |
+| DYNAMIC forests: PATH aggregates (min / max / sum / gcd) under link / cut / evert, dynamic connectivity, dynamic MST / LCA under edits -- the tree SHAPE changes | LinkCutTree | amortized O(log n) link / cut / evert / findRoot / connected / pathAggregate / setValue; O(1) at; fixed vertex set, EDGES flip only (0 B/op) | 1.3.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's, WaveletTree's and CartesianTree's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's, WaveletTree's, CartesianTree's and LinkCutTree's are below).
 
 ---
 
@@ -224,6 +231,7 @@ The default log2(n)-axis ops, cheapest per level first:
 | `BinaryHeap.pop` | 8.4 | 0.996 | 16 | repeated extremum + addressable reprioritize |
 | `MinMaxHeap.popMin` | 10.3 | 0.99 | 12 | a double-ended priority queue (both extremes), the leanest heap store |
 | `SkipList.set` | 12.1 | 0.985 | 88 | as above -- insert is a double descent + a random-height splice |
+| `LinkCutTree.pathAggregate` | ~56 | 0.99 | ~33 (8 flat columns / vertex) | dynamic forests: PATH folds under link / cut / evert, dynamic connectivity / MST -- amortized, MAX single-op disclosed |
 | `WaveletTree.quantile` | 15.2 | 0.97 | n log sigma bits | offline range ORDER STATISTIC (k-th smallest in an index range) + access / rank / select + O(log n) rangeCount; build-once immutable |
 | `PairingHeap.popMin` | 21.4 | 0.99 | 36 | an addressable mergeable PQ with O(1) meld + decreaseKey (Dijkstra / Prim) |
 | `SplayTree.get` | 27.3 | 0.98 | 28 | skewed / temporally-local access -- hot keys ride near the root (amortized) |
@@ -996,6 +1004,56 @@ WORST-CASE member (build-once immutable, no randomization / amortization): there
 line. `node --expose-gc test/torture.mjs` proves rangeMinIndex / rangeMin / at / parent / left /
 right / depth at 0 B/op -- each query is a read-only climb / point read over the flat arrays, so even
 a query storm allocates nothing.
+
+---
+
+## LinkCutTree -- the dynamic forest (link / cut / evert) with PATH aggregates
+
+**Reach for it when** your tree TOPOLOGY changes over time and you need, many times, a **path
+aggregate or connectivity query as edges come and go**. Over a FIXED vertex set `[0, capacity)` it
+maintains a FOREST of rooted trees under `link(child, parent)` and `cut(node)`, folding a path
+(`pathAggregate(u)` = ROOT -> `u`; `pathAggregate(u, v)` = the `u..v` path INCLUSIVE) in amortized
+O(log n), plus `findRoot(u)` / `connected(u, v)` (dynamic connectivity), `evert(u)` (re-root /
+makeRoot), and `setValue(id, value)` -- all amortized O(log n), zero-allocation. Canonical uses:
+**dynamic connectivity** in a forest, **dynamic / online MST** (Kruskal with link-cut to test + swap
+the heaviest cycle edge), **LCA under edits**, path-sum / path-min / path-max / path-gcd on a tree
+whose shape is not fixed, and any algorithm built on the Sleator-Tarjan link-cut tree. The fold
+`kind` (`'min'` / `'max'` / `'sum'` / `'gcd'`) is frozen at construction; `link` fails closed on a
+cycle-creating edge, so the structure stays a FOREST.
+
+**Avoid it when:**
+
+- Your data is STATIC (build once, never re-link). For offline range MIN / MAX over a fixed sequence
+  use **CartesianTree** (O(log n), a walkable tree) or **lite-o1's `SparseTable`** (O(1) RMQ); both
+  are cheaper than a link-cut tree when no edge ever moves. LinkCutTree pays for dynamism you are not
+  using.
+- You need a SUBTREE aggregate (fold every descendant of a node), not a PATH aggregate. LinkCutTree
+  is **path-only** -- subtree folds are the documented boundary of a future **EulerTourTree** sibling
+  (an Euler-tour + balanced-BST decomposition). Do not force a subtree query through path folds.
+- Your fold is NOT commutative (e.g. non-abelian matrix products where order matters). `evert`
+  relies on the fold being COMMUTATIVE so that reversal is aggregate-invariant (a lazy `_rev` bit, no
+  mirrored aggregate). The four shipped folds (min / max / sum / gcd) are all commutative by
+  construction; a non-commutative fold is out of scope.
+- You need worst-case O(1) or worst-case O(log n) per op. LinkCutTree is **AMORTIZED** O(log n) -- a
+  single `access` can splay + expose a deep chain, so an individual op can spike (the witness prints
+  the MAX single `pathAggregate` as a disclosure). If a single slow op is unacceptable, this is the
+  wrong tool.
+
+**Measure it yourself:** `npm run witness` fits `pathAggregate` (a single splay descent over a
+uniform-random working set of size n -- a shuffled permutation of all n vertices, cycled, so every op
+re-prefers a fresh root-to-node path -- SplayTree.get's discipline) against the DEFAULT axis
+`nsPerOp = intercept + slope*log2(n)`; it must clear the shared R^2 floor (0.958) and sit inside its
+band, over exact power-of-two sizes `[2^12, 2^18]`, while the O(depth) naive parent-walk foil (which
+goes O(n) on a deep chain) leaves the line. The per-level slope band was calibrated on a warm
+post-torture median (~56 ns/level, band `[33.74, 78.74]`), the
+state `npm run verify` runs in. Because the LCA / access climb splays
+scattered slots and its post-torture run carries scheduler / thermal residue, this lane opts into the
+MEDIAN of 7 independent sweep-fits as measurement-quality insurance -- the frozen 0.958 floor and
+slope band are UNTOUCHED (see [`decisions/0021-linkcuttree.md`](./decisions/0021-linkcuttree.md)).
+AMORTIZED member: the witness prints the MAX single `pathAggregate` as a disclosure, never gated.
+`node --expose-gc test/torture.mjs` proves link / cut / evert / findRoot / connected / pathAggregate
+/ setValue / at at 0 B/op -- the vertex set is fixed and every op flips EDGES only, so even a
+link / cut storm allocates nothing.
 
 ---
 

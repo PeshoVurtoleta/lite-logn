@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -276,6 +276,22 @@ async function main() {
             ct.parent(i & 63);
             ct.depth(i & 63);
             tracker.track(ct, noopRelease, 17 * CYCLES + i, { audit: true });
+            // A fresh LinkCutTree per cycle: build a small forest (link a chain + a star), churn it
+            // (evert / cut / re-link / path folds) then drop it. Same held-value contract: a LinkCutTree
+            // owns only its eight pointer-free typed-array columns + a scratch stack (no external
+            // resource, no free-list of objects), so the no-op cleanup never defeats finalization.
+            const lct = new LinkCutTree(64, (i & 1) ? 'max' : 'sum');
+            for (let k = 0; k < 64; k++) lct.setValue(k, (k * 2654435761) & 0xffff);
+            for (let k = 1; k < 32; k++) lct.link(k, k - 1);         // a chain 0..31
+            for (let k = 32; k < 64; k++) lct.link(k, 0);           // a star of leaves on 0
+            lct.evert(20);
+            lct.pathAggregate(5, 25);
+            lct.pathAggregate(40);
+            lct.findRoot(50);
+            lct.connected(10, 60);
+            lct.cut(15);
+            lct.link(15, 3);
+            tracker.track(lct, noopRelease, 18 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -1057,6 +1073,53 @@ async function main() {
         ctk = (ctk + 1) | 0;
     };
 
+    // LinkCutTree: one out-of-loop forest -- a warmed CAP-node balanced-ish tree (each node linked to its
+    // halved index). Every lane is a real hot op that MUST allocate zero bytes: link / cut / evert flip
+    // EDGES only (no free-list, no bump allocator), and _splay uses the preallocated _stk scratch (no
+    // recursion, no per-op stack). pathAggregate / findRoot / connected are MUTATING reads (they splay),
+    // the load-bearing proof that a self-adjusting amortized read allocates zero RETAINED bytes.
+    const lct = new LinkCutTree(CAP, 'sum');
+    for (let i = 0; i < CAP; i++) lct.setValue(i, (i * 2654435761) & MASK);
+    for (let i = 1; i < CAP; i++) lct.link(i, i >> 1);      // a balanced binary-ish tree over [0, CAP)
+    let lctk = 0, lctacc = 0;
+    // pathAggregate(u): the gated Witness op -- fold over the root-to-u path (SPLAYS u), folded in.
+    const stepLctPathAgg = () => {
+        lctacc = (lctacc + (lct.pathAggregate(lctk & MASK) | 0)) | 0;
+        lctk = (lctk + 1) | 0;
+    };
+    // pathAggregate(u, v): the two-endpoint fold (everts u, accesses v), folded in.
+    const stepLctPathAgg2 = () => {
+        lctacc = (lctacc + (lct.pathAggregate(lctk & MASK, (lctk * 40503) & MASK) | 0)) | 0;
+        lctk = (lctk + 1) | 0;
+    };
+    // findRoot: a mutating read that everts nothing but splays the min-depth node, folded in.
+    const stepLctFindRoot = () => {
+        lctacc = (lctacc + (lct.findRoot(lctk & MASK) | 0)) | 0;
+        lctk = (lctk + 1) | 0;
+    };
+    // connected: two accesses (both splay), folded in.
+    const stepLctConnected = () => {
+        lctacc = (lctacc + (lct.connected(lctk & MASK, (lctk * 2246822519) & MASK) ? 1 : 0)) | 0;
+        lctk = (lctk + 1) | 0;
+    };
+    // cut + re-link churn: detach a node from its parent then re-link it -- the dynamic-forest hot loop.
+    // Node 0 is the root (no parent edge), so cut a non-root leaf-ish node and re-link it to the same
+    // parent, keeping the forest shape steady. Flip EDGES only -> 0 B/op.
+    const stepLctCutLink = () => {
+        const x = 1 + (lctk & (MASK >> 1));                 // a non-root node in [1, CAP/2)
+        const p = x >> 1;
+        lct.evert(p);                                       // root at p so x's parent edge is p
+        lct.cut(x);
+        lct.link(x, p);
+        lctk = (lctk + 1) | 0;
+    };
+    // setValue: a mutating value write (access + pull), folded in.
+    const stepLctSetValue = () => {
+        lct.setValue(lctk & MASK, (lctk * 2654435761) & MASK);
+        lctacc = (lctacc + (lct.at(lctk & MASK) | 0)) | 0;
+        lctk = (lctk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -1087,7 +1150,8 @@ async function main() {
         stepPstQuery, stepPstAt, stepPstUpdate,
         stepMstCountLE, stepMstRangeCount,
         stepWtAccess, stepWtRank, stepWtSelect, stepWtQuantile, stepWtRangeCount,
-        stepCtRangeMinIndex, stepCtRangeMin, stepCtAt, stepCtTopology]) {
+        stepCtRangeMinIndex, stepCtRangeMin, stepCtAt, stepCtTopology,
+        stepLctPathAgg, stepLctPathAgg2, stepLctFindRoot, stepLctConnected, stepLctCutLink, stepLctSetValue]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -1136,6 +1200,7 @@ async function main() {
     if (mstacc === 0x7fffffff) throw new Error('unreachable'); // keep mstacc live
     if (wtacc === 0x7fffffff) throw new Error('unreachable'); // keep wtacc live
     if (ctacc === 0x7fffffff) throw new Error('unreachable'); // keep ctacc live
+    if (lctacc === 0x7fffffff) throw new Error('unreachable'); // keep lctacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1312,6 +1377,17 @@ async function main() {
         if ((i & 3) === 0) { const lo = i & (MASK >> 1); sink = (sink + (ct.rangeMin(lo, lo + (CAP >> 1)) | 0)) | 0; }
         if ((i & 7) === 0) sink = (sink + (ct.at(i & MASK) | 0)) | 0;
         if ((i & 15) === 0) { const j = i & MASK; sink = (sink + (ct.parent(j) | 0) + (ct.depth(j) | 0)) | 0; }
+        // LinkCutTree churn every op: a wide-window pathAggregate (the gated amortized-O(log n) SPLAY read),
+        // plus a two-endpoint fold every 4th, a findRoot every 8th, a connected every 16th, a setValue every
+        // 32nd, and -- the load-bearing DYNAMIC-FOREST lane -- a cut + re-link every 64th (evert to expose
+        // the parent edge, cut it, re-link). link/cut/evert flip EDGES only, so the whole forest churn runs
+        // inside the GC window allocating zero bytes and triggering no major collection.
+        sink = (sink + (lct.pathAggregate(i & MASK) | 0)) | 0;
+        if ((i & 3) === 0) sink = (sink + (lct.pathAggregate(i & MASK, (i * 40503) & MASK) | 0)) | 0;
+        if ((i & 7) === 0) sink = (sink + (lct.findRoot(i & MASK) | 0)) | 0;
+        if ((i & 15) === 0) sink = (sink + (lct.connected(i & MASK, (i * 2246822519) & MASK) ? 1 : 0)) | 0;
+        if ((i & 31) === 0) lct.setValue(i & MASK, i & 0xffff);
+        if ((i & 63) === 0) { const x = 1 + (i & (MASK >> 1)); const p = x >> 1; lct.evert(p); lct.cut(x); lct.link(x, p); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1356,6 +1432,13 @@ async function main() {
     const abCtSrc = new Float64Array(1024);
     for (let i = 0; i < 1024; i++) abCtSrc[i] = (i * 2654435761) & 0x3ff;
     const abCt = CartesianTree.build(abCtSrc, 'min');
+    // LinkCutTree is MUTABLE via link / cut but its eight typed-array columns + scratch stack are FIXED at
+    // construction: link / cut / evert flip EDGES only (no free-list, no bump allocator), so a full
+    // cut-then-re-link churn round reuses the SAME backing stores and arrayBuffers must not grow. Built ONCE
+    // here as a chain over [0, 1024); the soak churns its edges and asserts the edge count is conserved.
+    const abLct = new LinkCutTree(1024, 'sum');
+    for (let i = 0; i < 1024; i++) abLct.setValue(i, (i * 2654435761) & 0xffff);
+    for (let i = 1; i < 1024; i++) abLct.link(i, i - 1);   // a chain 0-1-...-1023 (1023 edges)
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1584,6 +1667,24 @@ async function main() {
         if (fhMelded !== 512) conservationOk = false;                                          // every node drained
         if (abFhMeldAcc._pool.activeSlots !== 0) conservationOk = false;                       // every slot returned
         if (abFhMeldAcc._pool.activeSlots + abFhMeldAcc._pool.freeListLength !== abFhMeldAcc._pool.capacity) conservationOk = false;
+        // LinkCutTree: EDGE conservation across a dynamic-forest churn. A batch of cut-then-re-link rounds
+        // (evert the parent to expose the child's parent edge, cut it, re-link the same edge) flips edges IN
+        // PLACE -- so the edge count returns to the chain's 1023 and the backing stores never grow. A botched
+        // link/cut that leaked or double-counted an edge (or reallocated a column) would break it here.
+        for (let i = 1; i < 512; i++) {
+            const x = i, p = i - 1;
+            abLct.evert(p);                                   // root at p so x's parent edge is p
+            abLct.cut(x);
+            if (abLct.edges !== 1022) conservationOk = false; // exactly one edge removed
+            abLct.link(x, p);
+            if (abLct.edges !== 1023) conservationOk = false; // and restored
+        }
+        if (abLct.edges !== 1023) conservationOk = false;     // chain fully conserved after the churn round
+        if (abLct.connected(0, 1023) !== true) conservationOk = false; // still one connected tree
+        for (let i = 0; i < 256; i++) {                       // read-only path folds never grow a column
+            const a = abLct.pathAggregate(i & 1023, (i * 3 + 1) & 1023);
+            if (!Number.isFinite(a)) conservationOk = false;
+        }
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -1601,7 +1702,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree + LinkCutTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

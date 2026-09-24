@@ -840,3 +840,50 @@ export class CartesianTree {
      *  = new CartesianTree). O(n) tree + O(n log n) lift. Same fail-closed doors as the constructor. */
     static build(values: ArrayLike<number>, kind?: 'min' | 'max'): CartesianTree;
 }
+
+export class LinkCutTree {
+    /** A dynamic FOREST of rooted trees over a FIXED vertex set `[0, capacity)`, maintained under
+     *  `link` / `cut` with AMORTIZED O(log n) PATH aggregates via a preferred-path splay decomposition.
+     *  The vertices are fixed; `link` / `cut` / `evert` flip EDGES only (no per-op allocation). The path
+     *  fold `kind` is frozen at construction. `capacity` non-integer or outside `[1, 2^31-1]`, or a bad
+     *  `kind`, throws.
+     *  @param capacity exact vertex count; vertex ids are `[0, capacity)`
+     *  @param kind the frozen associative + commutative path fold; default `'min'` */
+    constructor(capacity: number, kind?: 'min' | 'max' | 'sum' | 'gcd');
+
+    /** The fixed vertex count (capacity) this forest was sized for. */
+    readonly capacity: number;
+    /** The frozen path fold: `'min'` | `'max'` | `'sum'` | `'gcd'` (frozen at construction). */
+    readonly kind: 'min' | 'max' | 'sum' | 'gcd';
+    /** The number of edges currently in the forest (link increments, cut decrements). */
+    readonly edges: number;
+
+    /** Add the edge `child -> parent`. Amortized O(log n), 0 B/op. Throws `[lite-logn]` as a no-op on a
+     *  bad vertex id, a self-link, or a CYCLE-creating link (the two vertices are already connected). */
+    link(child: number, parent: number): this;
+    /** Remove the edge between `node` and its parent (toward the current root). Amortized O(log n), 0 B/op.
+     *  Throws `[lite-logn]` as a no-op on a bad id or on cutting a tree root (no parent edge). */
+    cut(node: number): this;
+    /** Re-root the tree containing `u` at `u` (makeRoot). Amortized O(log n), 0 B/op. A bad id throws. */
+    evert(u: number): this;
+    /** The root vertex of the tree containing `u` (under the current rooting). Amortized O(log n) MUTATING
+     *  read (splays). A bad id throws BEFORE any splay. */
+    findRoot(u: number): number;
+    /** True iff `u` and `v` are in the SAME tree (`findRoot(u) === findRoot(v)`). Amortized O(log n)
+     *  MUTATING read. A bad id throws BEFORE any splay. */
+    connected(u: number, v: number): boolean;
+    /** The path fold. One argument: the fold over ROOT -> `u`. Two arguments: the fold over the path
+     *  `u..v` INCLUSIVE of both endpoints (evert `u`, access `v`). Amortized O(log n) MUTATING read, 0 B/op.
+     *  A bad id throws BEFORE any splay; a two-argument call with `u`, `v` in DIFFERENT trees throws. */
+    pathAggregate(u: number, v?: number): number;
+    /** Set vertex `id`'s value to `value` (ABSOLUTE), then fix the aggregate. Amortized O(log n), 0 B/op.
+     *  Throws `[lite-logn]` as a no-op on a bad id, a non-finite value, or (gcd kind) a negative /
+     *  non-integer value. */
+    setValue(id: number, value: number): this;
+    /** Vertex `id`'s stored value. O(1), NON-mutating (no splay). A bad id throws. */
+    at(id: number): number;
+    /** Reset the forest to isolated singleton vertices (edges dropped, values + aggregates back to the fold
+     *  identity, edge count 0) -- the pristine state of a fresh instance. O(n), zero allocation (buffers
+     *  reset in place), so the instance is immediately reusable. */
+    clear(): this;
+}

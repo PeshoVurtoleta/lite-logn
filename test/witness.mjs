@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -474,6 +474,34 @@ export const WT_QUANTILE_SLOPE_HI = 21.35;    // median 15.248 * 1.4
 export const CT_RMQ_SLOPE_LO = 1.69;          // median 2.8092 * 0.6
 export const CT_RMQ_SLOPE_HI = 3.93;          // median 2.8092 * 1.4
 
+// --- LinkCutTree (v1.3.0): shared R^2 floor, OWN pathAggregate band on the DEFAULT log2 axis (0021) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide; LinkCutTree's gated
+// op is pathAggregate(u) -- the fold over the root-to-u path, an AMORTIZED-O(log n) SPLAY (access + read the
+// splay root's aggregate). Like SplayTree.get it is a self-adjusting read: over a UNIFORM-RANDOM working set
+// the preferred-path splay tree churns its full ~log n height each op, so the line fits the DEFAULT log2(n)
+// axis (a single log). The naive O(depth) PARENT-WALK foil (climb parent pointers to the root, folding each
+// value) is O(n) on a degenerate chain -- exponential on the log2(n) axis -- and MUST miss the floor. As an
+// AMORTIZED member it also discloses (never gates) its MAX single pathAggregate (a cold deep access), the
+// SplayTree / PairingHeap precedent. The lane opts into the median-of-fits LCT_FIT_RUNS hook for post-torture
+// thermal robustness.
+// RE-CENTERED ON THE FIXED WORKLOAD: the earlier warm band [8.68, 20.25] (warm 15-run median 14.4618) was
+// measured on a FLAKY workload -- 1024 FIXED targets accessed in FIXED order. After warmup those 1024
+// preferred paths stayed preferred + cache-resident, so the timed op was a warm CACHED re-access whose cost
+// barely scaled with log2 n; the fit sat OFF the line (R^2 ~ 0.72-0.93, slope swinging run-to-run). The
+// workload was replaced with SplayTree.get's discipline (a UNIFORM-RANDOM working set of size n -- a shuffled
+// permutation of ALL n vertices, cycled -- so every op re-prefers a fresh root-to-u path and churns the full
+// height). That measures the TRUE amortized access (multiple splays climbing the path-parent chain), which is
+// intrinsically costlier per level than the old cached re-access, so the honest slope is ~4x higher; the fit
+// is now clean + stable. Re-calibrated with 15 independent sweep-fits run immediately after a torture +
+// test:perf pass (the warm state `npm run verify` runs in): slopes (ns/level) 55.6095 55.8842 55.9171 56.0200
+// 56.0974 56.1142 56.1372 56.2396 56.2397 56.2574 56.4324 56.5828 56.6639 58.5753 59.2972, MEDIAN = 56.2396,
+// every run R^2 in [0.9869, 0.9995] (all >> the 0.958 floor). Band = median * [0.6, 1.4], centered on the
+// MEDIAN (never a high sample) so a faster warm run is not false-failed; the R^2 floor independently rejects
+// any non-log shape. The shared 0.958 floor and the [0.6, 1.4] multiplier are UNTOUCHED. This SUPERSEDES the
+// earlier [8.68, 20.25] warm calibration (measured on the flaky fixed-target workload).
+export const LCT_PATH_SLOPE_LO = 33.74;       // warm median 56.2396 * 0.6
+export const LCT_PATH_SLOPE_HI = 78.74;       // warm median 56.2396 * 1.4
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -614,6 +642,21 @@ const CT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // median-of-fits rejects it. Odd so the median is a real sample. Measurement-quality only: the frozen
 // 0.958 floor and the slope band are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
 const CT_FIT_RUNS = 7;
+// LinkCutTree's gated pathAggregate sweep: EXACT powers of two 2^12..2^18. Over a balanced (each node linked
+// to its halved index) forest the preferred-path splay tree height tracks log2 n, so the access climbs
+// ~log2 n levels -- exact powers keep the staircase mapping cleanly onto the continuous log2(n) axis. The
+// bottom starts at 2^12 (the SplayTree / SortedArray / WaveletTree "drop the too-fast, noisy low point"
+// lesson) and the top is pinned at 2^18 (above it the eight columns leave the steady cache band and DRAM
+// latency curves the fit -- lite-o1 ADR-0004). Its O(depth) parent-walk foil stays on the small O(n^2)-
+// affordable sweep.
+const LCT_SWEEP = [12, 13, 14, 15, 16, 17, 18].map((k) => 2 ** k);
+const LCT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// LinkCutTree.pathAggregate gates on the MEDIAN of LCT_FIT_RUNS independent sweep-fits (the registry
+// `fitRuns` hook), same mechanism as SplayTree / WaveletTree / CartesianTree: the witness runs right after
+// torture (2M+ ops across 19 members), whose scheduler / thermal residue tilts the occasional sweep; the
+// median-of-fits rejects it. Odd so the median is a real sample. Measurement-quality only: the frozen 0.958
+// floor and the slope band are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
+const LCT_FIT_RUNS = 7;
 // MergeSortTree.countLE gates on the MEDIAN of MST_FIT_RUNS independent sweep-fits (the registry
 // `fitRuns` hook), same mechanism as Fenwick2D / SegmentTree.update / PST: the witness runs right after
 // torture (2M+ ops across 16 members), whose scheduler / thermal residue tilts the occasional sweep;
@@ -1649,6 +1692,98 @@ function measureCartesianRmqFoil(n) {
     return elapsed / count;
 }
 
+// --- LinkCutTree measurement (pathAggregate hot op, its O(depth) foil, MAX single fold) ---
+// The forest is built OUTSIDE timing and held at steady size n as a balanced (each node linked to its halved
+// index) tree, so the preferred-path splay tree height tracks log2 n; the timed window is the pathAggregate
+// SPLAY only, hammered over a UNIFORM-RANDOM working set of size n -- a shuffled permutation of ALL n
+// vertices, cycled by the power-of-two mask (n is an exact power of two) -- exactly SplayTree.get's
+// discipline. This keeps NO vertex hot: every op accesses a DIFFERENT vertex, so the self-adjusting access
+// re-prefers a fresh root-to-u path and churns the full ~log2 n height each op (the amortized O(log n)
+// signal). The earlier 1024-fixed-target-in-fixed-order workload left those paths preferred + cache-resident
+// after warmup, so the timed op was a warm cached re-access whose cost barely scaled with log2 n -- the fit
+// sat off the line (R^2 ~ 0.72-0.93, slope flaky run-to-run). Same min-over-batches discipline as
+// SplayTree.get.
+const LCT_ITERS = 200000;   // hammered ops per timed batch
+const LCT_BATCH = 25;       // min-over-batches
+
+// A module-level capture for the MAX single pathAggregate observed across the sweep -- the honesty hook the
+// AMORTIZED member must not hide behind its mean (a cold deep access).
+let LINKCUTTREE_MAX_PATH_NS = 0;
+
+// pathAggregate: hammer a root-to-u path fold over a shuffled permutation of the n resident vertices. Return
+// the MIN per-op time over LCT_BATCH batches. Also samples the MAX single fold (disclosure).
+function measureLctPathAgg(n) {
+    const lct = new LinkCutTree(n, 'sum');
+    for (let k = 0; k < n; k++) lct.setValue(k, (k * 2654435761) & (n - 1));
+    for (let k = 1; k < n; k++) lct.link(k, k >> 1);
+    const tg = new Int32Array(n);
+    for (let i = 0; i < n; i++) tg[i] = i;
+    const rnd = mulberry32(0x33A5 ^ n);
+    for (let i = n - 1; i > 0; i--) {                            // Fisher-Yates shuffle
+        const j = (rnd() * (i + 1)) | 0;
+        const t = tg[i]; tg[i] = tg[j]; tg[j] = t;
+    }
+    const mask = n - 1;                                          // n is an exact power of two
+    let sink = 0;
+    for (let w = 0; w < LCT_ITERS; w++) sink += lct.pathAggregate(tg[w & mask]) | 0; // warm
+    let best = Infinity;
+    for (let b = 0; b < LCT_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < LCT_ITERS; i++) sink += lct.pathAggregate(tg[i & mask]) | 0;
+        const e = (nowNs() - t0) / LCT_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    sampleLctMaxPath(n);
+    return best;
+}
+
+// Build a fresh (cache-cold) balanced forest of n vertices, then time EVERY individual pathAggregate over a
+// shuffled access trace, keeping the tallest. The random order + fresh forest make this the realistic cold-
+// deep-access tail -- the honest worst single op an AMORTIZED member must disclose. DISCLOSURE, not gated.
+function sampleLctMaxPath(n) {
+    const lct = new LinkCutTree(n, 'sum');
+    for (let k = 0; k < n; k++) lct.setValue(k, (k * 2654435761) & (n - 1));
+    for (let k = 1; k < n; k++) lct.link(k, k >> 1);
+    const tg = new Int32Array(n);
+    for (let i = 0; i < n; i++) tg[i] = i;
+    const rnd = mulberry32(0xF00D ^ n);
+    for (let i = n - 1; i > 0; i--) { const j = (rnd() * (i + 1)) | 0; const t = tg[i]; tg[i] = tg[j]; tg[j] = t; }
+    let sink = 0;
+    for (let i = 0; i < n; i++) {
+        const t0 = nowNs();
+        sink += lct.pathAggregate(tg[i]) | 0;
+        const e = nowNs() - t0;
+        if (e > LINKCUTTREE_MAX_PATH_NS) LINKCUTTREE_MAX_PATH_NS = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+}
+
+// pathAggregate FOIL: the naive default before you know the link-cut / preferred-path trick -- climb PARENT
+// pointers from u to the root, folding each value. O(depth) per query, O(n) on a chain, so on the log2(n)
+// axis its per-op cost is exponential and a straight-line fit MUST MISS the R^2 floor. O(n^2) total, so the
+// sweep stays small. Uses a plain parent array over a chain (worst-case depth), the honest naive baseline.
+function measureLctPathAggFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    const parent = new Int32Array(n);
+    const val = new Float64Array(n);
+    for (let i = 0; i < n; i++) { parent[i] = i - 1; val[i] = (i * 2654435761) & (n - 1); } // chain: parent[0] = -1
+    { let s = 0; for (let x = n - 1; x !== -1; x = parent[x]) s += val[x]; if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let it = 0; it < n; it++) {
+            let s = 0;
+            for (let x = n - 1; x !== -1; x = parent[x]) s += val[x];   // O(depth) parent walk
+            sink += s | 0;
+        }
+        elapsed += nowNs() - t0;
+        count += n;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
 // --- PersistentSegTree measurement (query hot op + its O(n) linear-scan foil) -
 // The tree is built OUTSIDE timing: v0 plus PST_VERS path-copying updates so several versions
 // coexist, then the timed window is the range query [1, n-2] over a RANDOM existing version
@@ -2466,10 +2601,26 @@ export const MEMBERS = [
         // O(n) shape fails every fit.
         fitRuns: CT_FIT_RUNS,
     },
+    {
+        name: 'LinkCutTree',
+        op: 'pathAggregate',
+        sweep: LCT_SWEEP,
+        foilSweep: LCT_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0021 inherits D-08)
+        slopeLo: LCT_PATH_SLOPE_LO,            // own band -- PROVISIONAL cold, qa re-centers warm (0021)
+        slopeHi: LCT_PATH_SLOPE_HI,
+        run: measureLctPathAgg,
+        foil: measureLctPathAggFoil,
+        foilName: 'parent-walk (O(depth) per path fold)',
+        // MEDIAN-OF-FITS (0021, measurement-quality only): a self-adjusting access splays the preferred-path
+        // tree, so a single fit's R^2 can dip below the floor in a minority of post-torture runs; the median-
+        // of-LCT_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
+        fitRuns: LCT_FIT_RUNS,
+    },
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.2.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.3.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -2558,6 +2709,14 @@ async function main() {
     if (SPLAYTREE_MAX_GET_NS > 0) {
         process.stdout.write(
             'SplayTree MAX single get observed = ' + SPLAYTREE_MAX_GET_NS.toFixed(0) +
+            ' ns (amortized O(log n) -- disclosed, not gated)\n');
+    }
+    // LinkCutTree honesty print: the MAX single pathAggregate (a cold deep preferred-path access) observed
+    // across the sweep. An AMORTIZED-O(log n) member must not masquerade as per-op worst-case -- a single
+    // access after a re-rooting can splay a long path even while the mean holds the fitted line. DISCLOSURE.
+    if (LINKCUTTREE_MAX_PATH_NS > 0) {
+        process.stdout.write(
+            'LinkCutTree MAX single pathAggregate observed = ' + LINKCUTTREE_MAX_PATH_NS.toFixed(0) +
             ' ns (amortized O(log n) -- disclosed, not gated)\n');
     }
     // PairingHeap honesty print: the MAX single popMin (a long two-pass fold) observed across the

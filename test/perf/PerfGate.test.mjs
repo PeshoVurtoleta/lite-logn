@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1650,6 +1650,80 @@ const ctTopologyChurn = {
     statsOf(s) { return { grows: ctGrows(s) }; },
 };
 
+/** LinkCutTree's zero-alloc counter: its `_agg` Float64 column, fixed at construction. link / cut / evert
+ *  flip EDGES only and _splay uses the preallocated `_stk` scratch, so the delta across the window is 0. */
+function lctGrows(s) { return s.lct._agg.buffer.byteLength; }
+
+const LCT_LEN = 1 << 12;        // 4096 vertices
+const LCTMASK = LCT_LEN - 1;
+
+/** A warmed LinkCutTree over LCT_LEN vertices: a balanced binary-ish tree (each node linked to its halved
+ *  index), values seeded, so path folds descend a ~log n splay tree. */
+function lctFill() {
+    const lct = new LinkCutTree(LCT_LEN, 'sum');
+    for (let i = 0; i < LCT_LEN; i++) lct.setValue(i, (i * 2654435761) & LCTMASK);
+    for (let i = 1; i < LCT_LEN; i++) lct.link(i, i >> 1);
+    return lct;
+}
+
+/** pathAggregate churn: the GATED witness op -- the root-to-u path fold (a SPLAY of u, amortized O(log n)),
+ *  folded. An escaping probe rides alongside (globalThis.__lctProbe) so escape analysis cannot elide it. */
+const lctPathAggChurn = {
+    name: 'LinkCutTree pathAggregate churn (root-to-u path fold, the gated op)',
+    setup() { return { lct: lctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.lct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.pathAggregate(tick & LCTMASK) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+        const probe = new Array(1); probe[0] = acc; globalThis.__lctProbe = probe; // escaping: no EA elision
+    },
+    statsOf(s) { return { grows: lctGrows(s) }; },
+};
+
+/** link/cut churn: the dynamic-forest hot loop -- evert the parent, cut the child edge, re-link it. Flips
+ *  EDGES only (no free-list, no bump allocator), so the backing columns never grow. */
+const lctLinkCutChurn = {
+    name: 'LinkCutTree link/cut churn (cut + re-link an edge, the dynamic-forest loop)',
+    setup() { return { lct: lctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.lct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const x = 1 + (tick & (LCTMASK >> 1));   // a non-root vertex in [1, LCT_LEN/2)
+            const p = x >> 1;
+            t.evert(p);
+            t.cut(x);
+            t.link(x, p);
+            acc = (acc + x) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: lctGrows(s) }; },
+};
+
+/** evert churn: re-root the tree at a cycling vertex (access + a lazy-reversal flip). Toggles a flag +
+ *  splays; no allocation. */
+const lctEvertChurn = {
+    name: 'LinkCutTree evert churn (re-root, lazy subtree-reversal)',
+    setup() { return { lct: lctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.lct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            t.evert(tick & LCTMASK);
+            acc = (acc + (t.findRoot(tick & LCTMASK) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: lctGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1696,6 +1770,7 @@ zgcSuite({
         pstQueryChurn, pstAtChurn, pstUpdateChurn,
         mstCountLEChurn, mstRangeCountChurn,
         wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn,
-        ctRangeMinIndexChurn, ctRangeMinChurn, ctTopologyChurn],
+        ctRangeMinIndexChurn, ctRangeMinChurn, ctTopologyChurn,
+        lctPathAggChurn, lctLinkCutChurn, lctEvertChurn],
     mustFail: [teethMustFailAlloc],
 });

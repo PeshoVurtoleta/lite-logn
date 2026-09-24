@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -447,6 +447,25 @@ function kCtRmq(n) {
     return { obj: t, op: () => { SINK = (SINK + (t.rangeMinIndex(los[i & (TARGETS - 1)], his[i & (TARGETS - 1)]) | 0)) | 0; i = (i + 1) | 0; } };
 }
 
+function kLctPathAggregate(n) {
+    // A DYNAMIC forest of n vertices linked into ONE balanced tree (each vertex k > 0 hangs under its
+    // parent (k-1)>>1, a complete binary tree -> depth ~ log2 n, so a preferred-path access is O(log n)),
+    // with each vertex seeded a bounded Smi value. Each op folds the root-to-u path for a UNIFORM-RANDOM
+    // vertex u over the full n working set (exactly SplayTree.get's discipline -- no vertex stays hot, so the
+    // self-adjusting access re-prefers a fresh root-to-u path and churns the full ~log2 n height each op, the
+    // honest amortized O(log n) signal; a fixed rotating window leaves paths preferred + cache-resident after
+    // warmup and flattens the line). The index is `ru() >>> 1` (drop the high bit) so it stays a 31-bit Smi
+    // (a raw uint32 >= 2^31 is a HeapNumber, and boxing one per op would masquerade as per-op alloc in D6),
+    // and SINK is kept a 32-bit Smi (`| 0`), so no HeapNumber is created per op. A link-cut tree's
+    // representative steady op is this path-fold read.
+    const t = new LinkCutTree(n, 'sum');
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) t.setValue(k, rng() & 0xff);
+    for (let k = 1; k < n; k++) t.link(k, (k - 1) >> 1);   // complete binary tree rooted at 0 (depth ~ log2 n)
+    const ru = prng(0x5A17 ^ n);
+    return { obj: t, op: () => { SINK = (SINK + (t.pathAggregate((ru() >>> 1) % n) | 0)) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -480,6 +499,7 @@ export function makeOpKernel(member, op, n) {
         case 'MergeSortTree.countLE': return kMstCountLE(n);
         case 'WaveletTree.quantile': return kWtQuantile(n);
         case 'CartesianTree.rangeMinIndex': return kCtRmq(n);
+        case 'LinkCutTree.pathAggregate': return kLctPathAggregate(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -508,6 +528,9 @@ export function makeSubject(member, n) {
     if (member === 'WaveletTree') return kWtQuantile(n);
     // CartesianTree is STATIC/IMMUTABLE too; its representative steady op is the rangeMinIndex read query.
     if (member === 'CartesianTree') return kCtRmq(n);
+    // LinkCutTree is DYNAMIC (link/cut/evert) but over a FIXED vertex set; its representative steady op is
+    // the pathAggregate path-fold read (its only gated op-row) over a fixed balanced forest.
+    if (member === 'LinkCutTree') return kLctPathAggregate(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -726,6 +749,13 @@ export function memberBytes(member, obj) {
         return obj._val.buffer.byteLength + obj._left.buffer.byteLength + obj._right.buffer.byteLength +
             obj._parent.buffer.byteLength + obj._depth.buffer.byteLength + obj._up.buffer.byteLength;
     }
+    if (member === 'LinkCutTree') {
+        // per-vertex value + subtree aggregate (Float64) + three splay/path pointer columns + the lazy
+        // reversal flag + the preallocated splay push-down scratch (all sized capacity + 1, slot 0 = NIL)
+        return obj._val.buffer.byteLength + obj._agg.buffer.byteLength +
+            obj._l.buffer.byteLength + obj._r.buffer.byteLength + obj._p.buffer.byteLength +
+            obj._rev.buffer.byteLength + obj._stk.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -758,6 +788,10 @@ export function theoreticalMinPerLive(member) {
     // The four index columns + the n x L binary-lifting table are the DISCLOSED space co-headline,
     // surfaced as D3's overheadRatio (bytesPerLive / 8), never hidden.
     if (member === 'CartesianTree') return 8;
+    // LinkCutTree stores the source as 8 B (one Float64 value) per vertex -- the minimum to hold the data.
+    // The _agg column + three pointer columns + the reversal flag + the splay scratch are the DISCLOSED
+    // space co-headline (a full LCT costs 8 columns), surfaced as D3's overheadRatio, never hidden.
+    if (member === 'LinkCutTree') return 8;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -770,6 +804,7 @@ function liveCount(member, obj) {
     if (member === 'MergeSortTree') return obj.length;                       // static: the n source elements are the live set
     if (member === 'WaveletTree') return obj.length;                         // static: the n source elements are the live set
     if (member === 'CartesianTree') return obj.length;                       // static: the n source elements are the live set
+    if (member === 'LinkCutTree') return obj.capacity;                       // fixed vertex set: every vertex is always live
     return obj.size;
 }
 
@@ -805,27 +840,33 @@ function fillMember(member, obj, count) {
     if (member === 'WaveletTree') return;
     // CartesianTree is STATIC/IMMUTABLE too: built full at construction, no clear()/mutators -- "fill" is a no-op.
     if (member === 'CartesianTree') return;
+    // LinkCutTree has a FIXED vertex set and a byte footprint that is independent of the edge count (the 8
+    // columns are preallocated at construction); the D3 footprint is measured on the constructed forest, so
+    // "fill" is a no-op (every vertex already exists as a live slot).
+    if (member === 'LinkCutTree') return;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
 // ===========================================================================
 // clear() invariance witness (Bench v3). A first-class, member-scoped witness for
-// the fifteen MUTABLE Matrix.CLEAR_WITNESS members (SUBJECTS minus the static,
-// immutable MergeSortTree): clear() returns the
+// the sixteen MUTABLE Matrix.CLEAR_WITNESS members (SUBJECTS minus the static,
+// immutable MergeSortTree / WaveletTree / CartesianTree): clear() returns the
 // structure to its pristine EMPTY invariant, retains its fixed backing store across
 // many fill/clear cycles (zero-alloc), and leaves it reusable. This is the same
 // retention contract the torture gate proves at 0 B/op; here it is surfaced as a
 // named, rendered witness. The "content" measure is member-appropriate: the
-// heap/list SIZE for the addressable members (must reach 0), and the residual
+// heap/list SIZE for the addressable members (must reach 0), the residual
 // accumulated total for the index-addressed members (Fenwick prefix / SegmentTree
-// query over the full range -- both 0 once the backing array is cleared). Fail
+// query over the full range -- both 0 once the backing array is cleared), and the
+// live edge count for the LinkCutTree forest (0 once reset to isolated singletons). Fail
 // closed on an unhandled member.
 // ===========================================================================
 
 /**
  * The live-content scalar for a CLEAR_WITNESS member -- 0 iff cleared, > 0 iff filled.
  * BinaryHeap/SkipList expose `.size`; the index-addressed Fenwick/SegmentTree keep a
- * fixed length, so their "content" is the residual accumulated total (0 == cleared).
+ * fixed length, so their "content" is the residual accumulated total (0 == cleared);
+ * LinkCutTree exposes `.edges` (0 == reset to isolated singletons).
  */
 function clearContent(member, obj) {
     if (member === 'BinaryHeap' || member === 'SkipList' || member === 'Treap' || member === 'Scapegoat' || member === 'MinMaxHeap' || member === 'SplayTree' || member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' || member === 'SortedArray') return obj.size;
@@ -834,6 +875,7 @@ function clearContent(member, obj) {
     if (member === 'Fenwick2D') return obj.prefix(obj.rows - 1, obj.cols - 1); // sum of the whole grid
     if (member === 'SegmentTree2D') return obj.query(0, 0, obj.rows - 1, obj.cols - 1); // fold of the whole grid
     if (member === 'PersistentSegTree') return obj.query(obj.versions - 1, 0, obj.length - 1); // fold of the HEAD version (0 once cleared to identity v0)
+    if (member === 'LinkCutTree') return obj.edges; // dynamic forest: the live edge count (0 iff cleared to isolated singletons)
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -859,11 +901,19 @@ function clearWitnessRefill(member, obj, n) {
         for (let k = 0; k < m; k++) cur = obj.update(cur, k % L, (k & 0xffff) + 1);
         return m;
     }
+    if (member === 'LinkCutTree') {
+        // Re-link the isolated singletons into a complete binary tree (each vertex k > 0 under (k-1)>>1),
+        // restoring the fold-bearing forest; n-1 edges. Zero-alloc (link flips edges only).
+        const cap = obj.capacity;
+        for (let k = 0; k < cap; k++) obj.setValue(k, k & 0xffff);
+        for (let k = 1; k < cap; k++) obj.link(k, (k - 1) >> 1);
+        return cap - 1;
+    }
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
 /**
- * Run the clear() invariance witness for the four CLEAR_WITNESS members.
+ * Run the clear() invariance witness for the sixteen CLEAR_WITNESS members.
  * Returns per-member { sizeAfterClear, pristine, reusable, cycles, baseBytes,
  * finalBytes, bytesDelta, zeroAlloc }. Deterministic (no timing in the verdict).
  * @param {{n?:number, cycles?:number}} [opts]
@@ -925,6 +975,7 @@ export function D3(member, opts = {}) {
     else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
     else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else if (member === 'CartesianTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new CartesianTree(vals, 'min'); } // static: built full at construction
+    else if (member === 'LinkCutTree') obj = new LinkCutTree(n, 'sum'); // fixed vertex set: footprint independent of edges
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -959,7 +1010,7 @@ export function D3(member, opts = {}) {
     // always live), so their curve is FLAT by design -- stated, not hidden.
     // MergeSortTree is positional + static: every source element is always live and its footprint is a
     // single fixed table, so its load-factor curve is FLAT by design too (like the index-addressed members).
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree' || member === 'WaveletTree' || member === 'CartesianTree');
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree' || member === 'WaveletTree' || member === 'CartesianTree' || member === 'LinkCutTree');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -1044,6 +1095,18 @@ function denseIterNsPerElem(member, obj, reps) {
         const dtp = performance.now() - t0p;
         return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
     }
+    // LinkCutTree has no forEach (a forest, not a single timeline); its dense-iteration analogue is a full
+    // O(n) positional sweep of at(i) point reads (each an O(1) `_val` read). at returns a Smi so no HeapNumber
+    // is boxed.
+    if (member === 'LinkCutTree') {
+        const L = obj.capacity, size0 = Math.max(1, L);
+        for (let i = 0; i < L; i++) acc = (acc + (obj.at(i) | 0)) | 0; // warm
+        const t0p = performance.now();
+        for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + (obj.at(i) | 0)) | 0;
+        SINK += acc;
+        const dtp = performance.now() - t0p;
+        return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
+    }
     const cb = (x) => { acc = (acc + (x | 0)) | 0; };
     obj.forEach(cb); // warm
     const size = Math.max(1, liveCount(member, obj));
@@ -1093,6 +1156,9 @@ function randomLookupOp(member, obj, n, rng) {
     // CartesianTree is index-addressed by position: a random at(i) point read (its O(1) value read) is the
     // analogue. at returns a Smi so no HeapNumber is boxed.
     if (member === 'CartesianTree') return () => { const i = rng() % n; SINK = (SINK + (obj.at(i) | 0)) | 0; };
+    // LinkCutTree is index-addressed by vertex id: a random at(i) point read (its O(1) value read) is the
+    // analogue. at returns a Smi so no HeapNumber is boxed.
+    if (member === 'LinkCutTree') return () => { const i = rng() % n; SINK = (SINK + (obj.at(i) | 0)) | 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1129,6 +1195,9 @@ function seqLookupOp(member, obj, n) {
     // CartesianTree is index-addressed by position: a sequential at(i) point read (row-major). at returns
     // a Smi so no HeapNumber is boxed.
     if (member === 'CartesianTree') return () => { SINK = (SINK + (obj.at(i) | 0)) | 0; i++; if (i >= n) i = 0; };
+    // LinkCutTree is index-addressed by vertex id: a sequential at(i) point read (row-major). at returns a
+    // Smi so no HeapNumber is boxed.
+    if (member === 'LinkCutTree') return () => { SINK = (SINK + (obj.at(i) | 0)) | 0; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1172,6 +1241,7 @@ function buildFull(member, n) {
     else if (member === 'MergeSortTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new MergeSortTree(vals); } // static: built full at construction
     else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else if (member === 'CartesianTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new CartesianTree(vals, 'min'); } // static: built full at construction
+    else if (member === 'LinkCutTree') { obj = new LinkCutTree(n, 'sum'); for (let k = 0; k < n; k++) obj.setValue(k, k & 0xffff); for (let k = 1; k < n; k++) obj.link(k, (k - 1) >> 1); } // dynamic forest: n vertices linked into a complete binary tree (depth ~log2 n)
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1544,7 +1614,8 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'BinomialHeap' || member === 'PairingHeap' || member === 'FibonacciHeap' ||
         member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray' ||
         member === 'PersistentSegTree' || member === 'MergeSortTree' ||
-        member === 'WaveletTree' || member === 'CartesianTree') mode = 0;
+        member === 'WaveletTree' || member === 'CartesianTree' ||
+        member === 'LinkCutTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

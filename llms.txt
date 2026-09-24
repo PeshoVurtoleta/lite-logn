@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.2.0
+Version: 1.3.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -37,7 +37,11 @@ the k-th smallest value in an index range MergeSortTree deferred -- and rangeCou
 O(log n), on the DEFAULT log2(n) axis); v1.2.0 adds CartesianTree (a STATIC, IMMUTABLE range-MINIMUM
 tree: a heap-ordered Cartesian tree built in O(n) whose rangeMinIndex / rangeMin answer the extreme's
 index / value over an index range in worst-case O(log n) via a binary-lifting LCA climb, with a
-materialized parent / left / right / depth topology you can walk -- the RMQ = LCA teaching bridge).
+materialized parent / left / right / depth topology you can walk -- the RMQ = LCA teaching bridge);
+v1.3.0 adds LinkCutTree (the family's FIRST dynamic-topology structure: a Sleator-Tarjan link-cut tree
+maintaining a FOREST of rooted trees over a FIXED vertex set under link / cut / evert with AMORTIZED
+O(log n) PATH aggregates -- min / max / sum / gcd, frozen at construction -- via a preferred-path splay
+decomposition that flips EDGES only, so no op allocates).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -361,6 +365,31 @@ The roster (one member per session, each landing append-only):
   `kind` exactly `'min'` or `'max'`, and the `n * L` lift-cell count guarded by a FLOAT multiply against
   CT_MAX_CELLS; query bounds need `0 <= lo <= hi < length`. WORST-CASE (no max-single-op line); O(n) tree
   build + O(n log n) lift table and space a DISCLOSED co-headline. Zero allocation on every hot op.
+
+- LinkCutTree (v1.3.0) -- the family's FIRST dynamic-topology structure and its binding of the
+  Sleator-Tarjan link-cut tree. Over a FIXED vertex set `[0, capacity)` it maintains a FOREST of rooted
+  trees under `link(child, parent)` / `cut(node)`, answering PATH aggregates in AMORTIZED O(log n) via a
+  preferred-path splay decomposition: the forest is cut into vertex-disjoint preferred paths, each stored
+  as a splay tree keyed by depth, with path-parent pointers stitching the paths; the `access(v)` primitive
+  splays `v` up and splices the root-to-`v` path into one splay tree (amortized O(log n) by the SplayTree
+  potential argument). `link` / `cut` / `evert` flip EDGES only over eight flat columns (`_val` / `_agg`
+  Float64, `_l` / `_r` / `_p` Uint32 with NIL = 0, `_rev` Uint8, `_stk` scratch), with ITERATIVE splay /
+  access (never recursion), so there is NO per-op allocation, NO free-list, and NO bump allocator. The
+  fold `kind` (`'min'` | `'max'` | `'sum'` | `'gcd'`) is frozen at construction via an inline switch;
+  because the folds are COMMUTATIVE, reversal (`evert` / makeRoot) is aggregate-invariant -- it swaps
+  children and flips a lazy `_rev` bit, no mirrored aggregate. `pathAggregate(u)` folds ROOT -> `u`;
+  `pathAggregate(u, v)` folds the `u..v` path INCLUSIVE; `findRoot(u)` / `connected(u, v)` answer dynamic
+  connectivity; `setValue(id, value)` sets a vertex value (absolute). It sits on the DEFAULT log2(n)
+  witness axis (a single splay descent): witness op = `pathAggregate` via a lane-scoped median-of-7 fit
+  (the frozen 0.958 floor + slope band unchanged, the slope band PROVISIONAL cold -- qa re-centers warm),
+  with an O(depth) naive parent-walk foil (O(n) on a deep chain) OFF-line. AMORTIZED: the witness prints
+  the MAX single `pathAggregate` as a disclosure, never gated (SplayTree / PairingHeap / FibonacciHeap
+  precedent). Fail closed: `link` throws (no-op) on a bad id, a self-link, or a CYCLE-creating link (the
+  endpoints are already connected, keeping the structure a FOREST); `cut` throws on a bad id or on cutting
+  a root with no parent edge; `setValue` throws on a bad id, a non-finite value, or (gcd kind) a negative /
+  non-integer value; `capacity` must be an integer in [1, LCT_MAX_CAPACITY] (2^31-1) and `kind` one of the
+  four folds. PATH-only: there is NO subtree aggregate (deferred to a future EulerTourTree) and NO forEach
+  / iterator. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -843,6 +872,41 @@ The roster (one member per session, each landing append-only):
   - `root` getter -> the root node index (the extreme's position over the whole array); `length` / `size`
     getters -> the element count (the source length); `kind` getter -> `'min'` | `'max'` (frozen at build).
     All O(1). There is NO clear / mutator / forEach (static + immutable).
+
+- `LinkCutTree` -- class. The family's FIRST dynamic-topology structure: a Sleator-Tarjan link-cut tree
+  maintaining a FOREST of rooted trees over a FIXED vertex set `[0, capacity)` under `link` / `cut` /
+  `evert`, answering PATH aggregates in AMORTIZED O(log n) via a preferred-path splay decomposition, zero-
+  allocation. `link` / `cut` / `evert` flip EDGES only over eight flat columns, so no op allocates (no
+  free-list, no bump allocator). The fold `kind` is frozen at build; because the folds are COMMUTATIVE,
+  `evert` (makeRoot) is aggregate-invariant (a lazy `_rev` bit). There is NO static `LinkCutTree.build`
+  factory. PATH-only (subtree folds deferred to a future EulerTourTree); NO forEach / iterator.
+  - `new LinkCutTree(capacity, kind = 'min')` -- capacity the exact vertex count, an integer in
+    [1, LCT_MAX_CAPACITY] (2^31-1); vertex ids are [0, capacity). kind exactly `'min'` | `'max'` | `'sum'`
+    | `'gcd'` (frozen at construction). All vertices start as isolated singletons at the fold identity. O(n).
+    Throws on a bad capacity or a bad kind.
+  - `link(child, parent)` -> this. Add the edge child -> parent. Amortized O(log n), 0 B/op. Throws
+    (no-op) on a bad id, a self-link, or a CYCLE-creating link (the two vertices are already connected).
+  - `cut(node)` -> this. Remove the edge between node and its parent (toward the current root). Amortized
+    O(log n), 0 B/op. Throws (no-op) on a bad id or on cutting a root with no parent edge.
+  - `evert(u)` -> this. Re-root the tree containing u at u (makeRoot). Amortized O(log n), 0 B/op. A bad
+    id throws.
+  - `findRoot(u)` -> number. The root vertex of u's tree under the current rooting. Amortized O(log n)
+    MUTATING read (splays). A bad id throws BEFORE any splay.
+  - `connected(u, v)` -> boolean. True iff u and v are in the SAME tree (findRoot(u) === findRoot(v)).
+    Amortized O(log n) MUTATING read. A bad id throws BEFORE any splay.
+  - `pathAggregate(u, v)` -> number. One argument (v omitted): the fold over the ROOT -> u path. Two
+    arguments: the fold over the u..v path INCLUSIVE of both endpoints. The gated witness op. Amortized
+    O(log n) MUTATING read, 0 B/op. A bad id throws BEFORE any splay; a two-argument call with u, v in
+    DIFFERENT trees throws.
+  - `setValue(id, value)` -> this. Set vertex id's value to value (ABSOLUTE), then fix the aggregate.
+    Amortized O(log n), 0 B/op. Throws (no-op) on a bad id, a non-finite value, or (gcd kind) a negative /
+    non-integer value.
+  - `at(id)` -> number. Vertex id's stored value. O(1), NON-mutating (no splay), 0 B/op. A bad id throws.
+  - `clear()` -> this. Reset the forest to isolated singleton vertices (edges dropped, values + aggregates
+    back to the fold identity, edge count 0). O(n), buffers reset in place (zero-alloc), instance reusable.
+  - `capacity` getter -> the fixed vertex count (there is NO length / size getter -- the vertex count IS
+    capacity); `kind` getter -> `'min'` | `'max'` | `'sum'` | `'gcd'` (the frozen path fold); `edges`
+    getter -> the number of edges currently in the forest (link increments, cut decrements). All O(1).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

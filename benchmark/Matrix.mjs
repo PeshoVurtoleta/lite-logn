@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The eighteen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree', 'CartesianTree'];
+/** The nineteen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree', 'CartesianTree', 'LinkCutTree'];
 
-/** The twenty-three gated D1 witness op-rows (member.op), in build order. */
+/** The twenty-four gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -46,6 +46,7 @@ export const OP_ROWS = [
     'MergeSortTree.countLE',
     'WaveletTree.quantile',
     'CartesianTree.rangeMinIndex',
+    'LinkCutTree.pathAggregate',
 ];
 
 /** The eight measurement dimensions. */
@@ -83,6 +84,7 @@ export const BASELINE = {
     MergeSortTree: 'linear-scan-count',
     WaveletTree: 'linear-kth-sort',
     CartesianTree: 'linear-scan',
+    LinkCutTree: 'linear-parent-walk',
 };
 
 /**
@@ -149,6 +151,10 @@ export const COUNTER_FOIL = {
     // cannot answer "WHERE is the min/max in an index range" at all, so there is no "faster but order-blind"
     // O(1) rival -- NA (the string, never 0).
     CartesianTree: NA,
+    // LinkCutTree is a DYNAMIC forest for path aggregates under link/cut, not an ordered map; a Map cannot
+    // answer "the fold over the path between two vertices in a changing forest" at all, so there is no
+    // "faster but order-blind" O(1) rival -- NA (the string, never 0).
+    LinkCutTree: NA,
 };
 
 /**
@@ -296,6 +302,14 @@ export const RATIONALE = {
             'build + O(n log n) lift table to buy rangeMinIndex/rangeMin; a Map cannot answer WHERE the ' +
             'min/max is in an index range at all, so there is no order-blind O(1) counter-foil.',
     },
+    LinkCutTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a naive O(depth) walk up the parent chain, folding each vertex value, is the honest default ' +
+            'before the link-cut / preferred-path trick -- the rival that motivates the AMORTIZED O(log n) ' +
+            'pathAggregate over a self-adjusting splay decomposition. The link-cut tree buys O(log n) link / ' +
+            'cut / evert / path-fold on a DYNAMIC forest whose topology changes; a Map cannot answer a path ' +
+            'fold between two vertices of a changing forest at all, so there is no order-blind O(1) counter-foil.',
+    },
 };
 
 /**
@@ -346,7 +360,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (18 x 8 = 144 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (19 x 8 = 152 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -493,21 +507,32 @@ export const OP_CLASS = Object.freeze({
     // O(1) getters (at / parent / left / right / depth / root) are NOT in this table (they read a cached
     // cell, they do not climb). build is O(n) tree + O(n log n) lift, also NOT an O(log) class -> not listed.
     'CartesianTree.rangeMinIndex': OLOGN_WORST, // one binary-lifting LCA climb x O(1) `_up` per jump (the gated row)
+    // LinkCutTree: pathAggregate is a self-adjusting preferred-path ACCESS -- it SPLAYS the root-to-u path to
+    // the top and reads the cached subtree aggregate. A single cold access can be O(n), which amortizes to
+    // O(log n) -- DETERMINISTIC (no RNG), the same third honesty class as SplayTree.get (a MUTATING read that
+    // restructures). The MAX single access (a cold deep splay) is a DISCLOSED tail, never gated (the SplayTree /
+    // Pairing / Fibonacci amortized precedent). link / cut / evert are the same amortized class but are NOT the
+    // gated D1 row, so they are not in this table. at / capacity / kind / edges are O(1) getters -> not listed.
+    'LinkCutTree.pathAggregate': OLOGN_AMORTIZED, // access (splay the root-to-u path) + read the cached aggregate (the gated row)
 });
 
 // ===========================================================================
 // clear() invariance witness (Bench v3, RE-WIRED per Table B). ELEVATED to a
-// first-class witness for the fifteen MUTABLE SUBJECTS: each returns the structure to
+// first-class witness for the sixteen MUTABLE SUBJECTS: each returns the structure to
 // its pristine EMPTY invariant (heap/list size 0; index-addressed accumulators
-// zeroed), retains its fixed backing store (zero-alloc), and stays reusable. The
-// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable members (MergeSortTree + WaveletTree + CartesianTree) -- verified against
-// LogN.js (BinaryHeap:239, Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
+// zeroed; LinkCutTree's forest reset to isolated singletons, 0 edges), retains its fixed
+// backing store (zero-alloc), and stays reusable. The
+// CLEAR_WITNESS set is SUBJECTS MINUS the members without a clear() (the static immutable
+// MergeSortTree + WaveletTree + CartesianTree) -- verified against
+// LogN.js (BinaryHeap:239, Fenwick:571, SegmentTree:853, SkipList:1349, LinkCutTree all expose clear()).
 //
 // EXCLUDED (named with a reason, never silently dropped -- the same discipline as the
 // NA-never-0 rule): MergeSortTree is a STATIC, IMMUTABLE member (built once, no mutators,
 // no clear()); there is no fill/clear/refill invariant to witness because the tree is
 // never mutated after construction (the SparseTable / lite-o1 static-member contract). It
-// IS a SUBJECT (benchmarked across every dimension) but not a clear-witness. NodePool is
+// IS a SUBJECT (benchmarked across every dimension) but not a clear-witness. LinkCutTree is
+// a MUTABLE forest (link / cut / evert) over a FIXED vertex set WITH a real clear() (a bulk
+// O(n) in-place reset to isolated singletons), so it IS a clear-witness. NodePool is
 // the PRIVATE, unexported free-list SkipList owns; it HAS a clear() (LogN.js:1053) but is
 // not a SUBJECT and its reset is transitively covered by SkipList (its sole owner). The
 // read/traverse surface (peek/topKey/size/length/prefix/query/get/has + forEach/rangeIter)
@@ -515,7 +540,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= the mutable SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'LinkCutTree'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. MergeSortTree is

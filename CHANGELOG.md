@@ -6,6 +6,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-24
+
+### Added
+
+- **LinkCutTree** -- the nineteenth member and the family's FIRST dynamic-topology structure: a
+  Sleator-Tarjan link-cut tree maintaining a FOREST of rooted trees under `link` / `cut` and answering
+  PATH aggregates in AMORTIZED O(log n), zero-allocation. The forest is a preferred-path decomposition --
+  each preferred path is a splay tree keyed by depth, path-parent pointers stitch the paths -- over eight
+  flat columns (`_val` / `_agg` Float64, `_l` / `_r` / `_p` Uint32 with NIL = 0, `_rev` Uint8 lazy-reversal
+  flag, `_stk` preallocated splay scratch). The splay / access / push-down are ITERATIVE (never recursion,
+  which a degenerate O(n)-deep path would overflow). Surface: `link(child, parent)`, `cut(node)`,
+  `evert(u)` (makeRoot), `findRoot(u)`, `connected(u, v)` (`findRoot(u) === findRoot(v)`),
+  `pathAggregate(u)` (root -> `u`) and `pathAggregate(u, v)` (the `u..v` path, INCLUSIVE), `setValue(id,
+  value)` (absolute), `at(id)` (O(1), non-mutating), and `clear()` (reset the forest to isolated
+  singletons in place, O(n), zero-alloc, reusable). Getters: `capacity`, `kind`, `edges`. See
+  `decisions/0021-linkcuttree.md`.
+- **Full LCT with evert; commutative folds make reversal AGGREGATE-INVARIANT (D-LCT).** `evert(u)`
+  re-roots the tree at `u`, which is what enables the two-endpoint `pathAggregate(u, v)`. Because the four
+  folds -- `min` | `max` | `sum` | `gcd`, frozen at construction as a small-int read by an inline switch in
+  `_pull` -- are all COMMUTATIVE, a path fold does not depend on direction, so `evert` only swaps children
+  and flips a lazy `_rev` bit; there is NO mirror-order aggregate to maintain. `gcd` rejects negative /
+  non-integer values at the `setValue` door.
+- **pathAggregate on the DEFAULT log2(n) witness axis, AMORTIZED, max single-op DISCLOSED not gated.** Each
+  `pathAggregate` is an amortized access + splay -- a single log descent -- so it fits
+  `nsPerOp = intercept + slope*log2(n)`. The gated witness op is `pathAggregate`; because the member is
+  amortized (a single access can splay a long preferred path), the max single-op is DISCLOSED as a
+  co-headline and NEVER gated (the SplayTree / PairingHeap / FibonacciHeap contract). Its O(depth) naive
+  parent-walk foil goes O(n) on a deep chain and leaves the line. Shared R^2 floor 0.958 UNTOUCHED; the
+  lane opts into the median-of-7-fits hook for post-torture thermal robustness.
+- **FIXED vertex set, NO allocator; fail closed.** The vertices are fixed at construction (`capacity` of
+  them); `link` / `cut` / `evert` flip EDGES only, so there is NO per-op allocation, NO free-list, and NO
+  bump allocator -- the buffers are sized once and reset in place by `clear()`. `capacity` is an integer in
+  `[1, LCT_MAX_CAPACITY]` (`0x7FFFFFFF`, 2^31-1); every vertex id is typeof-guarded (Symbol / BigInt-safe)
+  BEFORE any splay (the mutating-read fail-OPEN lesson from SplayTree). `link` throws `[lite-logn]` as a
+  no-op on a self-link or a CYCLE-creating link; `cut` throws on cutting a tree root (no parent edge); a
+  two-endpoint `pathAggregate` across different trees throws (no path -- checked before any evert
+  half-mutates); `setValue` throws on a non-finite value.
+- **Path-only; subtree aggregates deferred to a future EulerTourTree.** LinkCutTree answers PATH folds
+  under link / cut; subtree aggregates and unrooted dynamic connectivity with subtree folds are
+  deliberately the job of a planned EulerTourTree sibling (the documented boundary).
+
 ## [1.2.0] - 2026-09-24
 
 ### Added
