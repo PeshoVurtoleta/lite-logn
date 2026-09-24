@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The seventeen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree'];
+/** The eighteen shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree', 'CartesianTree'];
 
-/** The twenty-two gated D1 witness op-rows (member.op), in build order. */
+/** The twenty-three gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -45,6 +45,7 @@ export const OP_ROWS = [
     'PersistentSegTree.query',
     'MergeSortTree.countLE',
     'WaveletTree.quantile',
+    'CartesianTree.rangeMinIndex',
 ];
 
 /** The eight measurement dimensions. */
@@ -81,6 +82,7 @@ export const BASELINE = {
     PersistentSegTree: 'whole-tree-rebuild/scan-fold',
     MergeSortTree: 'linear-scan-count',
     WaveletTree: 'linear-kth-sort',
+    CartesianTree: 'linear-scan',
 };
 
 /**
@@ -143,6 +145,10 @@ export const COUNTER_FOIL = {
     // answer "the k-th smallest value in an index range" at all, so there is no "faster but order-blind"
     // O(1) rival -- NA (the string, never 0).
     WaveletTree: NA,
+    // CartesianTree is a STATIC range-extreme-INDEX structure (offline RMQ), not an ordered map; a Map
+    // cannot answer "WHERE is the min/max in an index range" at all, so there is no "faster but order-blind"
+    // O(1) rival -- NA (the string, never 0).
+    CartesianTree: NA,
 };
 
 /**
@@ -282,6 +288,14 @@ export const RATIONALE = {
             'O(n log sigma) build + n*levels bits to buy access/rank/select/quantile/rangeCount; a Map ' +
             'cannot answer the k-th smallest value in an index range at all, so no order-blind O(1) foil.',
     },
+    CartesianTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a linear scan of the index window for the extreme\'s position (O(n) per query) is the honest ' +
+            'default before the Cartesian-tree trick -- the rival that motivates the O(log n) binary-lifting ' +
+            'LCA for the range-extreme INDEX (offline RMQ). This STATIC build-once member pays an O(n) tree ' +
+            'build + O(n log n) lift table to buy rangeMinIndex/rangeMin; a Map cannot answer WHERE the ' +
+            'min/max is in an index range at all, so there is no order-blind O(1) counter-foil.',
+    },
 };
 
 /**
@@ -332,7 +346,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (16 x 8 = 128 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (18 x 8 = 144 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -472,6 +486,13 @@ export const OP_CLASS = Object.freeze({
     // same class; select is O(log sigma . log n) (an upward select0/select1 climb) but is NOT the gated
     // row, so it is not in this table. build is O(n log sigma), also NOT an O(log) class -> not listed.
     'WaveletTree.quantile': OLOGN_WORST,     // one level descent x O(1) _rank1 per level (the gated row)
+    // CartesianTree: rangeMinIndex is a SINGLE binary-lifting LCA climb of the two nodes, each jump an O(1)
+    // `_up` read -> WORST-CASE O(log n) (a STATIC immutable tree has no randomization / amortization). Like
+    // WaveletTree.quantile there is NO per-node binary search (each jump is O(1)), so it is the single-log
+    // OLOGN_WORST, NOT the squared-log OLOGN2_WORST. rangeMin is the same class (adds one `_val` read); the
+    // O(1) getters (at / parent / left / right / depth / root) are NOT in this table (they read a cached
+    // cell, they do not climb). build is O(n) tree + O(n log n) lift, also NOT an O(log) class -> not listed.
+    'CartesianTree.rangeMinIndex': OLOGN_WORST, // one binary-lifting LCA climb x O(1) `_up` per jump (the gated row)
 });
 
 // ===========================================================================
@@ -479,7 +500,7 @@ export const OP_CLASS = Object.freeze({
 // first-class witness for the fifteen MUTABLE SUBJECTS: each returns the structure to
 // its pristine EMPTY invariant (heap/list size 0; index-addressed accumulators
 // zeroed), retains its fixed backing store (zero-alloc), and stays reusable. The
-// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable members (MergeSortTree + WaveletTree) -- verified against
+// CLEAR_WITNESS set is SUBJECTS MINUS the static immutable members (MergeSortTree + WaveletTree + CartesianTree) -- verified against
 // LogN.js (BinaryHeap:239, Fenwick:571, SegmentTree:853, SkipList:1349 all expose clear()).
 //
 // EXCLUDED (named with a reason, never silently dropped -- the same discipline as the
@@ -509,6 +530,10 @@ export const CLEAR_WITNESS_EXCLUDED = Object.freeze({
     WaveletTree: 'STATIC, IMMUTABLE member (wavelet matrix built once, source coordinate-compressed + ' +
         'copied, no mutators, no clear()); IS a SUBJECT but has no fill/clear/refill invariant to ' +
         'witness -- the matrix is never mutated after construction (the lite-o1 static-member contract), ' +
+        'so there is nothing to clear + reuse',
+    CartesianTree: 'STATIC, IMMUTABLE member (Cartesian tree + binary-lifting table built once, source ' +
+        'copied, no mutators, no clear()); IS a SUBJECT but has no fill/clear/refill invariant to ' +
+        'witness -- the tree is never mutated after construction (the lite-o1 static-member contract), ' +
         'so there is nothing to clear + reuse',
     NodePool: 'private/unexported free-list (SkipList\'s slot allocator, LogN.js:1053); ' +
         'NOT in SUBJECTS -- its clear() is an internal reset transitively covered by SkipList, ' +

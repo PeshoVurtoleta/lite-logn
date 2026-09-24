@@ -54,7 +54,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } = await import('../LogN.js');
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -262,6 +262,20 @@ async function main() {
             wt.quantile(0, 63, i & 63);
             wt.rangeCount(0, 63, 0, i & 0x3f);
             tracker.track(wt, noopRelease, 16 * CYCLES + i, { audit: true });
+            // A fresh CartesianTree per cycle, built from a scratch array of values then exercised across
+            // its read surface (rangeMinIndex / rangeMin / at / parent / depth) then dropped. Same held-
+            // value contract: a CartesianTree owns only its flat _val / _left / _right / _parent / _depth /
+            // _up typed arrays (no external resource), and it is IMMUTABLE (no mutators), so the no-op
+            // cleanup never defeats finalization.
+            const ctVals = new Float64Array(64);
+            for (let k = 0; k < 64; k++) ctVals[k] = (k * 2654435761) & 0xffff;
+            const ct = CartesianTree.build(ctVals, (i & 1) ? 'min' : 'max');
+            ct.rangeMinIndex(0, 63);
+            ct.rangeMin(10, 40);
+            ct.at(i & 63);
+            ct.parent(i & 63);
+            ct.depth(i & 63);
+            tracker.track(ct, noopRelease, 17 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -1009,6 +1023,40 @@ async function main() {
         wtk = (wtk + 1) | 0;
     };
 
+    // CartesianTree: one out-of-loop IMMUTABLE tree built once over CAP seeded values. Every read lane is
+    // a real hot op that MUST allocate zero bytes -- the flat _val / _left / _right / _parent / _depth /
+    // _up arrays are fixed at construction, and rangeMinIndex / rangeMin / at / parent / left / right /
+    // depth are read-only descents / point reads using only local scalars (0 B/op even where
+    // rangeMinIndex does the binary-lifting LCA climb). There is NO mutation / clear lane (build-once
+    // immutable).
+    const ctSrc = new Float64Array(CAP);
+    for (let i = 0; i < CAP; i++) ctSrc[i] = (i * 2654435761) & MASK;
+    const ct = CartesianTree.build(ctSrc, 'min');
+    let ctk = 0, ctacc = 0;
+    // rangeMinIndex: the gated Witness op -- a wide-window extreme-index LCA climb over a cycling range.
+    const stepCtRangeMinIndex = () => {
+        const lo = ctk & (MASK >> 1);
+        ctacc = (ctacc + (ct.rangeMinIndex(lo, lo + (CAP >> 1)) | 0)) | 0;
+        ctk = (ctk + 1) | 0;
+    };
+    // rangeMin: the same climb, returning the extreme VALUE (one extra _val read), folded in.
+    const stepCtRangeMin = () => {
+        const lo = ctk & (MASK >> 1);
+        ctacc = (ctacc + (ct.rangeMin(lo, lo + (CAP >> 1)) | 0)) | 0;
+        ctk = (ctk + 1) | 0;
+    };
+    // at: an O(1) point read over the flat _val array, folded in.
+    const stepCtAt = () => {
+        ctacc = (ctacc + (ct.at(ctk & MASK) | 0)) | 0;
+        ctk = (ctk + 1) | 0;
+    };
+    // parent / left / right / depth: O(1) point reads over the flat structural arrays, folded in.
+    const stepCtTopology = () => {
+        const i = ctk & MASK;
+        ctacc = (ctacc + (ct.parent(i) | 0) + (ct.left(i) | 0) + (ct.right(i) | 0) + (ct.depth(i) | 0)) | 0;
+        ctk = (ctk + 1) | 0;
+    };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -1038,7 +1086,8 @@ async function main() {
         stepSaGet, stepSaRankSelect, stepSaSet, stepSaSuccessor,
         stepPstQuery, stepPstAt, stepPstUpdate,
         stepMstCountLE, stepMstRangeCount,
-        stepWtAccess, stepWtRank, stepWtSelect, stepWtQuantile, stepWtRangeCount]) {
+        stepWtAccess, stepWtRank, stepWtSelect, stepWtQuantile, stepWtRangeCount,
+        stepCtRangeMinIndex, stepCtRangeMin, stepCtAt, stepCtTopology]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -1086,6 +1135,7 @@ async function main() {
     if (psacc === 0x7fffffff) throw new Error('unreachable'); // keep psacc live
     if (mstacc === 0x7fffffff) throw new Error('unreachable'); // keep mstacc live
     if (wtacc === 0x7fffffff) throw new Error('unreachable'); // keep wtacc live
+    if (ctacc === 0x7fffffff) throw new Error('unreachable'); // keep ctacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1254,6 +1304,14 @@ async function main() {
         if ((i & 7) === 0) sink = (sink + (wt.rank(i & MASK, (i & MASK) + 1) | 0)) | 0;
         if ((i & 15) === 0) { const r = wt.select(i & MASK, 0); sink = (sink + (r === undefined ? 0 : r | 0)) | 0; }
         if ((i & 31) === 0) { const lo = i & (MASK >> 1); sink = (sink + (wt.rangeCount(lo, lo + 100, 0, i & MASK) | 0)) | 0; }
+        // CartesianTree churn every op: a wide-window rangeMinIndex (the gated O(log n) LCA climb), plus a
+        // rangeMin every 4th, an at every 8th, and a parent/depth topology read every 16th. The tree is
+        // IMMUTABLE (no writes), so this is a pure read-only climb that allocates zero bytes and triggers
+        // no major collection.
+        { const lo = i & (MASK >> 1); sink = (sink + (ct.rangeMinIndex(lo, lo + (CAP >> 1)) | 0)) | 0; }
+        if ((i & 3) === 0) { const lo = i & (MASK >> 1); sink = (sink + (ct.rangeMin(lo, lo + (CAP >> 1)) | 0)) | 0; }
+        if ((i & 7) === 0) sink = (sink + (ct.at(i & MASK) | 0)) | 0;
+        if ((i & 15) === 0) { const j = i & MASK; sink = (sink + (ct.parent(j) | 0) + (ct.depth(j) | 0)) | 0; }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1293,6 +1351,11 @@ async function main() {
     const abWtSrc = new Float64Array(1024);
     for (let i = 0; i < 1024; i++) abWtSrc[i] = (i * 2654435761) & 0x3ff;
     const abWt = WaveletTree.build(abWtSrc);
+    // CartesianTree is IMMUTABLE too: flat _val / _left / _right / _parent / _depth / _up arrays fixed at
+    // construction. Built ONCE here and only READ in the soak below, so its backing stores cannot grow.
+    const abCtSrc = new Float64Array(1024);
+    for (let i = 0; i < 1024; i++) abCtSrc[i] = (i * 2654435761) & 0x3ff;
+    const abCt = CartesianTree.build(abCtSrc, 'min');
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1401,6 +1464,16 @@ async function main() {
             if (rc < 0 || rc > 1024) conservationOk = false;
             const idx = abWt.select(i & 1023, 0);
             if (idx !== undefined && abWt.rank(i & 1023, idx) !== 0) conservationOk = false; // select/rank inverse
+        }
+        // CartesianTree: IMMUTABLE, so it has no fill/clear cycle -- a batch of read-only queries over the
+        // pre-built tree instead. Reads never grow the flat structural arrays (a botched grow-on-read would
+        // reallocate here). rangeMinIndex must return an index inside the queried window, and rangeMin must
+        // equal at(rangeMinIndex) -- a round-trip conservation check.
+        for (let i = 0; i < 1024; i++) {
+            const lo = i & 511, hi = lo + 512;
+            const mi = abCt.rangeMinIndex(lo, hi);
+            if (mi < lo || mi > hi) conservationOk = false;
+            if (abCt.rangeMin(lo, hi) !== abCt.at(mi)) conservationOk = false;
         }
         // SplayTree: same free-list conservation contract as SkipList/Treap. A fill (each
         // insert splays), then a real delete() -> splay-join -> _pool.free() round trip on
@@ -1528,7 +1601,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     if (!ok) {

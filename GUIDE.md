@@ -1,10 +1,10 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v1.1.0 seventeen members have
+avoid, and how to measure the logarithm yourself. At v1.2.0 eighteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
-SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree and WaveletTree -- so this guide carries their per-member sections. It is NOT an API
+SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree and CartesianTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -33,7 +33,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v1.1.0 all seventeen members have
+`(am)` = amortized, `(exp)` = expected. At v1.2.0 all eighteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -95,9 +95,14 @@ START -- what do you need?
 |   range [lo, hi]? (build ONCE, then query forever; immutable)-> MergeSortTree (wc)   [v0.16.0]
 |
 +-- OFFLINE range ORDER STATISTIC over a FIXED sequence: the
-    k-th SMALLEST value in an INDEX range (quantile / median),
-    plus access / rank / select and O(log n) rangeCount?
-    (build ONCE, then query forever; immutable)               -> WaveletTree (wc)     [v1.1.0]
+|   k-th SMALLEST value in an INDEX range (quantile / median),
+|   plus access / rank / select and O(log n) rangeCount?
+|   (build ONCE, then query forever; immutable)               -> WaveletTree (wc)     [v1.1.0]
+|
++-- OFFLINE range MINIMUM / MAXIMUM over a FIXED sequence: the
+    INDEX (or value) of the extreme in an INDEX range (RMQ),
+    AND you want a walkable parent/child/depth tree (RMQ = LCA)?
+    (build ONCE, then query forever; immutable)               -> CartesianTree (wc)   [v1.2.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -186,10 +191,11 @@ the leanest iteration); reach for a BST when inserts and deletes are frequent.
 | Associative range fold where EVERY PAST VERSION stays queryable + branchable (time-travel / undo / audit) | PersistentSegTree | O(log n) query / at / update (update -> a new version, sharing off-path subtrees) | 0.15.0 |
 | OFFLINE range-RANK over a FIXED sequence: how many values <= x (or in a value-window) fall in an INDEX range; build once, immutable | MergeSortTree | O(log^2 n) countLE / rangeCount; O(n log n) build + space (disclosed) | 0.16.0 |
 | OFFLINE range ORDER STATISTIC over a FIXED sequence: k-th smallest value in an INDEX range (quantile / median), plus access / rank / select + O(log n) rangeCount; build once, immutable | WaveletTree | O(log n) access / rank / select / quantile / rangeCount; O(n log sigma) build + space (disclosed) | 1.1.0 |
+| OFFLINE range MINIMUM / MAXIMUM over a FIXED sequence: the INDEX (or value) of the extreme in an INDEX range (RMQ), AND you want a walkable parent/child/depth tree (RMQ = LCA); build once, immutable | CartesianTree | O(log n) rangeMinIndex / rangeMin via an LCA climb; O(1) at / parent / left / right / depth / root; O(n) build + O(n log n) lift + space (disclosed) | 1.2.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's and WaveletTree's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's, WaveletTree's and CartesianTree's are below).
 
 ---
 
@@ -209,6 +215,7 @@ The default log2(n)-axis ops, cheapest per level first:
 | --- | --- | --- | --- | --- |
 | `SortedArray.get` | 1.0 | 0.98 | 16 (exact) | a read-mostly ordered map: the shallowest per-level cost, but insert is an O(n) shift |
 | `Fenwick.update` / `.prefix` | 2.6 - 2.8 | 0.97 - 0.98 | 8 (exact) | the cheapest per-level cost + the tightest memory; sum-only prefix/range |
+| `CartesianTree.rangeMinIndex` | 2.9 | 0.99 | 8 (source) + n log n lift | offline range MIN / MAX (RMQ) over a fixed sequence + a walkable tree (RMQ = LCA); build-once immutable |
 | `SegmentTree.update` | 3.1 | 0.99 | 16 (exact) | any associative fold (min/max/sum/gcd), point update |
 | `Scapegoat.get` | 3.8 | 0.99 | 40 | worst-case (not expected) O(log n) reads + rank / select; rebuilds amortize inserts |
 | `Treap.get` | 4.0 | 0.99 | 36 | an ordered map WITH rank / select / split / merge -- lower per-level cost + leaner store than SkipList |
@@ -944,6 +951,51 @@ WORST-CASE member (build-once immutable, no randomization / amortization): there
 line. `node --expose-gc test/torture.mjs` proves access / rank / select / quantile / rangeCount at
 0 B/op -- each query is a read-only descent over the flat bitvectors, so even a query storm
 allocates nothing.
+
+---
+
+## CartesianTree -- the offline range MINIMUM / MAXIMUM (RMQ) + a walkable tree (RMQ = LCA)
+
+**Reach for it when** you have a FIXED sequence and need, many times, the **index or value of the
+extreme in an INDEX range** (`rangeMinIndex(lo, hi)` / `rangeMin(lo, hi)` -- range-minimum for a
+`min` tree, range-maximum for a `max` tree) -- worst-case O(log n), zero-allocation -- AND you want
+the underlying tree to be MATERIALIZED and walkable (`parent` / `left` / `right` / `depth` / `root`,
+plus `at(i)`). You build ONCE from a snapshot (COPIED in) and query forever; the structure is
+IMMUTABLE (no mutators). Canonical uses: range-minimum queries over a static array, the RMQ = LCA
+teaching bridge (the range minimum over `[lo, hi]` IS the lowest common ancestor of `lo` and `hi`),
+sparse-table-free RMQ where you also need to inspect the tree shape, and any algorithm built on a
+heap-ordered Cartesian tree (suffix-array LCP, treap-shaped range structures). `kind` (`'min'` /
+`'max'`) is frozen at construction; ties resolve to the FIRST (leftmost) index, matching a linear
+scan.
+
+**Avoid it when:**
+
+- You need an O(1) (not O(log n)) RMQ and never walk the tree. **lite-o1's `SparseTable`** answers
+  RMQ in O(1) at the SAME O(n log n) space -- pick it when the query constant is what matters and
+  you do not need the materialized tree. CartesianTree deliberately pays O(log n) to give you the
+  walkable topology and the LCA bridge (see the ADR).
+- Your data CHANGES (inserts / deletes / updates). CartesianTree is build-once immutable -- a
+  mutation means rebuilding. For a mutable associative range fold (min / max / sum / gcd) with point
+  updates use **SegmentTree**; for the randomized dynamic Cartesian tree (an ordered map with
+  rank / select / split / merge) use **Treap** (the Treap IS the randomized Cartesian tree, keyed
+  by value + a random priority).
+- You need a range SUM or a general associative fold, not just the extreme. Use **Fenwick** (sum) or
+  **SegmentTree** (any fold). CartesianTree answers the min / max index only.
+- Memory is tight. The binary-lifting table is `n * (ceil(log2 n) + 1)` Int32 cells (O(n log n)) --
+  a DISCLOSED co-headline, the honest price of the O(log n) LCA climb; a plain O(n) scan is O(1)
+  space.
+
+**Measure it yourself:** `npm run witness` fits `rangeMinIndex` (over the widest index window with
+cycled random ranges) against the DEFAULT axis `nsPerOp = intercept + slope*log2(n)`; it must clear
+the shared R^2 floor (0.958) and sit inside its band (`[1.69, 3.93]` ns/level; median slope ~2.8),
+over exact power-of-two sizes `[2^12, 2^18]`, while the O(n) linear extreme-scan foil leaves the
+line. Because the LCA climb reads scattered ancestor cells, this lane opts into the MEDIAN of 7
+independent sweep-fits as measurement-quality insurance -- the frozen 0.958 floor and slope band are
+UNTOUCHED (see [`decisions/0020-cartesiantree.md`](./decisions/0020-cartesiantree.md)). STATIC +
+WORST-CASE member (build-once immutable, no randomization / amortization): there is no MAX-single-op
+line. `node --expose-gc test/torture.mjs` proves rangeMinIndex / rangeMin / at / parent / left /
+right / depth at 0 B/op -- each query is a read-only climb / point read over the flat arrays, so even
+a query storm allocates nothing.
 
 ---
 

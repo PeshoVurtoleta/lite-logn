@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1580,6 +1580,76 @@ const wtRangeCountChurn = {
     statsOf(s) { return { grows: wtGrows(s) }; },
 };
 
+/** CartesianTree's zero-alloc counter: its flat Int32Array binary-lifting table, fixed at construction
+ *  and IMMUTABLE, so the delta across the window must be 0 -- rangeMinIndex / rangeMin / at / parent /
+ *  left / right / depth are read-only LCA climbs / point reads using only local scalars. */
+function ctGrows(s) { return s.ct._up.buffer.byteLength; }
+
+const CT_LEN = 1 << 12;         // 4096 elements
+const CTMASK = CT_LEN - 1;
+
+/** An immutable CartesianTree over CT_LEN seeded values -- a warmed, stable min-tree. */
+function ctFill() {
+    const vals = new Float64Array(CT_LEN);
+    for (let i = 0; i < CT_LEN; i++) vals[i] = (i * 2654435761) & CTMASK;
+    return CartesianTree.build(vals, 'min');
+}
+
+/** rangeMinIndex churn: the GATED witness op -- the extreme-value INDEX over a WIDE cycling window, a
+ *  single binary-lifting LCA climb (O(1) `_up` per jump), folded. An escaping probe (assigned to
+ *  globalThis.__ctProbe so escape analysis cannot elide it) rides alongside to keep the harness honest:
+ *  if the hot body were ever to allocate, the probe write path would surface it, not hide it. */
+const ctRangeMinIndexChurn = {
+    name: 'CartesianTree rangeMinIndex churn (range extreme index, the gated op)',
+    setup() { return { ct: ctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = tick & (CTMASK >> 1);
+            acc = (acc + (t.rangeMinIndex(lo, lo + (CT_LEN >> 1)) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+        const probe = new Array(1); probe[0] = acc; globalThis.__ctProbe = probe; // escaping: no EA elision
+    },
+    statsOf(s) { return { grows: ctGrows(s) }; },
+};
+
+/** rangeMin churn: the same climb returning the extreme VALUE (one extra `_val` read), read-only. */
+const ctRangeMinChurn = {
+    name: 'CartesianTree rangeMin churn (range extreme value)',
+    setup() { return { ct: ctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const lo = tick & (CTMASK >> 1);
+            acc = (acc + (t.rangeMin(lo, lo + (CT_LEN >> 1)) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: ctGrows(s) }; },
+};
+
+/** topology churn: at / parent / depth O(1) point reads over the flat structural arrays, folded. */
+const ctTopologyChurn = {
+    name: 'CartesianTree topology churn (at / parent / depth point reads)',
+    setup() { return { ct: ctFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ct;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const j = tick & CTMASK;
+            acc = (acc + (t.at(j) | 0) + (t.parent(j) | 0) + (t.depth(j) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: ctGrows(s) }; },
+};
+
 /**
  * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
  * gate (scavenges scale with n), proving the instrument has teeth before any
@@ -1625,6 +1695,7 @@ zgcSuite({
         saGetChurn, saSetChurn, saShiftChurn, saOrderMix,
         pstQueryChurn, pstAtChurn, pstUpdateChurn,
         mstCountLEChurn, mstRangeCountChurn,
-        wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn],
+        wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn,
+        ctRangeMinIndexChurn, ctRangeMinChurn, ctTopologyChurn],
     mustFail: [teethMustFailAlloc],
 });

@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-24
+
+### Added
+
+- **CartesianTree** -- the eighteenth member and the family's range-MINIMUM tree: a STATIC, IMMUTABLE
+  heap-ordered Cartesian tree for offline range-minimum / range-maximum (RMQ) over a fixed sequence of
+  finite numbers. A single monotonic-stack pass builds the tree in O(n) (the right spine on the stack;
+  the STRICT pop rule keeps the EARLIER index as ancestor, so ties resolve to the FIRST occurrence),
+  an iterative preorder DFS fills each node's depth, and a binary-lifting ancestor table
+  `up[i][k] = 2^k-th ancestor` is built column by column in O(n log n) over a flat
+  `n * (ceil(log2 n) + 1)` `Int32Array`. Surface: `rangeMinIndex(lo, hi)` (the INDEX of the extreme in
+  the INDEX range `[lo, hi]` INCLUSIVE, via a binary-lifting LCA climb -- the RMQ = LCA bridge),
+  `rangeMin(lo, hi)` (its value), `at(i)`, `parent(i)` / `left(i)` / `right(i)` (topology you can walk;
+  `-1` when none), `depth(i)`. Getters: `root`, `length` / `size`, `kind` (`'min'` | `'max'`, frozen at
+  build), and the static `CartesianTree.build(values, kind)`. See `decisions/0020-cartesiantree.md`.
+- **Binary-lifting LCA on the DEFAULT log2(n) witness axis (D-CT).** Every `rangeMinIndex` is a single
+  O(log n) LCA climb (depth-equalize, then co-lift in lock-step) reading `_depth` / `_up` into local
+  scalars only -- `kind` is baked into the tree, so there is no per-op value compare -- so it fits
+  `nsPerOp = intercept + slope*log2(n)`, the single-log axis. The gated witness op is `rangeMinIndex`
+  (WORST-CASE O(log n), no RNG on the hot path), calibrated to the band `[1.55, 3.62]` ns/level
+  (median-of-15 fit-runs x `[0.6, 1.4]`); its O(n) linear extreme-scan foil leaves the line. Because
+  the climb reads scattered ancestor cells, this lane opts into the MEDIAN of 7 independent sweep-fits
+  as measurement-quality insurance (the frozen 0.958 R^2 floor + slope band are UNTOUCHED).
+- **STATIC / IMMUTABLE + copy-in, fail closed.** The source is COPIED in at construction (mutating the
+  caller's array afterward changes nothing) and there are NO mutators. The source must be an array-like
+  of FINITE numbers (typeof-guarded FIRST; Symbol / BigInt / NaN / +-Infinity fail closed), the length
+  an integer in `[1, CT_MAX_LENGTH]` (`0x7FFFFFFF`, 2^31-1), `kind` exactly `'min'` or `'max'`, and the
+  `n * L` lift-cell product is guarded by a FLOAT multiply against `CT_MAX_CELLS` (`0x7FFFFFFF`) --
+  never `| 0`, which would wrap a large product and fail OPEN. Query bounds need `0 <= lo <= hi < length`.
+- **Honest redundancy with lite-o1's SparseTable, disclosed.** CartesianTree pays an O(log n) query at
+  the SAME O(n log n) space where lite-o1's `SparseTable` answers RMQ in O(1). The overlap is
+  deliberate: the O(log n) cost buys the MATERIALIZED, walkable tree (`parent` / `left` / `right` /
+  `depth` / `root`) and the RMQ = LCA teaching bridge (the Treap is the randomized Cartesian tree; this
+  is the deterministic value-keyed one). The O(n) tree build + O(n log n) lift table and space are a
+  DISCLOSED co-headline, never hidden behind the fast query.
+
 ## [1.1.1] - 2026-09-23
 
 ### Fixed

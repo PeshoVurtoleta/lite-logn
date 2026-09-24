@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.1.1';
+export const VERSION = '1.2.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -7267,5 +7267,300 @@ export class WaveletTree {
         throw new RangeError(
             '[lite-logn] WaveletTree rangeCount needs vlo <= vhi, got vlo=' + String(vlo) +
             ' vhi=' + String(vhi));
+    }
+}
+
+// CartesianTree (v1.2.0 session) -- static immutable Cartesian tree / range-extreme index (RMQ)
+// via binary-lifting LCA: in-order IS the array (a BST on index) crossed with heap-order by value,
+// so the LCA of two indices is the position of the extreme in the closed index range between them.
+// A STATIC, IMMUTABLE range-min/max-INDEX structure: worst-case O(log n) range-extreme queries via
+// binary-lifting LCA, in the family's static-member honesty contract.
+
+/**
+ * Max CartesianTree element count: `0x7FFFFFFF` (2^31 - 1). The real ceiling on a large instance is
+ * the flat binary-lifting table (n x L cells, L = ceil(log2 n) + 1), guarded separately by
+ * CT_MAX_CELLS; this is the clean per-argument door for `length` (the source array's length) itself.
+ */
+const CT_MAX_LENGTH = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * Max CartesianTree binary-lifting CELL count: `0x7FFFFFFF` (2^31 - 1). Every ancestor pointer is
+ * addressed by a flat offset into the single `_up` Int32Array (`i * L + k`), so the total must fit a
+ * positive int32. The cell count is a PRODUCT (`n * L`, L = ceil(log2 n) + 1), so the guard uses a
+ * FLOAT multiply (never `| 0`, which would wrap a large product to a small / negative int and pass the
+ * door -> under-allocation -> OOB): the float product is exact to 2^53, so a genuine overflow of this
+ * ceiling fails CLOSED (the WT_MAX_CELLS / MST_MAX_CELLS / PST_MAX_NODES lesson -- null is not zero).
+ */
+const CT_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * A STATIC, IMMUTABLE CARTESIAN TREE for the range-EXTREME INDEX query (offline RMQ): the family's
+ * SECOND post-1.0 exotic and its FIRST structure that answers "WHERE is the smallest / largest value
+ * in an index range" -- the argmin/argmax position, not the range fold a SegmentTree returns. Over a
+ * fixed sequence it builds the Cartesian tree whose IN-ORDER traversal IS the array (a BST on index)
+ * and whose HEAP order is by value (a min- or max-heap, `kind`-selected at construction), so the
+ * POSITION of the extreme in a closed index range `[lo, hi]` is exactly the LOWEST COMMON ANCESTOR of
+ * nodes `lo` and `hi`. LCA is answered by BINARY LIFTING over a flat `n x L` ancestor table
+ * (L = ceil(log2 n) + 1), all zero-allocation:
+ *   - `rangeMinIndex(lo, hi)` -> the INDEX of the extreme value in [lo, hi] INCL   (O(log n))
+ *   - `rangeMin(lo, hi)`      -> that extreme VALUE (= `at(rangeMinIndex(lo, hi))`) (O(log n))
+ *   - `at(i)` / `root` / `parent(i)` / `left(i)` / `right(i)` / `depth(i)`         (O(1))
+ * It is a STATIC member under the family's static-member honesty contract (SparseTable / MergeSortTree
+ * / WaveletTree / lite-o1 static-members-admitted): the source is COPIED in at construction, there are
+ * NO mutators, and every query is a read-only ancestor climb. BUILD is O(n) for the tree (a single
+ * monotonic-stack pass) plus O(n log n) for the lifting table, and SPACE is `n` values + four `n`-cell
+ * index columns + the `n x L` lift table -- a DISCLOSED co-headline, never hidden. There is no
+ * max-single-op line (a build-once immutable tree has no randomization and no amortization).
+ *
+ * The names `rangeMinIndex` / `rangeMin` are kept for a `min` tree AND a `max` tree (a `kind='max'`
+ * instance returns the MAXIMUM's index / value) -- the SparseTable / SegmentTree precedent, where the
+ * ctor-frozen `kind` selects the extreme and the read name stays stable.
+ *
+ * THE LOAD-BEARING IDIOM: the query is a pure LCA by binary lifting. `kind` is decided ONCE at
+ * construction (it shapes the tree: the monotonic-stack build pops on `>` for a min-heap, on `<` for a
+ * max-heap, ties keeping the EARLIER index as the ancestor so `rangeMinIndex` returns the FIRST
+ * occurrence of the extreme -- the leftmost-wins tie rule a linear scan would give). Because the extreme
+ * relation is BAKED INTO the tree at build, `rangeMinIndex(lo, hi)` needs NO value comparison and NO
+ * per-op `kind` branch: it depth-equalizes nodes `lo` and `hi` by co-lifting over the flat `_up` table,
+ * co-lifts them in lock-step to just below their LCA, and returns that LCA index -- reads `_depth` /
+ * `_up` only, using local scalars, so it is 0 B/op and worst-case O(log n). `rangeMin` adds one `_val`
+ * read of that index.
+ *
+ * Fail closed on every unverified state: the source must be an array-like of FINITE numbers (typeof-
+ * guarded FIRST -- Symbol / BigInt / NaN / +-Infinity each throw `[lite-logn]`; null is not zero), the
+ * length an integer in `[1, CT_MAX_LENGTH]`, `kind` exactly `'min'` or `'max'`, and the `n * L` lift-cell
+ * count a PRODUCT guarded by a FLOAT multiply against `CT_MAX_CELLS` (never `| 0`). Query bounds are
+ * integers with `0 <= lo <= hi < length`; an index `i` is an integer in `[0, length)`; bad indices /
+ * ranges / kinds / types throw `[lite-logn]` via cold-path builders off the hot body.
+ */
+export class CartesianTree {
+    /**
+     * Build the immutable Cartesian tree from a snapshot of `values` (COPIED in -- mutating the caller's
+     * array afterward never changes a result). O(n) tree build + O(n log n) lift table. COLD path; fails
+     * closed BEFORE the structure is usable on a non-array-like input, a length outside [1, CT_MAX_LENGTH],
+     * a bad `kind`, a lift-cell product over CT_MAX_CELLS, or any non-finite entry (typeof-first).
+     * @param {ArrayLike<number>} values  finite numbers (any order); indexed 0..length-1
+     * @param {'min'|'max'} [kind='min']  which extreme rangeMinIndex / rangeMin report (frozen at build)
+     */
+    constructor(values, kind = 'min') {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError(
+                '[lite-logn] CartesianTree needs an array-like of finite numbers');
+        }
+        const n = values.length;
+        if (!Number.isInteger(n) || n < 1 || n > CT_MAX_LENGTH) {
+            throw new RangeError(
+                '[lite-logn] CartesianTree length must be an integer in [1, 2^31-1], got ' + String(n));
+        }
+        if (kind !== 'min' && kind !== 'max') this._badKind(kind);
+        const isMin = kind === 'min';
+        // Snapshot + validate finite (typeof-first; Symbol / BigInt / NaN / +-Infinity fail closed).
+        const val = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const v = values[i];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] CartesianTree value must be a finite number, got ' + String(v));
+            }
+            val[i] = v;
+        }
+        // L = ceil(log2 n) + 1 via an EXACT float loop (never `1 << k`, which wraps at k >= 31, and never
+        // Math.log2, which can mis-round a power of two). The +1 gives one lift level above the tallest
+        // possible chain (depth <= n - 1 < 2^ceil(log2 n)), so binary lifting can always clear it.
+        let bitlen = 0;
+        while (2 ** bitlen < n) bitlen++;         // ceil(log2 n)
+        const L = bitlen + 1;
+        // FLOAT product guard (never `| 0`): the exact lift-cell product fails CLOSED on overflow.
+        const cells = n * L;
+        if (cells > CT_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] CartesianTree lift budget ' + cells + ' (n ' + n + ' x L ' + L +
+                ') exceeds ' + CT_MAX_CELLS);
+        }
+        const left = new Int32Array(n).fill(-1);
+        const right = new Int32Array(n).fill(-1);
+        const parent = new Int32Array(n).fill(-1);
+        const depth = new Int32Array(n);
+        const up = new Int32Array(cells).fill(-1);
+        const stack = new Int32Array(n);          // scratch: monotonic-stack build, then the depth DFS
+        // Monotonic-stack Cartesian build (O(n)): keep the RIGHT spine on the stack. Pop while the top
+        // must sit BELOW i (min: val[top] > val[i]; max: val[top] < val[i]) -- STRICT, so an equal value
+        // keeps the EARLIER index as the ancestor (rangeMinIndex returns the FIRST occurrence of the
+        // extreme -- the leftmost-wins tie rule a linear scan gives). The last popped node becomes i's
+        // left child; the new stack top (if any) becomes i's parent with i as its right child.
+        let sp = 0;
+        for (let i = 0; i < n; i++) {
+            let last = -1;
+            while (sp > 0 && (isMin ? val[stack[sp - 1]] > val[i] : val[stack[sp - 1]] < val[i])) {
+                last = stack[--sp];
+            }
+            if (last !== -1) { parent[last] = i; left[i] = last; }
+            if (sp > 0) { parent[i] = stack[sp - 1]; right[stack[sp - 1]] = i; }
+            stack[sp++] = i;
+        }
+        const root = stack[0];                    // the whole array's extreme index is the tree root
+        // Depth by an ITERATIVE preorder DFS from the root (an explicit stack -- never recursion, which
+        // would blow the call stack on a degenerate O(n)-deep chain). Reuses the `stack` scratch.
+        sp = 0;
+        depth[root] = 0;
+        stack[sp++] = root;
+        while (sp > 0) {
+            const node = stack[--sp];
+            const d1 = depth[node] + 1;
+            const lc = left[node], rc = right[node];
+            if (lc !== -1) { depth[lc] = d1; stack[sp++] = lc; }
+            if (rc !== -1) { depth[rc] = d1; stack[sp++] = rc; }
+        }
+        // Binary-lifting table: up[i][0] = parent, up[i][k] = up[ up[i][k-1] ][k-1], with -1 propagation
+        // (a -1 ancestor stays -1 up every higher level). O(n log n), column by column.
+        for (let i = 0; i < n; i++) up[i * L] = parent[i];
+        for (let k = 1; k < L; k++) {
+            for (let i = 0; i < n; i++) {
+                const mid = up[i * L + (k - 1)];
+                up[i * L + k] = mid === -1 ? -1 : up[mid * L + (k - 1)];
+            }
+        }
+        this._n = n;                              // element count (fixed)
+        this._L = L;                              // lift levels = ceil(log2 n) + 1
+        this._isMin = isMin;                      // ctor-cached kind boolean (baked into the tree)
+        this._val = val;                          // the copied-in source values
+        this._left = left;                        // left child index, or -1
+        this._right = right;                      // right child index, or -1
+        this._parent = parent;                    // parent index, or -1 (the root)
+        this._depth = depth;                      // node depth (root = 0)
+        this._up = up;                            // flat n x L binary-lifting ancestor table
+        this._root = root;                        // the extreme's index over the whole array
+    }
+
+    /** Element count (the source length). O(1). */
+    get length() { return this._n; }
+
+    /** Element count -- the family-spine alias of `length`. O(1). */
+    get size() { return this._n; }
+
+    /** Which extreme the range queries report: `'min'` or `'max'` (frozen at construction). O(1). */
+    get kind() { return this._isMin ? 'min' : 'max'; }
+
+    /** The root node index (the extreme's position over the whole array). O(1). */
+    get root() { return this._root; }
+
+    /** The value at index `i`. O(1). Fails closed: `i` an integer in `[0, length)`. typeof-first. */
+    at(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex('at', i);
+        }
+        return this._val[i];
+    }
+
+    /** The parent node index of `i`, or `-1` if `i` is the root. O(1). Fails closed on a bad index. */
+    parent(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex('parent', i);
+        }
+        return this._parent[i];
+    }
+
+    /** The left child index of `i`, or `-1` if none. O(1). Fails closed on a bad index. */
+    left(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex('left', i);
+        }
+        return this._left[i];
+    }
+
+    /** The right child index of `i`, or `-1` if none. O(1). Fails closed on a bad index. */
+    right(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex('right', i);
+        }
+        return this._right[i];
+    }
+
+    /** The depth of node `i` (root = 0). O(1). Fails closed on a bad index. */
+    depth(i) {
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex('depth', i);
+        }
+        return this._depth[i];
+    }
+
+    /**
+     * The INDEX of the extreme value (minimum for a `min` tree, maximum for a `max` tree; the FIRST
+     * occurrence on a tie) in the closed index range `[lo, hi]`. THE gated witness op: worst-case
+     * O(log n) -- a binary-lifting LCA of nodes `lo` and `hi` (depth-equalize, then co-lift in lock-step
+     * to just below the LCA, return the LCA). Reads `_depth` / `_up` only, using local scalars, so it is
+     * zero-allocation; the `kind` is baked into the tree, so there is no per-op value compare or branch.
+     * Fails closed: `lo` / `hi` integers with `0 <= lo <= hi < length`. typeof-guarded FIRST.
+     * @param {number} lo  index range start, integer in [0, length)
+     * @param {number} hi  index range end (inclusive), integer in [lo, length)
+     * @returns {number} the index of the extreme value in [lo, hi]
+     */
+    rangeMinIndex(lo, hi) {
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi)) return this._badRange('rangeMinIndex', lo, hi);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi) return this._badRange('rangeMinIndex', lo, hi);
+        if (lo === hi) return lo;
+        const depth = this._depth, up = this._up, L = this._L;
+        let a = lo, b = hi;
+        // Make `a` the DEEPER node, then lift it up by the depth difference (bit by bit over `_up`).
+        if (depth[a] < depth[b]) { const t = a; a = b; b = t; }
+        let diff = depth[a] - depth[b];
+        for (let k = 0; k < L; k++) {
+            if ((diff >>> k) & 1) a = up[a * L + k];
+        }
+        if (a === b) return a;                    // b was an ancestor of a -> it IS the LCA
+        // Co-lift both in lock-step, taking the highest jump that keeps them on DIFFERENT nodes; the LCA
+        // is then the common parent.
+        for (let k = L - 1; k >= 0; k--) {
+            const au = up[a * L + k], bu = up[b * L + k];
+            if (au !== bu) { a = au; b = bu; }
+        }
+        return up[a * L];                         // parent[a] == parent[b] == the LCA
+    }
+
+    /**
+     * The extreme VALUE (minimum for a `min` tree, maximum for a `max` tree) in the closed index range
+     * `[lo, hi]` -- equal to `at(rangeMinIndex(lo, hi))`. Worst-case O(log n), zero-allocation (the LCA
+     * climb plus one `_val` read). Same fail-closed doors as `rangeMinIndex`.
+     * @param {number} lo  index range start, integer in [0, length)
+     * @param {number} hi  index range end (inclusive), integer in [lo, length)
+     * @returns {number} the extreme value in [lo, hi]
+     */
+    rangeMin(lo, hi) {
+        return this._val[this.rangeMinIndex(lo, hi)];
+    }
+
+    /**
+     * Build the immutable Cartesian tree from `values` (a snapshot is COPIED in). The idiomatic factory;
+     * equal to `new CartesianTree(values, kind)`. O(n) tree + O(n log n) lift. Same fail-closed doors.
+     * @param {ArrayLike<number>} values  finite numbers (any order)
+     * @param {'min'|'max'} [kind='min']  which extreme the range queries report
+     * @returns {CartesianTree}
+     */
+    static build(values, kind = 'min') {
+        return new CartesianTree(values, kind);
+    }
+
+    // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badIndex(op, i) {
+        throw new RangeError(
+            '[lite-logn] CartesianTree ' + op + ' needs an integer index in [0, ' + this._n +
+            '), got ' + String(i));
+    }
+
+    /** @private */
+    _badRange(op, lo, hi) {
+        throw new RangeError(
+            '[lite-logn] CartesianTree ' + op + ' needs integer indices 0 <= lo <= hi < ' + this._n +
+            ', got lo=' + String(lo) + ' hi=' + String(hi));
+    }
+
+    /** @private */
+    _badKind(kind) {
+        throw new RangeError(
+            '[lite-logn] CartesianTree kind must be \'min\' or \'max\', got ' + String(kind));
     }
 }

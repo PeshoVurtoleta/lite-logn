@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.1.1
+Version: 1.2.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -34,7 +34,10 @@ structure: a STATIC merge sort tree answering countLE / rangeCount over an index
 worst-case O(log^2 n)); v1.1.0 adds WaveletTree (the family's FIRST post-1.0 exotic and its FIRST
 succinct / rank-select member: a STATIC wavelet MATRIX answering access / rank / select / quantile --
 the k-th smallest value in an index range MergeSortTree deferred -- and rangeCount in worst-case
-O(log n), on the DEFAULT log2(n) axis).
+O(log n), on the DEFAULT log2(n) axis); v1.2.0 adds CartesianTree (a STATIC, IMMUTABLE range-MINIMUM
+tree: a heap-ordered Cartesian tree built in O(n) whose rangeMinIndex / rangeMin answer the extreme's
+index / value over an index range in worst-case O(log n) via a binary-lifting LCA climb, with a
+materialized parent / left / right / depth topology you can walk -- the RMQ = LCA teaching bridge).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -336,6 +339,28 @@ The roster (one member per session, each landing append-only):
   word product guarded by a FLOAT multiply against WT_MAX_CELLS. WORST-CASE (no max-single-op line);
   O(n log sigma) BUILD and space (bits + rank index + remap table) a DISCLOSED co-headline. Zero
   allocation on every hot op.
+
+- CartesianTree (v1.2.0) -- a STATIC, IMMUTABLE range-MINIMUM tree and the family's binding of the
+  RMQ = LCA bridge. Over a fixed sequence of finite numbers it builds a heap-ordered Cartesian tree in
+  O(n) (a single monotonic-stack pass keeps the right spine) whose in-order traversal is the original
+  index order and whose parent is always the smaller (for a `min` tree) / larger (for `max`) value, so
+  the range-minimum over `[lo, hi]` is exactly the LOWEST COMMON ANCESTOR of nodes `lo` and `hi`.
+  `rangeMinIndex(lo, hi)` returns the INDEX of the extreme (the FIRST occurrence on a tie -- the
+  leftmost-wins rule a linear scan gives) and `rangeMin(lo, hi)` the VALUE, each in worst-case O(log n)
+  via a binary-lifting LCA climb (depth-equalize, then co-lift in lock-step) over a flat `n * (ceil(log2
+  n) + 1)` ancestor table read with O(1) work per jump. Unlike lite-o1's SparseTable (O(1) query at the
+  same O(n log n) space) it MATERIALIZES the tree: `parent(i)` / `left(i)` / `right(i)` / `depth(i)` /
+  `root` expose a walkable topology and `at(i)` the source value -- the redundancy is deliberate, bought
+  for the teaching bridge and the walkable structure. `kind` (`'min'` | `'max'`) is frozen at build; the
+  Treap is the RANDOMIZED Cartesian tree, this is the deterministic value-keyed one. It sits on the
+  DEFAULT log2(n) witness axis (a single-log climb): witness op = `rangeMinIndex` via a lane-scoped
+  median-of-7 fit (the frozen 0.958 floor + slope band unchanged), with an O(n) linear extreme-scan foil
+  OFF-line. The source is COPIED in at construction (genuine immutability); there are NO mutators and NO
+  forEach / iterator. Fail closed: the source must be an array-like of FINITE numbers (typeof-guarded
+  FIRST; Symbol / BigInt / NaN / +-Infinity fail closed), the length an integer in [1, CT_MAX_LENGTH],
+  `kind` exactly `'min'` or `'max'`, and the `n * L` lift-cell count guarded by a FLOAT multiply against
+  CT_MAX_CELLS; query bounds need `0 <= lo <= hi < length`. WORST-CASE (no max-single-op line); O(n) tree
+  build + O(n log n) lift table and space a DISCLOSED co-headline. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -790,6 +815,34 @@ The roster (one member per session, each landing append-only):
     `ceil(log2 distinct)` (>= 1, the descent depth); `distinct` getter -> the compressed alphabet size
     (sigma); `bits` getter -> the total bitvector bit count (`n * levels`, the disclosed O(n log sigma)
     space). All O(1). There is NO clear / mutator / forEach (static + immutable).
+
+- `CartesianTree` -- class. A STATIC, IMMUTABLE range-MINIMUM tree: over a fixed sequence of finite
+  numbers it builds a heap-ordered Cartesian tree in O(n) (a monotonic-stack pass) whose LOWEST COMMON
+  ANCESTOR is the range minimum, and answers `rangeMinIndex` / `rangeMin` in worst-case O(log n) via a
+  binary-lifting LCA climb, zero-allocation. It MATERIALIZES a walkable `parent` / `left` / `right` /
+  `depth` / `root` topology (the redundancy vs lite-o1 SparseTable's O(1) query, bought for the RMQ = LCA
+  bridge). `kind` is frozen at build; the Treap is the randomized Cartesian tree, this the deterministic
+  value-keyed one. The source is COPIED in at construction and there are NO mutators. O(n) tree +
+  O(n log n) lift table and space a DISCLOSED co-headline.
+  - `new CartesianTree(values, kind = 'min')` -- values an array-like of finite numbers (any order),
+    length an integer in [1, CT_MAX_LENGTH] (2^31-1); kind exactly `'min'` or `'max'`. COPIES a snapshot in
+    (later mutating the caller's array changes nothing). O(n) build + O(n log n) lift. Throws (typeof-guarded
+    FIRST) on a non-array-like, an out-of-range length, a bad kind, an `n * L` lift-cell product over
+    CT_MAX_CELLS (FLOAT-product guard), or any non-finite entry.
+  - `CartesianTree.build(values, kind = 'min')` -> CartesianTree. The idiomatic factory; equal to
+    `new CartesianTree(values, kind)`, same fail-closed doors.
+  - `rangeMinIndex(lo, hi)` -> number. The INDEX of the extreme value (minimum for a `min` tree, maximum
+    for `max`; the FIRST occurrence on a tie) in the INDEX range [lo, hi] INCLUSIVE -- an LCA climb.
+    Worst-case O(log n), 0 B/op. Fails closed: lo / hi integers with `0 <= lo <= hi < length`, typeof-first.
+  - `rangeMin(lo, hi)` -> number. The extreme VALUE in [lo, hi] INCLUSIVE -- equal to
+    `at(rangeMinIndex(lo, hi))`. Worst-case O(log n), 0 B/op. Same fail-closed doors.
+  - `at(i)` -> number. The source value at index i. O(1), 0 B/op. A non-integer / out-of-range i throws.
+  - `parent(i)` / `left(i)` / `right(i)` -> number. The parent / left-child / right-child node index of
+    `i`, or `-1` when none (the root has no parent). O(1), 0 B/op. A bad index throws.
+  - `depth(i)` -> number. The depth of node `i` (root = 0). O(1), 0 B/op. A bad index throws.
+  - `root` getter -> the root node index (the extreme's position over the whole array); `length` / `size`
+    getters -> the element count (the source length); `kind` getter -> `'min'` | `'max'` (frozen at build).
+    All O(1). There is NO clear / mutator / forEach (static + immutable).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

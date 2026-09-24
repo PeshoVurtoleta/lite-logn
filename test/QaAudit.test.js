@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 1.1.1 at the 1.1.1 release', () => {
-    assert.equal(VERSION, '1.1.1');
+test('VERSION is exactly 1.2.0 at the 1.2.0 release', () => {
+    assert.equal(VERSION, '1.2.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (17 members) --------
+// --- frozen export surface: VERSION + the shipped members (18 members) --------
 
-test('LogN.js exports exactly VERSION + the seventeen members at v1.1.1', () => {
+test('LogN.js exports exactly VERSION + the eighteen members at v1.2.0', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the seventeen members incl WaveletTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'CartesianTree', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the eighteen members incl CartesianTree)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -61,6 +61,7 @@ test('LogN.js exports exactly VERSION + the seventeen members at v1.1.1', () => 
     assert.equal(typeof LogNModule.PersistentSegTree, 'function');
     assert.equal(typeof LogNModule.MergeSortTree, 'function');
     assert.equal(typeof LogNModule.WaveletTree, 'function');
+    assert.equal(typeof LogNModule.CartesianTree, 'function');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -1032,4 +1033,55 @@ test('WaveletTree fails closed with a [lite-logn]-tagged throw on every coercion
     // WaveletTree is STATIC / immutable: it deliberately has NO mutators / clear.
     assert.equal(typeof wt.set, 'undefined', 'WaveletTree has no set (immutable, build-once)');
     assert.equal(typeof wt.clear, 'undefined', 'WaveletTree has no clear (immutable, build-once)');
+});
+
+// --- CartesianTree (v1.2.0): coercion + [lite-logn] fail-closed tag -------------
+
+test('CartesianTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { CartesianTree } = LogNModule;
+    // build / ctor: non-array-like source (typeof-guarded before coercion; Symbol/BigInt-safe)
+    for (const bad of [null, undefined, 42, 'abc', true, Symbol('x'), 5n, {}]) {
+        assert.throws(() => CartesianTree.build(bad), /\[lite-logn\]/, 'build ' + String(bad));
+        assert.throws(() => new CartesianTree(bad), /\[lite-logn\]/, 'ctor ' + String(bad));
+    }
+    // out-of-range length
+    assert.throws(() => CartesianTree.build([]), /\[lite-logn\]/, 'empty');
+    assert.throws(() => CartesianTree.build({ length: 1.5 }), /\[lite-logn\]/, 'length 1.5');
+    assert.throws(() => CartesianTree.build({ length: 0x80000000, 0: 1 }), /\[lite-logn\]/, 'length above 2^31-1');
+    // bad kind (typeof-first; Symbol/BigInt-safe)
+    for (const bad of ['MIN', 'Max', '', 'minimum', 0, 1, null, {}, Symbol('k'), 3n, true]) {
+        assert.throws(() => CartesianTree.build([1, 2, 3], bad), /\[lite-logn\]/, 'kind ' + String(bad));
+    }
+    // non-finite entry, typeof-first (no Symbol / BigInt coercion)
+    for (const bad of [NaN, Infinity, -Infinity, '5', null, undefined, {}, Symbol('v'), 3n, true]) {
+        assert.throws(() => CartesianTree.build([1, 2, bad, 4]), /\[lite-logn\]/, 'entry ' + String(bad));
+    }
+    const ct = CartesianTree.build([5, 3, 9, 1, 7, 3]);
+    // at bad index (typeof-first), out-of-range
+    for (const bad of [1.5, NaN, Infinity, '2', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => ct.at(bad), /\[lite-logn\]/, 'at ' + String(bad));
+        assert.throws(() => ct.parent(bad), /\[lite-logn\]/, 'parent ' + String(bad));
+        assert.throws(() => ct.left(bad), /\[lite-logn\]/, 'left ' + String(bad));
+        assert.throws(() => ct.right(bad), /\[lite-logn\]/, 'right ' + String(bad));
+        assert.throws(() => ct.depth(bad), /\[lite-logn\]/, 'depth ' + String(bad));
+    }
+    assert.throws(() => ct.at(-1), /\[lite-logn\]/, 'at lo < 0');
+    assert.throws(() => ct.at(6), /\[lite-logn\]/, 'at >= length');
+    // rangeMinIndex / rangeMin bad indices, out-of-range, inverted range
+    for (const bad of [1.5, NaN, Infinity, '2', null, undefined, {}, Symbol('i'), 3n]) {
+        assert.throws(() => ct.rangeMinIndex(bad, 4), /\[lite-logn\]/, 'rangeMinIndex lo ' + String(bad));
+        assert.throws(() => ct.rangeMinIndex(0, bad), /\[lite-logn\]/, 'rangeMinIndex hi ' + String(bad));
+        assert.throws(() => ct.rangeMin(bad, 4), /\[lite-logn\]/, 'rangeMin lo ' + String(bad));
+        assert.throws(() => ct.rangeMin(0, bad), /\[lite-logn\]/, 'rangeMin hi ' + String(bad));
+    }
+    assert.throws(() => ct.rangeMinIndex(-1, 4), /\[lite-logn\]/, 'rangeMinIndex lo < 0');
+    assert.throws(() => ct.rangeMinIndex(0, 6), /\[lite-logn\]/, 'rangeMinIndex hi >= length');
+    assert.throws(() => ct.rangeMinIndex(3, 2), /\[lite-logn\]/, 'rangeMinIndex lo > hi');
+    // a legal query returns the extreme's index / value
+    assert.equal(ct.rangeMinIndex(0, 5), 3);   // min value 1 at index 3
+    assert.equal(ct.rangeMin(0, 5), 1);
+    assert.equal(ct.kind, 'min');
+    // CartesianTree is STATIC / immutable: it deliberately has NO mutators / clear.
+    assert.equal(typeof ct.set, 'undefined', 'CartesianTree has no set (immutable, build-once)');
+    assert.equal(typeof ct.clear, 'undefined', 'CartesianTree has no clear (immutable, build-once)');
 });

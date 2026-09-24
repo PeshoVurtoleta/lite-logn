@@ -788,3 +788,55 @@ export class WaveletTree {
      *  = new WaveletTree). O(n log sigma). Same fail-closed doors as the constructor. */
     static build(values: ArrayLike<number>): WaveletTree;
 }
+
+/**
+ * A STATIC, IMMUTABLE range-MINIMUM tree: a heap-ordered Cartesian tree over a fixed sequence of finite
+ * numbers, built in O(n) by a monotonic-stack pass, whose lowest common ancestor is the range minimum
+ * (RMQ = LCA). `rangeMinIndex(lo, hi)` / `rangeMin(lo, hi)` answer the extreme's index / value over an
+ * INDEX range in worst-case O(log n) via a binary-lifting LCA climb, and it MATERIALIZES a walkable
+ * `parent` / `left` / `right` / `depth` / `root` topology. `kind` (`'min'` | `'max'`) is frozen at
+ * build; the Treap is the randomized Cartesian tree, this the deterministic value-keyed one. Build-once
+ * (source COPIED in, NO mutators); O(n) tree build + O(n log n) lift table and space a disclosed
+ * co-headline. It intentionally overlaps lite-o1's SparseTable in space while paying an O(log n) (not
+ * O(1)) query, bought for the walkable tree + the RMQ = LCA bridge.
+ */
+export class CartesianTree {
+    /** Build the immutable Cartesian tree from a COPY of `values` (finite numbers, any order). O(n) tree
+     *  + O(n log n) lift. Non-array-like, a length outside [1, 2^31-1], a bad `kind`, an n*L lift-cell
+     *  product over 2^31-1, or any non-finite entry (Symbol / BigInt / NaN / +-Infinity) throws before
+     *  the structure is usable.
+     *  @param values finite numbers (any order), indexed 0..length-1
+     *  @param kind which extreme the range queries report (frozen at build); default `'min'` */
+    constructor(values: ArrayLike<number>, kind?: 'min' | 'max');
+
+    /** The root node index (the extreme's position over the whole array). */
+    readonly root: number;
+    /** Element count (the source length). */
+    readonly length: number;
+    /** Element count -- the family-spine alias of `length`. */
+    readonly size: number;
+    /** Which extreme the range queries report: `'min'` or `'max'` (frozen at construction). */
+    readonly kind: 'min' | 'max';
+
+    /** The INDEX of the extreme value (minimum for a `min` tree, maximum for `max`; the FIRST occurrence
+     *  on a tie) in the INDEX range [lo, hi] INCLUSIVE -- a binary-lifting LCA climb. Worst-case O(log n),
+     *  0 B/op. `lo` / `hi` non-integer or outside `0 <= lo <= hi < length` throws. */
+    rangeMinIndex(lo: number, hi: number): number;
+    /** The extreme VALUE in the INDEX range [lo, hi] INCLUSIVE -- equal to at(rangeMinIndex(lo, hi)).
+     *  Worst-case O(log n), 0 B/op. Same fail-closed doors as `rangeMinIndex`. */
+    rangeMin(lo: number, hi: number): number;
+    /** The source value at index `i`. O(1), 0 B/op. A non-integer / out-of-range i throws. */
+    at(i: number): number;
+    /** The parent node index of `i`, or `-1` if `i` is the root. O(1), 0 B/op. A bad index throws. */
+    parent(i: number): number;
+    /** The left child index of `i`, or `-1` if none. O(1), 0 B/op. A bad index throws. */
+    left(i: number): number;
+    /** The right child index of `i`, or `-1` if none. O(1), 0 B/op. A bad index throws. */
+    right(i: number): number;
+    /** The depth of node `i` (root = 0). O(1), 0 B/op. A bad index throws. */
+    depth(i: number): number;
+
+    /** Build the immutable Cartesian tree from a COPY of `values` (the idiomatic factory;
+     *  = new CartesianTree). O(n) tree + O(n log n) lift. Same fail-closed doors as the constructor. */
+    static build(values: ArrayLike<number>, kind?: 'min' | 'max'): CartesianTree;
+}

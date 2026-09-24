@@ -75,7 +75,7 @@ const SYNC = { D1, D2, D3, D4, D7, D8 };
 const ASYNC = { D5, D6 };
 
 /** Op-row count per member (the gated D1 witness rows). */
-const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2, Treap: 1, Scapegoat: 1, MinMaxHeap: 1, SplayTree: 1, BinomialHeap: 1, PairingHeap: 1, FibonacciHeap: 1, Fenwick2D: 2, SegmentTree2D: 2, SortedArray: 1, PersistentSegTree: 1, MergeSortTree: 1, WaveletTree: 1 };
+const OPS_PER_MEMBER = { BinaryHeap: 1, Fenwick: 2, SegmentTree: 2, SkipList: 2, Treap: 1, Scapegoat: 1, MinMaxHeap: 1, SplayTree: 1, BinomialHeap: 1, PairingHeap: 1, FibonacciHeap: 1, Fenwick2D: 2, SegmentTree2D: 2, SortedArray: 1, PersistentSegTree: 1, MergeSortTree: 1, WaveletTree: 1, CartesianTree: 1 };
 
 for (const member of SUBJECTS) {
     test('anti-vacuity: ' + member + ' D1/D2/D3/D4/D7/D8 return positive numbers', () => {
@@ -178,7 +178,7 @@ for (const member of SUBJECTS) {
     });
 }
 
-test('structure: D1 emits exactly the 22 gated witness op-rows across the 17 members', () => {
+test('structure: D1 emits exactly the 23 gated witness op-rows across the 18 members', () => {
     let total = 0;
     const rowKeys = [];
     for (const m of SUBJECTS) {
@@ -186,18 +186,18 @@ test('structure: D1 emits exactly the 22 gated witness op-rows across the 17 mem
         total += r.ops.length;
         for (const o of r.ops) rowKeys.push(m + '.' + o.op);
     }
-    assert.equal(total, 22, 'D1 must emit exactly 22 gated op-rows');
+    assert.equal(total, 23, 'D1 must emit exactly 23 gated op-rows');
     assert.deepEqual(rowKeys, OP_ROWS, 'the emitted op-rows must equal Matrix.OP_ROWS');
 });
 
-test('structure: the FOILS registry is the 22 gated rows + the SkipList counter-foil; cells() is 17 x 8 = 136', () => {
+test('structure: the FOILS registry is the 23 gated rows + the SkipList counter-foil; cells() is 18 x 8 = 144', () => {
     assert.deepEqual(foilRowKeys(), OP_ROWS, 'FOILS gated rows must equal OP_ROWS');
     for (const k of OP_ROWS) assert.ok(FOILS[k] && typeof FOILS[k].run === 'function', k + ' must carry a kernel');
     assert.ok(FOILS['SkipList.counter'] && FOILS['SkipList.counter'].kind === 'counter-foil',
         'the SkipList counter-foil must be registered');
-    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 22 gated rows + 1 counter-foil');
-    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 17 x 8 = 136 cells');
-    assert.equal(cells().length, 136);
+    assert.equal(Object.keys(FOILS).length, OP_ROWS.length + 1, 'FOILS = 23 gated rows + 1 counter-foil');
+    assert.equal(cells().length, SUBJECTS.length * DIMENSIONS.length, 'matrix must be 18 x 8 = 144 cells');
+    assert.equal(cells().length, 144);
 });
 
 test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line', () => {
@@ -218,7 +218,7 @@ test('D1 foil path (exercised once, cheaply): the O(n) foil LEAVES the log line'
 // only 2 or 3 points is nearly-always R^2 ~ 1 regardless of the underlying shape (a
 // line is trivially perfectly determined by too few points), which would make this
 // assertion vacuously pass on ANY foil, defeating the whole point of the check.
-test('D1 foil departure (all 22 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
+test('D1 foil departure (all 23 gated op-rows): every foil genuinely MISSES the R^2 floor', () => {
     let checked = 0;
     for (const member of SUBJECTS) {
         const r = D1(member, { seed: SEED, points: 5, foil: true });
@@ -230,7 +230,7 @@ test('D1 foil departure (all 22 gated op-rows): every foil genuinely MISSES the 
             checked++;
         }
     }
-    assert.equal(checked, 22, 'must have checked all 22 gated op-rows for foil departure');
+    assert.equal(checked, 23, 'must have checked all 23 gated op-rows for foil departure');
 });
 
 test('vacuityCheck has teeth: an impossible 0 in _check throws', () => {
@@ -264,7 +264,7 @@ test('fall-through THROWS: every per-member dispatch site rejects an unknown mem
     }
 });
 
-test('RATIONALE: all 11 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
+test('RATIONALE: all 18 members carry a FAIR-ALREADY verdict; only SkipList names a counter-foil', () => {
     for (const m of SUBJECTS) {
         const r = RATIONALE[m];
         assert.ok(r, m + ' must have a rationale');
@@ -390,13 +390,13 @@ const BENCH_SRC = readFileSync(new URL('../benchmark/Bench.mjs', import.meta.url
 const METHODOLOGY_SRC = readFileSync(new URL('../benchmark/METHODOLOGY.md', import.meta.url), 'utf8');
 const PROVE_RE = /prove|proof|proven/i;
 
-test('#1 witness gate UNCHANGED: R^2 floor 0.958, BinaryHeap band [5.76,13.44], MEMBERS.length 22', () => {
+test('#1 witness gate UNCHANGED: R^2 floor 0.958, BinaryHeap band [5.76,13.44], MEMBERS.length 23', () => {
     // The frozen O(log n) witness gate (test/witness.mjs, D-02) is the family anchor; the
     // re-adopt must never loosen or re-center it. A mutation to any of these constants BITES.
     assert.equal(BINARYHEAP_R2_FLOOR, 0.958, 'the frozen R^2 floor');
     assert.equal(BINARYHEAP_SLOPE_LO, 5.76, 'the frozen BinaryHeap slope band low');
     assert.equal(BINARYHEAP_SLOPE_HI, 13.44, 'the frozen BinaryHeap slope band high');
-    assert.equal(WITNESS_MEMBERS.length, 22, 'the 22 gated witness op-rows (21 prior + WaveletTree.quantile)');
+    assert.equal(WITNESS_MEMBERS.length, 23, 'the 23 gated witness op-rows (22 prior + CartesianTree.rangeMinIndex)');
 });
 
 test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughput-invariant', () => {
@@ -417,7 +417,7 @@ test('#1 witness IDENTITY: lite-logn is O(log n), never relabelled O(1)/throughp
         'the Template smoke manifest must declare the O(log n) witness flavor');
 });
 
-test('#2 OP_CLASS: covers the 22 witness rows; SkipList/Treap EXPECTED; Scapegoat get WORST + set/delete AMORTIZED; SplayTree get/set/delete AMORTIZED; MinMaxHeap WORST; BinomialHeap push AMORTIZED + popMin/meld WORST; PairingHeap + FibonacciHeap popMin/decreaseKey/remove AMORTIZED; MergeSortTree countLE O(log^2 n); WaveletTree quantile O(log n); no op painted O(1)', () => {
+test('#2 OP_CLASS: covers the 23 witness rows; SkipList/Treap EXPECTED; Scapegoat get WORST + set/delete AMORTIZED; SplayTree get/set/delete AMORTIZED; MinMaxHeap WORST; BinomialHeap push AMORTIZED + popMin/meld WORST; PairingHeap + FibonacciHeap popMin/decreaseKey/remove AMORTIZED; MergeSortTree countLE O(log^2 n); WaveletTree quantile + CartesianTree rangeMinIndex O(log n); no op painted O(1)', () => {
     // Every gated witness op-row carries an honest O(log n) class -- OR, for the 2D Fenwick2D
     // member, the honest O(log^2 n) class (a range query over TWO dimensions costs a squared log,
     // never a single log; OLOGN2_WORST keeps that price from being understated).
@@ -442,7 +442,7 @@ test('#2 OP_CLASS: covers the 22 witness rows; SkipList/Treap EXPECTED; Scapegoa
     // ALSO worst-case (a hard deterministic height bound, unlike the randomized members).
     // SortedArray.get is WORST-case O(log n) too: a DETERMINISTIC contiguous lower-bound binary
     // search (no RNG, no amortization -- the Scapegoat.get analogue). Mislabelling it BITES.
-    for (const op of ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query', 'Scapegoat.get', 'MinMaxHeap.push', 'MinMaxHeap.popMin', 'MinMaxHeap.popMax', 'BinomialHeap.popMin', 'BinomialHeap.meld', 'SortedArray.get', 'PersistentSegTree.query', 'PersistentSegTree.update', 'WaveletTree.quantile']) {
+    for (const op of ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query', 'Scapegoat.get', 'MinMaxHeap.push', 'MinMaxHeap.popMin', 'MinMaxHeap.popMax', 'BinomialHeap.popMin', 'BinomialHeap.meld', 'SortedArray.get', 'PersistentSegTree.query', 'PersistentSegTree.update', 'WaveletTree.quantile', 'CartesianTree.rangeMinIndex']) {
         assert.equal(OP_CLASS[op], OLOGN_WORST, op + ' must be the WORST-case O(log n) class string');
     }
     // Scapegoat's DETERMINISTIC set/delete pay for the worst-case get with an occasional rebuild
@@ -485,7 +485,7 @@ test('#2 OP_CLASS: covers the 22 witness rows; SkipList/Treap EXPECTED; Scapegoa
     // Full-teeth partition: every OP_CLASS key is accounted for by EXACTLY one of the four
     // lists below (worst union expected union amortized union log2 == all keys, disjoint) -- a
     // new/renamed op not wired into any list here would otherwise pass unnoticed.
-    const worstOps = ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query', 'Scapegoat.get', 'MinMaxHeap.push', 'MinMaxHeap.popMin', 'MinMaxHeap.popMax', 'BinomialHeap.popMin', 'BinomialHeap.meld', 'SortedArray.get', 'PersistentSegTree.query', 'PersistentSegTree.update', 'WaveletTree.quantile'];
+    const worstOps = ['BinaryHeap.push', 'BinaryHeap.pop', 'Fenwick.update', 'Fenwick.prefix', 'SegmentTree.update', 'SegmentTree.query', 'Scapegoat.get', 'MinMaxHeap.push', 'MinMaxHeap.popMin', 'MinMaxHeap.popMax', 'BinomialHeap.popMin', 'BinomialHeap.meld', 'SortedArray.get', 'PersistentSegTree.query', 'PersistentSegTree.update', 'WaveletTree.quantile', 'CartesianTree.rangeMinIndex'];
     const expectedOps = ['SkipList.get', 'SkipList.set', 'SkipList.delete', 'Treap.get', 'Treap.set', 'Treap.delete'];
     const amortizedOps = ['Scapegoat.set', 'Scapegoat.delete', 'SplayTree.get', 'SplayTree.set', 'SplayTree.delete', 'BinomialHeap.push', 'PairingHeap.popMin', 'PairingHeap.decreaseKey', 'PairingHeap.remove', 'FibonacciHeap.popMin', 'FibonacciHeap.decreaseKey', 'FibonacciHeap.remove'];
     const log2Ops = ['Fenwick2D.update', 'Fenwick2D.rectSum', 'SegmentTree2D.update', 'SegmentTree2D.query', 'MergeSortTree.countLE'];
@@ -493,18 +493,21 @@ test('#2 OP_CLASS: covers the 22 witness rows; SkipList/Treap EXPECTED; Scapegoa
         'every OP_CLASS key must be asserted as WORST, EXPECTED, AMORTIZED or O(log^2 n) WORST above (no silent gap)');
 });
 
-test('#3 CLEAR_WITNESS is the fifteen MUTABLE SUBJECTS (static MergeSortTree + WaveletTree EXCLUDED); NodePool EXCLUDED; each has a real clear()', () => {
-    // MergeSortTree and WaveletTree are SUBJECTS (17 total) but STATIC/IMMUTABLE -- no clear(), so
-    // they are NOT clear-witnesses. The witness set is SUBJECTS minus those two static members.
-    assert.deepEqual(CLEAR_WITNESS, SUBJECTS.filter((m) => m !== 'MergeSortTree' && m !== 'WaveletTree'),
-        'the clear() witness set must be the mutable SUBJECTS (SUBJECTS minus MergeSortTree + WaveletTree)');
+test('#3 CLEAR_WITNESS is the fifteen MUTABLE SUBJECTS (static MergeSortTree + WaveletTree + CartesianTree EXCLUDED); NodePool EXCLUDED; each has a real clear()', () => {
+    // MergeSortTree, WaveletTree and CartesianTree are SUBJECTS (18 total) but STATIC/IMMUTABLE -- no
+    // clear(), so they are NOT clear-witnesses. The witness set is SUBJECTS minus those three static members.
+    assert.deepEqual(CLEAR_WITNESS, SUBJECTS.filter((m) => m !== 'MergeSortTree' && m !== 'WaveletTree' && m !== 'CartesianTree'),
+        'the clear() witness set must be the mutable SUBJECTS (SUBJECTS minus MergeSortTree + WaveletTree + CartesianTree)');
     assert.equal(CLEAR_WITNESS.length, 15, 'exactly fifteen mutable members');
     assert.ok(!CLEAR_WITNESS.includes('MergeSortTree'), 'the static/immutable MergeSortTree is NOT a clear() witness');
     assert.ok(!CLEAR_WITNESS.includes('WaveletTree'), 'the static/immutable WaveletTree is NOT a clear() witness');
+    assert.ok(!CLEAR_WITNESS.includes('CartesianTree'), 'the static/immutable CartesianTree is NOT a clear() witness');
     assert.ok(typeof CLEAR_WITNESS_EXCLUDED.MergeSortTree === 'string' && CLEAR_WITNESS_EXCLUDED.MergeSortTree.length > 0,
         'MergeSortTree must be named in the EXCLUDED table with a reason (static/immutable, no clear())');
     assert.ok(typeof CLEAR_WITNESS_EXCLUDED.WaveletTree === 'string' && CLEAR_WITNESS_EXCLUDED.WaveletTree.length > 0,
         'WaveletTree must be named in the EXCLUDED table with a reason (static/immutable, no clear())');
+    assert.ok(typeof CLEAR_WITNESS_EXCLUDED.CartesianTree === 'string' && CLEAR_WITNESS_EXCLUDED.CartesianTree.length > 0,
+        'CartesianTree must be named in the EXCLUDED table with a reason (static/immutable, no clear())');
     // Adding NodePool (the private free-list) to the set would break the equality above.
     assert.ok(!CLEAR_WITNESS.includes('NodePool'), 'the private NodePool is NOT a clear() witness');
     assert.ok(typeof CLEAR_WITNESS_EXCLUDED.NodePool === 'string' && CLEAR_WITNESS_EXCLUDED.NodePool.length > 0,
@@ -683,9 +686,9 @@ test('#5 report: clear() witness cycle count in the prose is n/a (never 0) when 
         'the cycle count must never silently read 0 for an unverified/degenerate witness');
 });
 
-test('#6 shipping discipline: package.json.version is 1.1.1; benchmark/ stays repo-only', () => {
+test('#6 shipping discipline: package.json.version is 1.2.0; benchmark/ stays repo-only', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    assert.equal(pkg.version, '1.1.1', 'the 1.1.1 release: version is 1.1.1');
+    assert.equal(pkg.version, '1.2.0', 'the 1.2.0 release: version is 1.2.0');
     assert.ok(!pkg.files.includes('benchmark'), 'benchmark/ must not appear in package.json files[]');
 });
 
