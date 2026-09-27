@@ -87,14 +87,31 @@ export class Fenwick {
     rangeSum(lo: number, hi: number): number;
     /** The single element at i = prefix(i) - prefix(i-1). O(log n). Out-of-range i throws. */
     at(i: number): number;
-    /** Set the element at i to value (absolute). O(log n). Non-finite value throws. */
+    /** Set the element at i to value (absolute). O(log n). Non-finite value / S1 over-budget throws. */
     set(i: number, value: number): this;
-    /** Zero every element in place, keeping capacity. */
+    /** Set element i to src[i] (value read INSIDE, 0-box). O(log n). Non-Float64Array src throws;
+     *  same finite / S1 magnitude-budget doors as set. */
+    setFrom(src: Float64Array, i: number): this;
+    /** The smallest index i with prefix(i) >= target, an EXACT lower_bound over the library's own
+     *  prefix() (the binary-lifting descent sums cells HIGH->LOW, bit-for-bit as prefix()). Returns
+     *  length iff target > total or target === +Infinity; target <= 0 returns 0. O(log n) ALWAYS -- a
+     *  zero-run is spanned by O(log n) tree cells, never O(zero-run)/O(n). For exactly-representable
+     *  sums (integers <= 2^53) it matches a BigInt oracle and never returns a zero-weight index for
+     *  target > 0; for fractional weights the returned index's prefix is within one ULP of target.
+     *  Precondition (documented, not enforced): every element >= 0. NaN / non-number target throws.
+     *  This plain form boxes its one target argument when the caller is not inlined; searchFrom is the
+     *  0-box sibling. */
+    search(target: number): number;
+    /** target := src[i], read INSIDE -- the 0-box sibling of search (lite-pick calls it per pick from a
+     *  non-inlined site). Identical semantics + doors. Non-Float64Array src or out-of-range i throws;
+     *  NaN src[i] throws; byte-identical state on a rejection. O(log n), 0 B/op. */
+    searchFrom(src: Float64Array, i: number): number;
+    /** Zero every element in place, keeping capacity (resets the S1 magnitude bound). */
     clear(): this;
     /** Visit every element as (value, index, fenwick) in ascending index order. */
     forEach(fn: (value: number, index: number, fenwick: Fenwick) => void): void;
 
-    /** O(n) linear bulk build from a finite-number array-like. */
+    /** O(n) linear bulk build from a finite-number array-like. S1 over-budget throws. */
     static build(values: ArrayLike<number>): Fenwick;
 }
 
@@ -118,8 +135,12 @@ export class SegmentTree {
 
     /** Folded value over [lo, hi] inclusive both ends. O(log n). Throws on OOB or lo > hi. */
     query(lo: number, hi: number): number;
-    /** Set leaf i to value (absolute), fixing ancestors. O(log n). Non-finite / OOB throws. */
+    /** Set leaf i to value (absolute), fixing ancestors. O(log n). Non-finite / OOB / (sum kind)
+     *  S1 over-bound value throws. */
     update(i: number, value: number): this;
+    /** Set leaf i to src[i] (value read INSIDE, 0-box). O(log n). Non-Float64Array src throws;
+     *  same finite / gcd-domain / S1 sum-bound doors as update. */
+    setFrom(src: Float64Array, i: number): this;
     /** The single element at leaf i. O(1). Out-of-range i throws. */
     at(i: number): number;
     /** Reset every element to the fold identity, keeping capacity. */
@@ -780,9 +801,18 @@ export class WaveletTree {
     /** The k-th smallest value (0-based) in the INDEX range [lo, hi] INCLUSIVE. Worst-case O(log sigma),
      *  0 B/op. Non-integer / out-of-range lo or hi, lo > hi, or k outside [0, hi - lo] throws. */
     quantile(lo: number, hi: number, k: number): number;
+    /** out[j] := quantile(lo, hi, k) (0-box sibling of quantile; the value is written straight into
+     *  a caller-owned Float64Array slot). Worst-case O(log sigma), 0 B/op. Non-Float64Array out or
+     *  out-of-range j throws; same lo / hi / k doors as quantile. */
+    quantileInto(out: Float64Array, j: number, lo: number, hi: number, k: number): void;
     /** Count of stored values in the VALUE-window [vlo, vhi] INCLUSIVE within the INDEX range [lo, hi]
      *  INCLUSIVE. Worst-case O(log sigma), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws. */
     rangeCount(lo: number, hi: number, vlo: number, vhi: number): number;
+    /** Rebuild this tree in place from `values` INTO the constructed buffers (0 B/op when the length
+     *  equals the constructed length), producing a structure identical to new WaveletTree(values).
+     *  values.length must be an integer in [1, constructed length], else a tagged throw. NaN / non-
+     *  finite entries still throw (filtering them is the caller's job). O(m log sigma). */
+    rebuildFrom(values: ArrayLike<number>): this;
 
     /** Build the immutable wavelet matrix from a COPY of `values` (the idiomatic factory;
      *  = new WaveletTree). O(n log sigma). Same fail-closed doors as the constructor. */

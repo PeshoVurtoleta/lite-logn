@@ -449,3 +449,38 @@ test('differential fuzz: >= 1e5 mixed ops, extraction order deep-equals the mode
         assert.equal(divergences, 0, kind + '-heap fuzz produced ' + divergences + ' divergences');
     }
 });
+
+// ============================================================================
+// v1.4.0 consumer stage: S5 iterator version stamp; F15 slot-sift correctness.
+// ============================================================================
+
+test('BinaryHeap S5: mutating during iteration throws [lite-logn]', () => {
+    const h = new BinaryHeap(8);
+    h.push(0, 3); h.push(1, 1); h.push(2, 2); h.push(3, 5);
+    assert.throws(() => { for (const _id of h) { h.pop(); } }, /\[lite-logn\]/);
+    const h2 = new BinaryHeap(8);
+    h2.push(0, 3); h2.push(1, 1); h2.push(2, 2);
+    assert.throws(() => { for (const _id of h2) { h2.push(4, 9); } }, /\[lite-logn\]/);
+    // a clean (non-mutating) iteration completes
+    const h3 = new BinaryHeap(8);
+    h3.push(0, 3); h3.push(1, 1); h3.push(2, 2);
+    let count = 0;
+    for (const _id of h3) count++;
+    assert.equal(count, 3);
+});
+
+test('BinaryHeap F15: pop / remove with fractional + large keys still pop in order', () => {
+    for (const kind of ['min', 'max']) {
+        const h = new BinaryHeap(200, kind);
+        const keys = [];
+        for (let i = 0; i < 200; i++) { const key = (2 ** 31) + i + (i % 3) * 0.5; keys.push(key); h.push(i, key); }
+        // remove a few, re-add
+        h.remove(50); h.push(50, keys[50]);
+        h.remove(0); h.push(0, keys[0]);
+        const out = [];
+        let id;
+        while ((id = h.pop()) !== undefined) out.push(keys[id]);
+        const sorted = keys.slice().sort((a, b) => kind === 'min' ? a - b : b - a);
+        assert.deepEqual(out, sorted);
+    }
+});

@@ -288,3 +288,29 @@ test('differential fuzz: 1e4 mixed update/set/rectSum/prefix ops match a naive o
     }
     assert.equal(f.rectSum(0, 0, rows - 1, cols - 1), oracle.rectSum(0, 0, rows - 1, cols - 1));
 });
+
+// ============================================================================
+// v1.4.0 consumer stage: S1 magnitude budget (MAX/4).
+// ============================================================================
+
+test('Fenwick2D S1: over-budget write throws tagged with state unchanged, no NaN', () => {
+    const f = new Fenwick2D(2, 2);
+    assert.throws(() => f.set(0, 0, 1e308), /\[lite-logn\]/);
+    assert.equal(f.at(0, 0), 0);
+    assert.ok(!Number.isNaN(f.rectSum(0, 0, 1, 1)));
+    assert.throws(() => f.update(1, 1, 1e308), /\[lite-logn\]/);
+    assert.equal(f.at(1, 1), 0);
+});
+
+test('Fenwick2D S1: build over budget fails closed', () => {
+    assert.throws(() => Fenwick2D.build([[1e308, 1e308], [1e308, 1e308]]), /\[lite-logn\]/);
+});
+
+test('Fenwick2D S1: normal-magnitude churn stays exact and never throws', () => {
+    const f = new Fenwick2D(8, 8);
+    for (let r = 0; r < 3000; r++) {
+        const rr = (r * 2654435761 >>> 0) & 7, cc = (r >> 3) & 7;
+        f.update(rr, cc, ((r & 7) - 4) * 1.25);
+    }
+    assert.ok(Number.isFinite(f.rectSum(0, 0, 7, 7)));
+});

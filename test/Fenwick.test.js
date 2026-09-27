@@ -346,3 +346,250 @@ test('differential fuzz: >= 10k mixed ops on n=1024 match the array oracle exact
     }
     assert.equal(divergences, 0, 'fuzz produced ' + divergences + ' divergences');
 });
+
+// ============================================================================
+// v1.4.0 consumer stage: S1 magnitude budget, setFrom, search (lite-pick).
+// ============================================================================
+
+test('Fenwick S1: single 1e308 set exceeds the MAX/2 budget and throws tagged, state unchanged', () => {
+    const f = new Fenwick(2);
+    assert.throws(() => f.set(0, 1e308), /\[lite-logn\]/);
+    assert.equal(f.at(0), 0);                     // byte-identical no-op
+    assert.equal(f.at(1), 0);
+    assert.ok(!Number.isNaN(f.prefix(1)));        // no NaN ever produced
+});
+
+test('Fenwick S1: set(0,1e308).set(1,1e308) throws with the snapshot unchanged and no NaN', () => {
+    const f = new Fenwick(2);
+    assert.throws(() => { f.set(0, 1e308); f.set(1, 1e308); }, /\[lite-logn\]/);
+    assert.equal(f.at(0), 0);
+    assert.equal(f.at(1), 0);
+    assert.ok(!Number.isNaN(f.at(1)));
+});
+
+test('Fenwick S1: build over budget fails closed', () => {
+    assert.throws(() => Fenwick.build([1e308, 1e308]), /\[lite-logn\]/);
+});
+
+test('Fenwick S1: churn at normal magnitudes never hits the cold path (values stay exact)', () => {
+    const f = new Fenwick(64);
+    for (let r = 0; r < 5000; r++) {
+        const i = (r * 2654435761 >>> 0) & 63;
+        f.update(i, ((r & 7) - 4) * 1.5);         // small +/- deltas
+    }
+    // The bound is well under MAX/2; no throw, and prefix stays finite / consistent.
+    assert.ok(Number.isFinite(f.prefix(63)));
+    let manual = 0; for (let i = 0; i < 64; i++) manual += f.at(i);
+    assert.ok(Math.abs(f.prefix(63) - manual) < 1e-6);
+});
+
+test('Fenwick S1: cold recompute accepts when cancellation freed room, then still bounds', () => {
+    const B = Number.MAX_VALUE / 2;
+    const f = new Fenwick(3);
+    f.set(0, B * 0.4);                            // _mag ~ 0.4B
+    f.set(0, 0);                                  // true sum now 0, but _mag drifted to ~0.8B
+    // A 0.4B write: hot check sees 0.8B + 0.4B = 1.2B > budget -> cold recompute finds true 0, accepts.
+    f.set(1, B * 0.4);
+    assert.ok(Number.isFinite(f.prefix(2)));
+    assert.equal(f.at(0), 0);
+    assert.equal(f.at(1), B * 0.4);
+    // A genuine overflow is still rejected, state unchanged.
+    assert.throws(() => f.set(2, B * 0.9), /\[lite-logn\]/);
+    assert.equal(f.at(2), 0);
+});
+
+test('Fenwick.setFrom: element i := src[i], same doors as set', () => {
+    const f = new Fenwick(4);
+    const src = new Float64Array([1.5, 2.25, 3.75, 4.5]);
+    f.setFrom(src, 0).setFrom(src, 2);
+    assert.equal(f.at(0), 1.5);
+    assert.equal(f.at(2), 3.75);
+    assert.equal(f.prefix(3), 1.5 + 3.75);
+    // type door: non-Float64Array throws
+    assert.throws(() => f.setFrom([1, 2, 3, 4], 0), /\[lite-logn\]/);
+    // NaN / Infinity in the buffer fails closed
+    assert.throws(() => f.setFrom(new Float64Array([NaN]), 0), /\[lite-logn\]/);
+    assert.throws(() => f.setFrom(new Float64Array([Infinity]), 0), /\[lite-logn\]/);
+    // out-of-range index
+    assert.throws(() => f.setFrom(src, 4), /\[lite-logn\]/);
+});
+
+test('Fenwick.setFrom matches set over a fuzz corpus', () => {
+    const n = 128;
+    const a = new Fenwick(n), b = new Fenwick(n);
+    const src = new Float64Array(n);
+    for (let r = 0; r < 4000; r++) {
+        const i = (r * 2654435761 >>> 0) % n;
+        const v = (((r * 40503) & 0xffff) - 32768) * 0.5;
+        src[i] = v;
+        a.set(i, v);
+        b.setFrom(src, i);
+        assert.equal(a.at(i), b.at(i));
+    }
+    for (let i = 0; i < n; i++) assert.equal(a.prefix(i), b.prefix(i));
+});
+
+test('Fenwick.search: smallest i with inclusive prefix >= target, vs brute force', () => {
+    const weights = [2, 0, 3, 1, 0, 4, 5, 0, 1];
+    const f = Fenwick.build(weights);
+    const total = f.prefix(weights.length - 1);
+    // brute: smallest i in [0, n] with sum(weights[0..i]) >= target
+    const brute = (target) => {
+        let acc = 0;
+        for (let i = 0; i < weights.length; i++) { acc += weights[i]; if (acc >= target) return i; }
+        return weights.length;
+    };
+    for (let t = -3; t <= total + 3; t++) {
+        assert.equal(f.search(t), brute(t), 'search(' + t + ')');
+    }
+    // fractional targets
+    for (let t = 0.5; t < total; t += 0.5) assert.equal(f.search(t), brute(t), 'search(' + t + ')');
+    // target <= 0 -> 0; target > total -> length
+    assert.equal(f.search(0), 0);
+    assert.equal(f.search(-100), 0);
+    assert.equal(f.search(total + 0.001), weights.length);
+    // zero-weight slots are never RETURNED for target > 0
+    for (let t = 1; t <= total; t++) {
+        const idx = f.search(t);
+        if (idx < weights.length) assert.notEqual(weights[idx], 0, 'zero-weight index ' + idx + ' returned for target ' + t);
+    }
+    // NaN throws; non-number throws
+    assert.throws(() => f.search(NaN), /\[lite-logn\]/);
+    assert.throws(() => f.search('3'), /\[lite-logn\]/);
+});
+
+test('Fenwick.search: weighted sampling picks index i with probability w_i/total (exact enumeration)', () => {
+    // Rational targets u = (m + 0.5)/D * total for m in [0, D) tile (0, total]; each lands in exactly
+    // one weight bucket. Enumerating them is an exact chi-square-free proof of the sampling law.
+    const weights = [3, 1, 0, 5, 2, 0, 4];       // total 15, two zero-weight slots
+    const f = Fenwick.build(weights);
+    const total = weights.reduce((a, b) => a + b, 0);
+    const D = 3000;                               // sample points
+    const counts = new Array(weights.length).fill(0);
+    for (let m = 0; m < D; m++) {
+        const u = ((m + 0.5) / D) * total;        // in (0, total]
+        counts[f.search(u)]++;
+    }
+    // Expected proportion per index = w_i / total; zero-weight indices get 0 samples.
+    for (let i = 0; i < weights.length; i++) {
+        const expected = (weights[i] / total) * D;
+        assert.ok(Math.abs(counts[i] - expected) <= 1,
+            'index ' + i + ' got ' + counts[i] + ', expected ~' + expected);
+    }
+    assert.equal(counts[2], 0);                   // zero-weight slots never sampled
+    assert.equal(counts[5], 0);
+});
+
+// Exact BigInt-scaled oracle (weights & targets are doubles -> exact rationals via a 2^1100 scale).
+function _bigOracle() {
+    const SC = 1100n;
+    const toBig = (x) => { if (x === 0) return 0n; const neg = x < 0; x = Math.abs(x); let e = 0, mm = x; while (!Number.isInteger(mm)) { mm *= 2; e++; } return (neg ? -1n : 1n) * (BigInt(mm) << (SC - BigInt(e))); };
+    return (w, tgt) => { const T = toBig(tgt); let acc = 0n; for (let i = 0; i < w.length; i++) { acc += toBig(w[i]); if (acc >= T) return i; } return w.length; };
+}
+
+test('Fenwick.search: EXACT vs a BigInt oracle for representable (integer) sums; zeroBad = 0; +-Inf', () => {
+    const exact = _bigOracle();
+    let rng = 20260927 >>> 0;
+    const rand = () => (rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    let mismatch = 0, zeroBad = 0, lenBad = 0, checks = 0;
+    for (let iter = 0; iter < 2500; iter++) {
+        const n = 1 + (iter % 120);
+        const w = new Array(n);
+        // integer weights (exact sums < 2^53), incl. ~30% zeros AND some large (up to 2^46)
+        for (let i = 0; i < n; i++) w[i] = rand() < 0.3 ? 0 : Math.floor(rand() * (rand() < 0.5 ? 1000 : 2 ** 46));
+        const f = Fenwick.build(w);
+        let tot = 0; for (const x of w) tot += x;
+        const probe = (u) => { checks++; const g = f.search(u); if (g !== exact(w, u)) mismatch++; if (u > 0 && g < n && w[g] === 0) zeroBad++; if (u > 0 && u <= tot && g >= n) lenBad++; };
+        for (let i = 0; i < n; i++) { probe(f.prefix(i)); probe(f.prefix(i) + 1); probe(f.prefix(i) - 1); } // exact boundaries +-1
+        for (let s = 0; s < 30; s++) probe(Math.floor(tot * (1 - rand())));
+        probe(tot); probe(tot + 1);                                       // total, over-total
+    }
+    assert.equal(mismatch, 0, 'search disagreed with the BigInt oracle on representable sums (' + mismatch + ')');
+    assert.equal(zeroBad, 0, 'search returned a zero-weight index for representable sums (' + zeroBad + ')');
+    assert.equal(lenBad, 0, 'search returned length for target <= total (' + lenBad + ')');
+    assert.ok(checks > 1000);
+    // +Infinity -> length; -Infinity / target <= 0 -> 0.
+    const g = Fenwick.build([1, 0, 2, 0, 3]);
+    assert.equal(g.search(Infinity), 5);
+    assert.equal(g.searchFrom(Float64Array.of(Infinity), 0), 5);
+    assert.equal(g.search(-Infinity), 0);
+    assert.equal(g.search(0), 0);
+    assert.equal(g.search(6), 4);                                        // total -> last positive bucket
+    assert.equal(g.search(6 * (1 + 2 ** -50)), 5);                       // just over total -> length
+    assert.throws(() => g.search(NaN), /\[lite-logn\]/);
+});
+
+test('Fenwick.search: FRACTIONAL weights -- exact lower_bound over prefix(), within 1 ULP of target', () => {
+    // For non-representable sums the guarantee is: search returns the exact lower_bound over the
+    // library's own float prefix(), i.e. prefix(got) >= target (when got < n) and prefix(got-1) <
+    // target -- so the returned index's prefix is within one ULP of target. (A zero-weight index can
+    // appear only at a target exactly equal to a stored prefix whose zero weight rounded up sub-ULP;
+    // that is the documented float bound, unreachable by a sampled u -- see the docblock.)
+    let rng = 13 >>> 0;
+    const rand = () => (rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    let lbFail = 0, lenBad = 0, checks = 0;
+    for (let iter = 0; iter < 3000; iter++) {
+        const n = 1 + (iter % 120);
+        const w = new Array(n);
+        for (let i = 0; i < n; i++) { const r = rand(); w[i] = r < 0.3 ? 0 : r * 10 ** Math.floor(rand() * 8 - 3); }
+        const f = Fenwick.build(w);
+        const tot = f.prefix(n - 1);
+        const probe = (u) => {
+            if (!(u > 0)) return; checks++;
+            const g = f.search(u);
+            if (u <= tot && g >= n) lenBad++;
+            if (g < n) { if (!(f.prefix(g) >= u)) lbFail++; if (g > 0 && !(f.prefix(g - 1) < u)) lbFail++; }
+        };
+        for (let i = 0; i < n; i++) probe(f.prefix(i));
+        for (let s = 0; s < 40; s++) probe(tot * (1 - rand()));
+        probe(tot);
+    }
+    assert.equal(lbFail, 0, 'search is not an exact lower_bound over prefix() (' + lbFail + ')');
+    assert.equal(lenBad, 0, 'search returned length for target <= total (' + lenBad + ')');
+    assert.ok(checks > 1000);
+});
+
+test('Fenwick.searchFrom: EXACTLY identical to search (shared body) + doors + byte-identical reject', () => {
+    let rng = 424242 >>> 0;
+    const rand = () => (rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    let diverge = 0;
+    for (let iter = 0; iter < 4000; iter++) {
+        const n = 1 + (iter % 16);
+        const w = new Array(n);
+        for (let i = 0; i < n; i++) w[i] = rand() < 0.25 ? 0 : rand() * 3.7;
+        const f = Fenwick.build(w);
+        const src = new Float64Array(n + 2);
+        for (let i = 0; i < n; i++) src[i] = f.prefix(i);
+        src[n] = -5; src[n + 1] = f.prefix(n - 1) * 2;            // <=0 and > total probes too
+        for (let i = 0; i < src.length; i++) if (f.searchFrom(src, i) !== f.search(src[i])) diverge++;
+    }
+    assert.equal(diverge, 0, 'searchFrom diverged from search in ' + diverge + ' cases');
+    // doors: non-Float64Array, out-of-range i, NaN src[i]
+    const f = Fenwick.build([1, 2, 3]);
+    assert.throws(() => f.searchFrom([1, 2, 3], 0), /\[lite-logn\]/);
+    assert.throws(() => f.searchFrom(new Float64Array([1, 2]), 5), /\[lite-logn\]/);
+    assert.throws(() => f.searchFrom(new Float64Array([NaN]), 0), /\[lite-logn\]/);
+    // byte-identical state after a rejected searchFrom
+    const before = Array.from({ length: 3 }, (_, i) => f.at(i));
+    try { f.searchFrom(new Float64Array([NaN]), 0); } catch (e) { /* expected */ }
+    for (let i = 0; i < 3; i++) assert.equal(f.at(i), before[i]);
+});
+
+test('Fenwick.search: O(log n) even with a long zero-weight run (1e5 zeros), never O(n)', () => {
+    const N = 100002;
+    const w = new Float64Array(N);
+    w[0] = 1.5; w[N - 1] = 2.5;                          // 1e5 zeros between two positive weights
+    const f = Fenwick.build(w);
+    const total = f.prefix(N - 1);
+    // correctness at / around the plateau (never a zero slot; the owning buckets are 0 and N-1)
+    assert.equal(f.search(1.5), 0);
+    assert.equal(f.search(total), N - 1);
+    assert.equal(f.search(total + 1), N);
+    assert.equal(f.search(total * 0.5), N - 1);          // mid of the plateau -> the next positive bucket
+    // timing: O(log n) descent must be far below an O(n) scan. Warm, then compare to a 4x-larger tree.
+    const timeit = (fn, reps) => { let a = 0; const t0 = process.hrtime.bigint(); for (let r = 0; r < reps; r++) a += fn(r); const t1 = process.hrtime.bigint(); return { ns: Number(t1 - t0) / reps, a }; };
+    for (let warm = 0; warm < 3; warm++) timeit((r) => f.search((r % 100 / 100) * total), 20000);
+    const small = timeit((r) => f.search((r % 997 / 997) * total), 40000).ns;
+    // A per-op cost of a few hundred ns at most; an O(n)=1e5 scan would be orders larger.
+    assert.ok(small < 5000, 'search on a 1e5-zero tree took ' + small.toFixed(0) + ' ns/op -- looks O(n), not O(log n)');
+});

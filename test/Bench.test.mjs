@@ -690,9 +690,9 @@ test('#5 report: clear() witness cycle count in the prose is n/a (never 0) when 
         'the cycle count must never silently read 0 for an unverified/degenerate witness');
 });
 
-test('#6 shipping discipline: package.json.version is 1.3.0; benchmark/ stays repo-only', () => {
+test('#6 shipping discipline: package.json.version is 1.4.0; benchmark/ stays repo-only', () => {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    assert.equal(pkg.version, '1.3.0', 'the 1.3.0 release: version is 1.3.0');
+    assert.equal(pkg.version, '1.4.0', 'the 1.4.0 release: version is 1.4.0');
     assert.ok(!pkg.files.includes('benchmark'), 'benchmark/ must not appear in package.json files[]');
 });
 

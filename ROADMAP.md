@@ -1,5 +1,19 @@
 # lite-logn -- PRE-BUILD roadmap
 
+> **NEXT (2026-09-25): H1 hardening -- v1.4.0** (section 8; audit record in RESEARCH.md section 12).
+> The 1.3.0 final sweep found 5 High findings the shipped gates pass:
+> - Treap `clear()` on a split view corrupts its sibling.
+> - PairingHeap / FibonacciHeap recursive walkers overflow the stack (`clear()` can then never
+>   recover the heap).
+> - LinkCutTree `_pull` and the segment-tree family box at every level on fractional values (a
+>   tagged phi into `segGcd`).
+> - Every perf / torture input is a small integer.
+> lite-hud M5 (Fenwick / SegmentTree / WaveletTree) pins the hardened release.
+> Reproduced independently the same day (section 8.1). F1-F11 and F13 hold. F12 (the perf-gate
+> flake) did not reproduce. Next-session run order: section 8.2. The accepted 1.4.0 brief is section 8.3, RE-PRIORITIZED in 8.4 (consumers first).
+> **THEN: EulerTourTree -- v1.5.0** (section 9; research in RESEARCH.md section 13). It depends on
+> 1.4.0's gates.
+
 Seven full BRIEF sessions plus a queued Tier 2/3/4 reserve, all for one package:
 `@zakkster/lite-logn`, the zero-GC O(log n) data-structure family (folder
 `LiteLogN`, main `LogN.js`). It is the O(log n) sibling of lite-o1 and inherits
@@ -984,5 +998,557 @@ the member were broken". The witness's MAX-single-op bar exists for the same
 reason: it refuses to let an expected/amortized member masquerade as worst-case.
 And the substrate is reconciled, never forked -- one allocator, one PRNG, one set
 of gates, across a family whose only job is to make the logarithm honest.
+
+---
+
+## 8. H1 hardening -- v1.4.0 (final-sweep audit of 1.3.0, 2026-09-25)  [PLANNED]
+
+Baseline at audit (1a38599): `npm test` 666/666, `test:perf` 71/71 alone (2/71 FAIL once under CPU
+contention), torture `ok` exit 0 with alloc=0 B/op. Two parallel read-only audits covered (a)
+allocation + gate honesty and (b) fail-closed + correctness + doc truth. The evidence is in
+RESEARCH.md section 12. H1, H2 and H3 were re-run independently and reproduced.
+
+**Fixes (F)**
+
+| id | finding | task | falsifiable gate |
+| --- | --- | --- | --- |
+| F1 | H1 (H) Treap `clear()` (LogN.js:1751) on a `split()` view (`_view` :1935) resets the SHARED arena. `[l,r]=a.split(3); l.clear();` then adding keys 100..105 to `l` makes `r` read `102..105` with `r.get(4)===undefined`. No throw. Clearing the consumed original does the same. | Free only the nodes reachable from `this._root` (iterative, over a preallocated stack). | After `split(3)`, `l.clear()` + 6 adds to `l`: `r` walks exactly `3:30,4:40,5:50` and `r.size===3`. |
+| F2 | H2 (H) PairingHeap `_freeForest` / `_forEach` / `_iterNode` (:4220/:4233/:4243) and FibonacciHeap (:4860/:4877/:4889) RECURSE on child depth. `push(i, n-i)` for n >= ~5051 makes `clear()`, `forEach` and the iterator throw an untagged RangeError (stack). FibonacciHeap does the same after a 20000-long push/popMin/decreaseKey chain. `clear()` is the recovery path. | Make all six walkers iterative over a preallocated capacity-sized Uint32Array stack. | `PairingHeap(1e6)` with descending pushes: `forEach` counts 1e6, `[...h].length===1e6`, and `clear()` then `push(0,1)` succeeds. The Fibonacci n=20000 chain likewise. |
+| F3 | H3 (H) LinkCutTree `_pull` (:7878-7883): `let a;` + an if/else chain ending in `segGcd(...)` keeps `a` TAGGED, so every `_pull` boxes (~15 per op). Measured (sum, fractional, 8N scavenges): setValue 364 (~243 B/op), cut+link 524, `pathAggregate(u, v)` 24 fresh -> 897 warmed (~1.2 KB/op). Independently: setValue int 0 -> 0, frac 33 -> 268. | Store in each branch (`this._agg[x] = ...`) and drop the phi. The audit's probe patch measured 364 -> 0 and 897 -> 12 (the return box only). | The N1/N2 LCT lanes at 0 (the return-value lane at <= 1 box/op, documented). |
+| F4 | H4 (H) The same tagged-merge-into-`segGcd` pattern in SegmentTree (:794/:799/:828), SegmentTree2D (:5429-5438, :5471-5482) and PersistentSegTree (:6249, :6328). SegmentTree2D query sum 389 (~259 B/op). SegmentTree 1D sum is 0 only when inlined; not inlined, update 366 / query 161. PST update sum 244. | Take `segGcd` out of the shared ternary / accumulator: a loop per kind, or a store per branch (update / query / build in all three). The probe patch for the 2D query measured 389 -> 24. | N1 frac/p31 + N3 no-inline lanes: at 0, or <= 1 box/op where the API returns a double. |
+| F5 | H5 (H) The gates cannot see F3/F4/F7-F10: all 71 perf scenarios + torture feed `& 0xffff` Smis. There are no fractional, >= 2^31, warmed-polymorphic or no-inline lanes. The teeth are a fresh `[]` (the perf mustFail; torture's 32 B/op retained control), not a 16 B box. | Add N1-N6 below. | N1-N4 fail on 1.3.0 and pass after the fixes. |
+| F6 | M1 (M) PersistentSegTree ctor (:6104): the undocumented 4th parameter `_seed` skips `build()`'s validation (`_build0` :6192). `new P(2,1,'sum',[NaN,Infinity])` queries NaN. `[-1.5,'7',{}]` is accepted. `new P(3,1,'gcd',[NaN,3,6])` HANGS (`segGcd` :686 never reaches 0). | Take `_seed` out of the public ctor and route `build` through a module-private function. | The gcd NaN case returns within 1 s (tagged throw, or seed ignored). The d.ts has no 4th parameter. |
+| F7 | M2 (M) finite inputs produce NaN: `Fenwick(2)`: `set(0,1e308); set(1,1e308); set(1,0)` gives `at(1)=NaN`, sticky until `clear()`. SegmentTree / SegmentTree2D / PST sum of `[1e308,1e308,-1e308,-1e308]` gives NaN. LCT gives `Infinity` or `0` depending on the rooting. The docs say non-finite values fail closed. | Settle S1: bound sum-kind inputs at the door (`\|v\| <= Number.MAX_VALUE / length`), or disclose. | `Fenwick(2).set(0,1e308)` throws tagged with the snapshot unchanged. The 4-value sum build throws tagged. |
+| F8 | M3 (M) `arena(capacity, kind, count)` (:3441 / :3893 / :4461) has no bound on `count`. `arena(8,'min',1e8)` gives a V8 FATAL OOM (process abort). `2**32` gives an untagged "Invalid array length". | Cap `count` (e.g. at `capacity`) and throw a tagged RangeError before allocating. | Both cases throw tagged in < 10 ms, in a subprocess, with no abort. |
+| F9 | M4 + M5 (M) LinkCutTree: vertices start (and `clear()` back) at 0, not at the fold identity that llms.txt:885/906 claims, so `min` over values 5, unset, 7 gives 0 (null is not zero). `pathAggregate(u, v)` permanently re-roots at `u` (`findRoot(3)` 0 -> 2, and a later `cut(1)` severs a different edge). The docs call it a "MUTATING read" like `findRoot`, which only splays. | Settle S2 (identity init in the ctor + `clear`) and S3 (document the re-root, or restore the root). | `pathAggregate(2)===5` and `at(1)===Infinity` for min. A test asserts `findRoot(v)===u` after `pathAggregate(u,v)` (if documented). |
+| F10 | M-alloc (M) further library boxes (8N scavenges, 16 B = 24 fresh): Treap/Scapegoat successor / predecessor / `_ceil` (:1670/:1687/:1926, :2276/:2293/:2453; `best` starts `undefined`): 207-232. `PST._query` (:6240, recursive double returns): min 201, sum 249. WaveletTree `_rank1` (:6950/:6902) passes a Uint32 word >= 2^31 to non-inlined `wtPopcount32`: 376 even with int input when not inlined. | Integer slot + `bs === 0 ? undefined : K[bs]` (SplayTree's pattern, :3274). Make `PST._query` iterative with a double accumulator. Use `wtPopcount32(words[k] \| 0)` (verified 376 -> 0). | N1 / N3 lanes: successor <= 1 box (the return), PST query <= 1, WT quantile at 0 (+ its return box). |
+| F11 | M-API (M) no zero-box forms: `number\|undefined` returns (`keyOf`, `topKey`, `peek*Key`, `get`, `select`, `successor`) box even when inlined, as do WT `quantile` / `access` and Fenwick2D `rectSum` (16 B/call). Double ARGUMENTS to non-inlined mutators box (Scapegoat set 2 args, SegmentTree2D update, Fenwick2D set, MST countLE/rangeCount, WT rank/select, decreaseKey). | Add slot forms where a consumer calls at frame or render rate: `setFrom(buf, i)` (Fenwick, SegmentTree, 2D), `quantileInto(out, j, lo, hi, k)` / `accessInto`, `rectSumInto`, `getInto` / `keyOfInto`. Settle S6 on scope. | A slot-form lane at 0 per added method. The plain form stays as the documented one-box control. |
+| F12 | M7 (M) perf-gate flake: drivers compute `(t * 2654435761) & 0xffff` and call `hot(n)` once per window. Under contention it FAILs 2/71 (including the detector's negative control). | Inputs from a Float64Array, `hot` in ~2k chunks after a long warm-up (the audit's stable driver). | N6. |
+| F13 | L (L) docs + disclosure: README says 643 tests (actual 666). Lockfile version 0.1.0. The README zero-GC table covers 13 of 19 members and the witness paragraph stops at SortedArray. The LogN.js header describes the v0.4.0 roster. Undisclosed: Fenwick cancellation (after a 1e15 overwrite, 16.669 reads 16.624 until a full lap; no accumulating drift, 1.1e-12 over 1e7 overwrites), -0/+0 merged with the first sign winning (WaveletTree, maps), mutation during heap iteration (duplicates or an early stop), and worst single-op times (FibonacciHeap popMin 2.36 ms, PairingHeap 1.59 ms, LCT findRoot 1.26 ms, Scapegoat 783 us, Splay 647 us at n=131k). | Fix and disclose each (S4, S5). | Grep for "643" finds nothing. The lockfile root is 1.4.0. The table has 19 rows. |
+| F14 | L1 (L) WaveletTree has no buffer-reusing rebuild: ~8 arrays per build (n=256 ~12 KB / 100 us; n=65536 13.6 ms). lite-hud M5 rebuilds from a ring snapshot. | Optional `rebuildFrom(values)` into the existing buffers (same n or smaller). | A rebuild lane at 0 B/op, with output identical to a fresh build. |
+
+**New gates (N)**
+
+| id | gate | fails on 1.3.0 |
+| --- | --- | --- |
+| N1 | Fractional + p31 (2^31+s) + n31 + p53 copies of every scenario, inputs from a Float64Array, `maxScavenges: 0` (a documented <= 1-box floor only for APIs that return a double). | st2 query sum, all LCT sum ops, PST update/query, Treap/Scapegoat order mixes, WT access/rank/select/quantile, heap peek/keyOf, map get, sgSet, MST, f2Set/rectSum, st2Update |
+| N2 | Warmed-polymorphic lane: drive the gcd kind first, then min/max/sum, then measure. | LCT `pathAggregate(u,v)` 897 |
+| N3 | A separate process with `--max-inlined-bytecode-size=0` (the cross-module consumer case), <= 1 box/op. | SegmentTree sum 366 / 161, WT quantile 376 |
+| N4 | mustFail: exactly one 16 B HeapNumber per op (reads 24 fresh / 12 warmed) must FAIL at 0. It replaces the `[]` teeth. | passes today |
+| N5 | p30 (2^30+s) lanes equal to the p31 lanes, as a 31-bit-Smi proxy for Chrome (Chrome 152: `%IsSmi(2**30)` false). | not run |
+| N6 | Run the perf gate 3x under 6 CPU burners: 0 failures. | 2/71 fail once |
+
+**Settle calls (maintainer)**, lean in brackets:
+- S1 sum overflow (F7): [bound at the door. One compare, and overflow becomes impossible.]
+- S2 LCT unset vertices (F9): [fold identity in the ctor + `clear`. An unset vertex must not read 0.]
+- S3 LCT `pathAggregate` re-rooting (F9): [document it. Restoring costs an access and moves the
+  witness slope.]
+- S4 -0/+0 (F13): [normalize to +0 in WaveletTree `build` (cold); only disclose for the maps.]
+- S5 heap iteration under mutation (F13): [a version stamp in the iterator (not a hot path);
+  document `forEach`.]
+- S6 slot-form scope (F11): [start with what lite-hud M5 calls: Fenwick/SegmentTree `setFrom`,
+  WaveletTree `quantileInto` + `rebuildFrom`. Add others on demand.]
+
+**Checked clean (no task):**
+- d.ts vs runtime: all 19 classes, statics, getters, `Symbol.iterator`.
+- ASCII, MIT author, no stray tags, `npm pack` 7 files, VERSION synced 1.3.0.
+- Brute-force oracles, 0 mismatches: WaveletTree quantile / rank / select / rangeCount,
+  MergeSortTree and CartesianTree min/max (216k checks incl. fractions, duplicates, +-0, 2^53,
+  5e-324, +-1e308); both 2D variants; LCT (80k ops, 4 kinds); the 5 ordered maps (60k ops x 4
+  capacities); every heap incl. changeKey / decreaseKey / remove.
+- Every door rejects NaN / +-Infinity / BigInt / strings / fractional / null tagged, with
+  byte-identical state after a rejection. Capacity exhaustion is tagged. PST version exhaustion is
+  a tagged no-op. Stale heap handles are safe. meld rejects self / foreign / wrong-kind / consumed.
+- 0 scavenges at 8N across int / frac / p30 / p31 / n31 / p53, fresh and warmed: Fenwick (incl.
+  the 256-slot ring set + rangeSum), SegmentTree 1D inlined (all kinds), CartesianTree
+  rangeMin/Index, BinaryHeap, Pairing/Fibonacci push/popMin, set on SkipList / Splay / SortedArray
+  / Treap, Fenwick2D update/prefix, PST.at, LCT.at, WT rangeCount.
+
+**Exit:** F1-F14 and N1-N6 green; N1-N4 FAIL when F3/F4 are reverted.
+
+### 8.1 Independent reproduction (2026-09-25, second session, same 1a38599, Node 26.8.2, 12 cores)
+
+Fresh probes, written independently of the audit's. Allocation lanes use the audit's method: count
+minor GCs at 8N under `--max-semi-space-size=4`. Inputs come from a Float64Array. The driver makes
+2048-op calls after a 200-call warm-up, and the accumulator is a function local written once per call
+to a Float64Array. Calibration: one HeapNumber per op reads 24 (frac), matching the audit.
+
+| id | reproduced? | this session's numbers (audit's in brackets) |
+| --- | --- | --- |
+| F1 | YES | After `split(3)`, `l.clear()` and 6 adds to `l`, `r.size === 6` and `r` walks `100..105`. `r.get(4) === undefined`. [audit: `r` reads `102..105`]. Which keys leak depends on slot reuse order. Same bug. |
+| F2 | YES | PairingHeap with descending pushes throws an untagged stack RangeError from n = 4443 (iterator), 6346 (`forEach`) and 6836 (`clear`) [~5051]. The threshold depends on stack size. At n = 20000 all three throw, so `clear()` cannot recover the heap. FibonacciHeap after a 20000-round push/popMin/decreaseKey chain: `forEach`, the iterator and `clear` all throw. |
+| F3 | YES | LCT `setValue` sum: int 0, frac 363 [364]. `pathAggregate(u, v)` frac: 1749 fresh, 25 after a gcd warm-up [24 fresh -> 897 warmed]. The fresh/warm polarity is REVERSED from the audit, so the phi boxes in whichever feedback state the driver lands in. Gate BOTH states (N1 fresh + N2 warmed). Store-per-branch patch on a scratch copy: 363 -> 12, 1749 -> 13, 25 -> 13. The residual ~12 is the one argument box (setValue) or return box (pathAggregate), i.e. <= 1 box/op. |
+| F4 | YES | SegmentTree2D query sum frac 443 [389]. SegmentTree 1D inlined: update/query 0/0. With `--max-inlined-bytecode-size=0`: update 270 [366], query 221 [161]. PST update sum frac 244 [244]. |
+| F5 | YES | 124 `& 0xffff` sites in torture.mjs and 50 in PerfGate.test.mjs. The teeth are a fresh `[]` per op (PerfGate.test.mjs:1739). |
+| F6 | YES, worse | `new P(3,1,'gcd',[NaN,3,6])` hangs INSIDE THE CONSTRUCTOR (killed at 3 s, before any query). `[NaN, Infinity]` sum queries NaN. `[-1.5,'7',{}]` is accepted and queries NaN. `PersistentSegTree.length === 4`. |
+| F7 | YES, exact | Fenwick `at(1) = NaN`. SegmentTree / 2D / PST sum `NaN`. LCT `pathAggregate(3) = Infinity`, `pathAggregate(0,3) = pathAggregate(3,0) = 0`. |
+| F8 | YES | `arena(8,'min',1e8)` is a V8 FATAL OOM abort for all three mergeable heaps. `2**32` gives the untagged RangeError "Invalid array length". |
+| F9 | YES, exact | min: `pathAggregate(2) === 0`, `at(1) === 0`. `findRoot(3)` goes 0 -> 2 after `pathAggregate(2, 3)`. |
+| F10 | PARTLY (not every site probed) | Treap `successor` 156 on BOTH int and frac input [207-232]. The `best = undefined` phi boxes even for integer keys. WT `quantile` with inlining off, int input: 373 [376]. Patching all THREE `wtPopcount32` call sites with `\| 0` (LogN.js:6902/6950/6952): 373 -> 1. Scapegoat and `PST._query` were not re-probed. |
+| F11 | CONSISTENT | Fenwick `set` with inlining off, frac: 25 (one argument box per call). WT `quantile` inlined, frac: 25 (the return box). |
+| F12 | NOT REPRODUCED | `test:perf` passed 71/71 plain, 71/71 twice under 6 burners, and 71/71 under 12 burners (12 cores). The audit's 2/71 was a one-off. Keep N6 as hardening, but it is not a reproduced defect (S8). |
+| F13 | YES, plus more | README says 643 tests (actual 666). Lockfile 0.1.0. The zero-GC table has 13/19 members. The LogN.js header describes the v0.4.0 roster. NEW: README Constants table says `VERSION` is `'1.1.1'` (README:270). The D3 memory table has 16/19 rows (no WT/CT/LCT). The D1 SVG has 7/24 bars. "What this is not" stops at Fenwick2D. |
+| F14 | not probed | (a feature, not a defect) |
+| baseline | YES | `npm test` 666/666 (315 s wall). `test:perf` 71/71. |
+
+**What the reproduction changes in the plan:**
+- F3/F4/N2: the warm-vs-fresh polarity is driver-dependent. N1 must run the fresh lane AND N2 the
+  warmed-polymorphic lane, and each must be red on 1.3.0 independently.
+- F3 exit: the gate for `setValue` / `pathAggregate` is `<= 1 box/op` (the argument or return box in
+  a non-inlined call), not 0. It reaches 0 only through a slot form (S6/S7).
+- **Witness-band risk (new):** F3/F4/F10 remove per-LEVEL boxes, so the per-level SLOPE of the
+  LinkCutTree `pathAggregate`, PersistentSegTree `query` and SegmentTree2D lanes will FALL. LCT's band
+  `[33.74, 78.74]` was calibrated on code that boxed at every `_pull`. Run the witness before and after
+  each fix. Re-center a band ONLY by the decisions/0004 rule (median-of-15 x `[0.6, 1.4]`, warm), and
+  record the move in that member's ADR. A band move that comes from a fix is expected. One that is not
+  explained by a fix is a regression.
+- F6: the hang is at construction, so the exit test is `new P(3,1,'gcd',[NaN,3,6])` in a subprocess
+  with a 1 s timeout, not a query.
+
+### 8.2 NEXT SESSION -- running H1 (v1.4.0)
+
+**Settle first, before any code (maintainer calls, lean in brackets).** S1-S6 as listed above, plus:
+- S7 cross-module double ARGUMENTS (F3 residual, F11): accept `<= 1 box/op` for a non-inlined call
+  that takes or returns a double, and document it. [yes. 0 B/op then applies to integer-slot and
+  `Into` / `setFrom` forms only. State it once in the README zero-GC notes.]
+- S8 F12 did not reproduce: [keep the chunked Float64Array driver anyway (it is needed for N1 to be
+  stable), and run N6 once at release as evidence, not per commit.]
+
+**Order of work (gates red first, then fixes, then docs):**
+1. **Harness, red on 1.3.0.** N4 teeth (exactly one HeapNumber per op) -> the chunked Float64Array
+   driver (F12) -> N1 kinds (int / frac / p31 / n31 / p53) -> N2 warmed-polymorphic + fresh ->
+   N3 no-inline subprocess -> N5 p30. Commit nothing yet. Record the RED list; it IS the exit
+   criterion "N1-N4 fail on 1.3.0".
+2. **Correctness Highs.** F1 (Treap reachable-set free) and F2 (six iterative walkers over a
+   preallocated stack). Both are plain `npm test` failures today; add the tests first.
+3. **Allocation Highs.** F3 (LCT `_pull` store-per-branch), F4 (SegmentTree / 2D / PST: one loop per
+   kind or one store per branch, in update / query / build). Re-run the witness after each (8.1 risk).
+4. **Mediums.** F10 (integer `best` slot, iterative `PST._query`, `wtPopcount32(x | 0)` at all 3
+   sites), F6 (module-private seed path, no 4th ctor param), F8 (`count` cap), then F7 / F9 per the
+   S1 / S2 / S3 outcome.
+5. **API.** F11 / F14 at the S6 scope (lite-hud M5: Fenwick / SegmentTree `setFrom`, WaveletTree
+   `quantileInto` + `rebuildFrom`), each with a 0-box lane.
+6. **Docs + release.** F13 (all README drift in 8.1, the LogN.js header, lockfile), CHANGELOG 1.4.0,
+   the ADR notes for any moved witness band. Then run `npm run verify`, then N6 once.
+
+**Pipeline:** planner (turn sections 8 + 8.1 into atomic tasks and ASSERTIONS; no new design) ->
+coder -> reviewer -> qa, per the section 7 turn limits. Reviewer REJECTED goes back to the coder.
+Each fix is its own coder task with its red test first. The torture, witness and perf gates run after
+every allocation fix, not only at the end.
+
+**Blocks:** lite-hud M5 pins 1.4.0. The EulerTourTree session (section 9) depends on 1.4.0: it is
+born under the N1-N6 gates and the S1 / S2 / S7 policies.
+
+### 8.3 The 1.4.0 session brief (ACCEPTED 2026-09-25)
+
+Every settle call is decided: S1-S8 go with their leans. The one exception is **S1 for Fenwick /
+Fenwick2D `update`**, which the maintainer settled as the MAGNITUDE BUDGET (below). The brief merges
+two planner passes (harness; fixes). Every code site in it was re-verified against 1a38599.
+
+```markdown
+---
+package: "@zakkster/lite-logn"
+version_target: 1.4.0
+status: accepted
+gc_maxMajor: 0
+gc_maxPauseMs: 4
+alloc_bytes_per_op: 0          # S7: <= 1 box/op only for a non-inlined call taking / returning a double
+leak_cycles: 4096
+witness_gate: floor 0.958 frozen; bands re-checked before / after every hot-body fix (8.1 risk)
+peers: ["@zakkster/lite-gc-profiler", "@zakkster/lite-leak", "@zakkster/lite-perf-gate"]
+design_calls: [S1..S8 settled]
+depends_on: [1.3.0 @ 1a38599]
+blocks: [lite-hud M5, EulerTourTree 1.5.0]
+---
+
+# lite-logn -- H1 hardening: gates that can see a box, then the fixes they catch
+
+PURPOSE
+  Make the gates able to fail on the defects the 1.3.0 audit found (a single HeapNumber per op,
+  non-Smi inputs, non-inlined callers, recursion depth). Then fix F1-F14 under those gates.
+  No new member, and no API removals except PersistentSegTree's undocumented 4th ctor parameter.
+
+SETTLED CALLS (as implemented)
+  S1  Sum overflow is bounded at the door, sum kind only:
+      - Absolute writes. SegmentTree.update/build: |v| <= MAX_VALUE / length.
+        SegmentTree2D.update/build: |v| <= MAX_VALUE / (rows*cols).
+        PersistentSegTree.update/build: |v| <= MAX_VALUE / length (every version is a length-n array).
+        LinkCutTree.setValue: |v| <= MAX_VALUE / capacity (a path has <= capacity vertices).
+      - Fenwick / Fenwick2D update(i, delta) use the MAGNITUDE BUDGET. A scalar `_mag` is an upper
+        bound on sum |element|. update adds |delta|; set adds |new - old|; build sets it to sum|v|;
+        clear sets it to 0. The budget is MAX_VALUE/2 for Fenwick and MAX_VALUE/4 for Fenwick2D.
+        That margin covers the prefix(hi) - prefix(lo-1) subtraction and the 4-term
+        inclusion-exclusion, so no intermediate can reach Infinity. Hot path cost: one add and one
+        compare. If a write would exceed the budget, a COLD exact path recomputes sum |element| in
+        O(n) and resets `_mag`. It accepts the write if the true total fits, and otherwise throws
+        [lite-logn] with the state unchanged (checked BEFORE the climb). Disclose that at a true
+        magnitude near 1e308 the exact path can repeat under churn.
+  S2  LCT vertices start (and clear() returns them) at the fold identity: min +Infinity,
+      max -Infinity, sum 0, gcd 0. at(unset) returns that identity. That is documented, and it is
+      a CHANGELOG "Changed" item.
+  S3  LCT pathAggregate(u, v) leaves the tree rooted at u. Documented and tested; nothing is
+      restored.
+  S4  WaveletTree build normalizes -0 to +0 (cold). The ordered maps only disclose it.
+  S5  Heap iterators (BinaryHeap, MinMaxHeap, BinomialHeap, PairingHeap, FibonacciHeap) are
+      version-stamped. BinaryHeap / MinMaxHeap gain a `_version` field. That is one Smi increment
+      per mutation (`(v + 1) | 0`, as SkipList / Treap already do), which touches the pop witness
+      lanes (see W). forEach documents "no mutation from the callback".
+  S6  Slot forms, lite-hud M5 scope only:
+        Fenwick.setFrom(src: Float64Array, i) -> this                 element i := src[i]
+        SegmentTree.setFrom(src: Float64Array, i) -> this             leaf i := src[i]
+        WaveletTree.quantileInto(out: Float64Array, j, lo, hi, k) -> void   out[j] := quantile
+        WaveletTree.rebuildFrom(values) -> this                        into the existing buffers
+      rebuildFrom: values.length must be <= the constructed length, else a tagged throw. Build's
+      sort / dedupe temporaries become instance scratch so a rebuild is 0 B/op. The scratch memory
+      is disclosed in the bits / D3 notes.
+  S7  <= 1 box/op is allowed only for a non-inlined call that takes or returns a double. It is
+      documented once in the README zero-GC notes. Everything else is 0.
+  S8  F12 was not reproduced. The chunked Float64Array driver is kept (N1 needs it), and N6 runs
+      once at release as evidence.
+  (harness) The ZERO budget is <= 2 scavenges at 8N, not a strict 0. Clean lanes were observed at
+      0-1 (st2 query int 1, SegmentTree update int 1), and one box reads 12-24, so 2 is still
+      separable by 6x. See G5 for the self-calibrated one-box budget.
+
+AMENDMENTS (2026-09-26, from the stage-G review)
+  S7k S7 is refined (maintainer). A NON-inlined public call may box once per double ARGUMENT and
+      once per double RETURN, and no more: k = the number of non-Smi doubles that cross the
+      boundary, declared per lane in the registry. The budget is floor((k + 0.5) * B1), which means
+      half a box of tolerance, so box k+1 always fails. (The first wording, floor(1.5 * k * B1),
+      let a k=2 lane carry a third box. That was corrected 2026-09-26 to match the maintainer's
+      "no more".) k is counted PER SHARD: the doubles that actually cross in that shard's
+      inlining state (e.g. successor crosses 1 in a normal shard and 2 in ni-). Lanes that read 0 on 1.3.0 in the normal shards are
+      gated at ZERO, so a one-box regression on an inlined path fails. Documented once in the
+      README zero-GC notes.
+  F15 NEW (A2): BinaryHeap.pop / remove and MinMaxHeap.popMin / popMax pass the key double into
+      their own non-inlined sift helper (`_siftDown(0, this._key[last])`, LogN.js:144;
+      `_siftDownMin`, :2605). Isolated with no boundary doubles, it still reads one box (12) on p31
+      under noinline. Fix in stage M: pass the SLOT and read the key inside the helper.
+  F16 NEW: delete+set churn reads 24-25 on 1.3.0 for Treap and Scapegoat in a normal pinned shard.
+      SkipList / SplayTree read 12-13 (the k=1 boundary box) and SortedArray reads 0. An earlier
+      "all 5 maps" figure came from a probe that loaded the key twice. Root-cause and fix in
+      stage M (the delete path's key phi / return).
+  F3+ LCT findRoot (205) and cut/link (247) box with NO double at the boundary. Same `_pull` phi
+      as F3, reached through splay / access, so A1 closes them. Verify it.
+
+TASKS -- stage G (gates, red on 1.3.0; repo-only, no LogN.js edit)
+  G1  test/perf/Kinds.mjs: makeInputs(kind). A Float64Array(4096) per kind: int = s,
+      frac = s + 0.37, p31 = 2^31 + s, n31 = -(2^31) - s, p53 = 2^53 - s, p30 = 2^30 + s, where
+      s = (i*2654435761 >>> 0) & 0xffff.
+  G2  Kinds.mjs: chunked(hot). 200 chunks of 2048 ops as warm-up, in setup. The measured window is
+      16N ops (N = 200k; lengthened from 8N in review so B1 >= 8 with a pinned semi-space) in 2048-op chunks. Per-op read results go into a FUNCTION-LOCAL
+      accumulator, written once per chunk to a Float64Array sink. Never a closure-captured `let`
+      (RESEARCH 12.4).
+  G3  Kinds.mjs: teethOneBox (exactly one HeapNumber per op: a double stored into a PACKED_ELEMENTS
+      array) and teethTwoBox (two per op).
+  G4  Kinds.mjs: LANES = member x hot op x kind, enumerated from LogN.d.ts. Each lane is tagged
+      `doubleIO` (the op takes or returns a double -> the S7 budget) or `zero`. gcd skips
+      frac / n31. N2 twins run the gcd kind first, then min / max / sum, then measure.
+  G5  test/perf/Kinds.test.mjs. Each shard first measures teethOneBox IN ITS OWN STATE (fresh or
+      N2-warmed) and gets B1. Then:
+        ZERO budget = 2, and the shard fails itself if B1 < 8 (a GC-blind shard);
+        ONE budget  = floor(1.5 * B1);
+        teethOneBox must FAIL ZERO, and teethTwoBox must FAIL ONE.
+      Why self-calibrate: a fixed ONE budget of 32 lets a warmed two-box teeth (~24) PASS.
+  G6  test/perf/Lanes.mjs: spawn the shards as child processes (parallel), plus one shard with
+      --max-inlined-bytecode-size=0 (N3) and one with the p30 kinds (N5). Wall-clock budget
+      <= 180 s.
+  G7  package.json: test:perf:kinds and test:perf:noinline. Both go in `verify`.
+  G8  PerfGate.test.mjs: replace the fresh-[] teeth (teethMustFailAlloc, ~:1728-1775) with
+      teethOneBox. Swap the `(t * 2654435761) & 0xffff` driver for the G1 / G2 driver (F12).
+  G9  torture.mjs: frac and p31 value fills on the LCT / SegmentTree / 2D / PST / Treap / WT lanes.
+  G10 test/perf/Burners.mjs (N6): os.availableParallelism() burners, 3 runs of test:perf. Release
+      only, not in verify.
+  G-EXIT Run on 1.3.0 and record the RED list. Expected RED:
+      - LCT setValue sum frac (363)
+      - LCT pathAggregate(u, v) sum frac: fresh 1749 is RED. N2-warmed read 25, which is about one
+        box (the S7 return floor), so it PASSES ONE. Record whichever states are red; at least one
+        must be
+      - SegmentTree2D query sum frac (443)
+      - PST update sum frac (244)
+      - Treap successor int + frac (156)
+      - noinline: SegmentTree update frac (270) and query frac (221), WT quantile int (373)
+      - plus whatever the full matrix adds (Scapegoat, PST query, heap peek / keyOf, maps get ...)
+    Expected GREEN: the ROADMAP 8 "checked clean" list. This recorded list IS the exit criterion
+    "N1-N4 fail on 1.3.0".
+
+TASKS -- stage C (correctness Highs; red test first, then fix)
+  C1  F1 Treap.clear (LogN.js:1750) calls `this._pool.clear()`. The shared pool is the bug. Free
+      only the nodes reachable from this._root, with NO stack: rotate-to-vine (while the root has a
+      left child, rotate right; else free the root and step right). Same code for the original
+      and for views, so a consumed original frees nothing. Keep the `_seed = _seed0` reset per view.
+      Test: after split(3), l.clear() then 6 adds to l, r walks exactly 3:30, 4:40, 5:50 with
+      r.size === 3. Also clear the consumed original, then split again, then merge: no corruption.
+      Disclose (do not fix) that split views start from the same `_seed`, so their priority
+      streams are identical.
+  C2  F2 PairingHeap _freeForest / _forEach / _iterNode (4220 / 4233 / 4243) and FibonacciHeap
+      (4860 / 4877 / 4889): make them iterative.
+        - _freeForest: destructive and stackless. Splice each child list into the sibling chain
+          as you go.
+        - _forEach / _iterNode: stackless, using the existing links. Pairing's `_parent` is a
+          dual-role PREV pointer, so `C[p] === x` tells a parent from a previous sibling.
+          Fibonacci has an explicit `_parent` plus circular lists.
+      Stackless is REQUIRED for the iterator. A shared scratch stack would be clobbered by two live
+      iterators, or by forEach re-entering from its own callback.
+      BinomialHeap (3706 / 3717 / 3727) is out of scope: binomial depth <= log2(capacity) <= 31.
+      Treap / Scapegoat recursion is expected-depth / height-bounded (already documented).
+      Tests: PairingHeap(1e6) with descending pushes, then forEach counts 1e6, [...h].length ===
+      1e6, and clear() then push(0, 1) works. The same for the Fibonacci 20000-round
+      push / popMin / decreaseKey chain.
+
+TASKS -- stage A (allocation Highs; witness run BEFORE and AFTER each)
+  A1  F3 LCT _pull (7877-7883): store in each branch, no `let a` phi. Scratch-patch proof:
+      363 -> 12, 1749 -> 13.
+  A2  F4 tagged ternary into segGcd. Split per kind (one loop per kind, or a store per branch) at:
+        SegmentTree   794, 799 (query), 828 (update), 906 (build)
+        SegmentTree2D 5429, 5430, 5437, 5438 (query), 5471, 5478, 5482 (update), 5579, 5588 (build)
+        PST           6202 (_build0), 6249 (_query), 6328 (_copy)
+
+TASKS -- stage M (mediums)
+  M1  F10: Treap successor / predecessor (1667 / 1684) and the Scapegoat twins, plus both
+      classes' `_ceil`: use an integer slot `bs = 0`, then `return bs === 0 ? undefined : K[bs]`
+      (the SplayTree :3274 pattern; the return box is allowed by S7). Make PST _query (6240)
+      iterative with a double accumulator. `wtPopcount32(x | 0)` at ALL THREE sites
+      (6902, 6950, 6952); scratch proof 373 -> 1.
+  M2  F6: drop the public `_seed` parameter (6104 / 6149). PersistentSegTree.build validates
+      first, then seeds through a module-private function. The d.ts already shows 3 params.
+      Exit: `new P(3,1,'gcd',[NaN,3,6])` in a subprocess with a 1 s timeout seeds nothing (the
+      4th argument is ignored), and PersistentSegTree.length === 3.
+  M3  F8: arena(capacity, kind, count) at 3435 / 3884 / 4452. `count` must be an integer in
+      [1, capacity], or a tagged RangeError is thrown BEFORE any allocation. Exit: 1e8 and 2**32
+      throw tagged in < 10 ms, in a subprocess, with no abort.
+  M4  F7 per S1, and F9 per S2 / S3.
+
+TASKS -- stage P (API, S6 scope) and D (docs + release)
+  P1  Fenwick.setFrom, SegmentTree.setFrom, WaveletTree.quantileInto: each gets a 0-box lane in
+      the G matrix, with the plain form kept as the documented one-box control. S4 -0
+      normalization in WT build.
+  P2  F14 WaveletTree.rebuildFrom: a 0 B/op lane, and output identical to a fresh build on a
+      fuzz corpus.
+  P3  S5 version stamps on the 5 heap iterators, plus tests for mutation mid-iteration.
+  D1  F13, all of it:
+        - README: 643 -> actual count; Constants VERSION '1.1.1' -> '1.4.0'; zero-GC table 13 -> 19
+          rows; witness paragraph through LCT; D3 16 -> 19 rows; D1 SVG 7 -> 24 bars (or drop the
+          SVG); "What this is not" through LCT; S7 note; new disclosures (Fenwick cancellation,
+          -0/+0, iteration under mutation, worst single-op times from ROADMAP 8 F13).
+        - LogN.js header rewritten for the 19-member roster.
+        - package-lock root version.
+  D2  VERSION 1.4.0 at all sites (package.json, LogN.js, llms.txt, lockfile). CHANGELOG 1.4.0 with:
+        Fixed: F1-F4, F6-F10.
+        Added: setFrom / quantileInto / rebuildFrom, iterator stamps.
+        Changed: LCT unset = identity; LCT pathAggregate re-root documented; PST arity 3; new
+          tagged throws (sum bound, arena count, rebuildFrom length).
+        Note: the byte-identical-prior-members invariant is SUSPENDED for the listed sites in this
+          release.
+      d.ts + test/types for every new method.
+
+W  WITNESS (the 8.1 risk). Before stage A, record a median-of-15 warm run for every lane whose hot
+   body changes:
+     - LCT pathAggregate, PST query, SegmentTree2D update + query, WT quantile (A / M1);
+     - Fenwick update + prefix, Fenwick2D update + rectSum (the S1 budget compare);
+     - BinaryHeap pop, MinMaxHeap popMin, Binomial / Pairing / Fibonacci popMin (the S5 stamp).
+   Re-run after the fix. If a slope leaves its band, re-center ONLY by decisions/0004 (median-of-15
+   x [0.6, 1.4], warm), with a dated note in that member's ADR naming the fix that moved it.
+
+PIPELINE
+  planner (this brief is the plan; no new design) -> coder -> reviewer -> qa, by stage:
+  G, then C, then A, then M, then P, then D. Turn limits: coder 40, reviewer 15, qa 30. Reviewer
+  REJECTED goes back to the coder. torture + witness + test:perf + kinds + noinline run after
+  every A / M1 / S1 change, not only at the end.
+
+ASSERTIONS
+  1. On 1.3.0: test:perf:kinds and test:perf:noinline are RED on exactly the G-EXIT list; teeth
+     calibrate (B1 >= 8); teethTwoBox fails ONE in every shard, fresh and warmed.
+  2. After A / M1: those lanes are GREEN (0, or ONE where doubleIO). Reverting A1 or A2 turns them
+     RED again (the ROADMAP 8 exit).
+  3. C1 / C2 / M2 / M3 / F7 / F9 tests as stated, and each is red before its fix.
+  4. Every rejected op leaves byte-identical state (snapshot of all columns).
+  5. `npm run verify` green; kinds + noinline <= 180 s; N6 3x under availableParallelism() burners
+     at release: 0 failures.
+  6. Witness: every lane ON the line with its (possibly re-centered, ADR-noted) band; every foil
+     OFF.
+  7. `npm pack --dry-run` = the same 6 files; ASCII-only; grep finds no "643" and no "1.1.1" in the
+     README.
+
+NON-GOALS
+  EulerTourTree (1.5.0). Slot forms beyond S6. Fixing the shared Treap view seed (disclosed only).
+  BinomialHeap recursion (bounded). Any new witness lane.
+
+DONE WHEN
+  F1-F14 closed, N1-N6 green, the G-EXIT red list recorded in the CHANGELOG / ADR notes, every
+  moved band ADR-noted, 1.4.0 ready for the maintainer to commit / publish / tag.
+```
+
+### 8.4 RE-PRIORITIZED 2026-09-27 -- consumers first (maintainer: "prioritize the module; lite-pick
+### and lite-hud are blocked; demo in a separate session")
+
+Stage G (gates) and stage C (F1, F2) are done. The rest of H1 is split into two releases, so that
+the two blocked consumers get a release as early as possible.
+
+**1.4.0 = the consumer release.** It contains stages G and C, plus:
+- lite-hud M5 path:
+  - Fenwick: S1 magnitude budget, `setFrom`.
+  - SegmentTree: F4 (all folds), the S1 sum bound, `setFrom`.
+  - WaveletTree: F10 popcount `| 0` at all 3 sites, S4 -0 normalize, `quantileInto`, `rebuildFrom`.
+  - Every one of these lanes must be GREEN in kinds / noinline / p30.
+- lite-pick path:
+  - BinaryHeap: F15 (the sift helper takes the slot, not the key double) and S5 iterator stamp.
+  - NEW `Fenwick.search(target) -> index`. This is the weighted-sampling descent lite-pick's
+    dynamic-weight WeightedRandom needs ("O(log n) update + sample", Pick.js:1288 / ADR 0012).
+    Semantics: the smallest i with prefix(i) >= target. It returns `length` when target exceeds
+    the total, and never an out-of-range index. Binary-lifting descent, O(log n), 0 B/op.
+    Precondition, documented: every element >= 0. It returns a valid index even when that is
+    violated. The target is typeof-guarded; NaN throws.
+- The cheap same-pattern Highs, because they share the fix and the gate:
+  - F3: the LCT `_pull` per-branch store.
+  - F4: the same per-kind split in SegmentTree2D and PersistentSegTree.
+- Docs: only what the release makes false. The README test count, VERSION sites, the S7k note, the
+  new APIs, the CHANGELOG, and the moved witness bands.
+
+**Gate policy for 1.4.0 (maintainer-delegated decision).** `verify` must be green, so every lane
+still RED because its fix is deferred goes into ONE explicit DEFERRED list in test/perf/Kinds.mjs.
+Each entry is keyed to its F-id. The gate prints the list on every run, and an entry that turns
+GREEN fails the gate until it is removed, so the list can only shrink. torture's G9 uses the same
+list. 1.4.1 must empty it.
+
+**1.4.1 = the rest of H1:**
+- F6 (PST seed), F7 (LCT / 2D / PST sum bounds), F8 (arena count), F9 (LCT identity + re-root docs).
+- F10 for Treap / Scapegoat successor / predecessor / _ceil and PST._query.
+- F15 for MinMaxHeap, and F16 (Treap / Scapegoat delete).
+- S5 stamps on the other 4 heaps.
+- The full F13 doc sweep, and N6 at release.
+
+- CartesianTree.rangeMinIndex witness hardening (1/7 solo runs at R^2 0.9577; add work per sample).
+- The Harness (h) drift self-test uses a timer-based injector that failed once during a
+  back-to-back gate sequence. Make its injection deterministic.
+
+**Demo:** its own later session, not part of H1.
+
+---
+
+## 9. EulerTourTree -- v1.5.0 (the LinkCutTree sibling)  [PLANNED]
+
+Research notes: RESEARCH.md section 13. Integration surface = the 16 files the 1.3.0 LinkCutTree commit
+touched, plus the cross-member items at the end of this brief.
+
+```markdown
+---
+package: "@zakkster/lite-logn"
+version_target: 1.5.0
+status: planned
+gc_maxMajor: 0
+gc_maxPauseMs: 4
+alloc_bytes_per_op: 0          # <= 1 box/op only where S7 allows (double arg / return, non-inlined)
+leak_cycles: 4096
+witness_gate: shared R^2 floor 0.958 (frozen); own band = median-of-15 x [0.6, 1.4], warm post-torture
+peers: ["@zakkster/lite-gc-profiler", "@zakkster/lite-leak", "@zakkster/lite-perf-gate"]
+design_calls: [D-ETT1 .. D-ETT8]
+depends_on: [v1.4.0 H1 (N1-N6 gates, S1 / S2 / S7 policies)]
+blocks: []
+---
+
+# lite-logn -- EulerTourTree: dynamic connectivity + SUBTREE folds over an unrooted forest
+
+PURPOSE
+  The member LinkCutTree defers to (decisions/0021 D-LCT6). It keeps an UNROOTED forest over a FIXED
+  vertex set [0, capacity) under link(u, v) / cut(u, v). It answers connected(u, v), whole-component
+  folds, and SUBTREE folds ("v's side of edge (v, p)") in expected O(log n), with zero allocation.
+  The trick worth teaching: store the tree's Euler tour (every edge walked both ways) as a balanced
+  BST sequence. Linking and cutting trees then become splitting and concatenating sequences. A
+  subtree becomes one contiguous tour segment, so a subtree fold is a range fold. LCT answers PATH
+  folds, ETT answers SUBTREE folds. Together they are the dynamic-forest pair.
+
+DESIGN CALLS TO SETTLE (before code; each with a lean)
+  - D-ETT1 backing BST. Lean: a TREAP with parent pointers, not a splay. With a treap, connected /
+    componentAggregate / subtreeAggregate / at are NON-MUTATING reads: they climb parent pointers to
+    the root and read the range folds top-down. That avoids LCT's mutating-read class (F9 / S3). The
+    cost is EXPECTED rather than amortized, which the family already discloses for SkipList / Treap.
+    The seeded instance-local LCG is the Treap one. A splay would be amortized, but every read would
+    splay (an unsplayed parent climb is unbounded under amortized analysis).
+  - D-ETT2 tour representation. Lean: Henzinger-King. One VERTEX node per vertex, which carries the
+    value, plus two ARC nodes per edge (u->v and v->u), which carry the identity. The tour is CYCLIC.
+    Invariant: a vertex node follows one of its entering arcs, or is alone. A rotation preserves every
+    fold, so "reroot" is just a rotation (split + concat). Node budget = V vertex slots + 2(V-1) arc
+    slots, fixed at construction. Arc slots come from a fixed private free-list. Nothing grows.
+  - D-ETT3 edge addressing. Lean: `cut(u, v)` and `hasEdge(u, v)` by endpoints, through a private
+    open-addressed arc table: linear probing, BACKWARD-SHIFT delete (no tombstone buildup under churn),
+    power-of-two size >= 4V, two Int32 key columns + one Uint32 slot column. The alternative is an
+    edge handle returned by link: less work, but the stale-handle risk goes to the caller.
+  - D-ETT4 folds. min / max / sum / gcd frozen at construction via small-int _k, plus an ALWAYS-ON
+    vertex-count column (componentSize / subtreeSize for free). Per-kind code with no tagged phi
+    (lesson 12.2.1): a store in each branch, or one loop per kind. Unset-vertex initial value and
+    the sum bound follow the S2 / S1 outcomes from 1.4.0, the same rule as LCT.
+  - D-ETT5 subtree semantics in an UNROOTED forest. subtreeAggregate(v, p) = the fold over v's side
+    after removing edge (v, p). Throws if (v, p) is not an edge. Read-only: find the ranks of arc(p->v)
+    and arc(v->p) by parent climbs. If p->v comes first, fold the open segment between them.
+    Otherwise fold the COMPLEMENT as two range folds. That works for min / max / gcd, which have no
+    inverse.
+  - D-ETT6 surface. link(u, v) (throws on bad id / self / cycle; the cycle test is the read-only
+    connected), cut(u, v) (throws on a non-edge), setValue(v, x), at(v), connected(u, v),
+    componentAggregate(v), componentSize(v), subtreeAggregate(v, p), subtreeSize(v, p),
+    hasEdge(u, v), clear(). Getters capacity / kind / edges. NO evert and NO path fold (LCT's job;
+    the sibling asymmetry). NO forEach / iterator. [Lean NO on forEachInComponent; add on demand.]
+  - D-ETT7 witness. Gated op = subtreeAggregate on the DEFAULT log2(n) axis. Workload: a random
+    recursive tree over n vertices, uniform-random (v, parent) picks, with interleaved cut + relink
+    churn so the treap shape stays random. EXPECTED member, so the witness DISCLOSES the MAX single
+    link and cut (never gated). Foil: a DFS over an adjacency list, O(component), which must miss the
+    floor.
+  - D-ETT8 capacity. ETT_MAX_CAPACITY such that 3V-1 slots, the 4V-entry table and every typed-array
+    length stay < 2^31. Use a FLOAT-product guard, never `| 0`. Record the ~170 B/vertex footprint
+    (3 slots x 40 B + 48 B of table) in the D3 memory table.
+
+TASKS
+  - Append EulerTourTree + ETT_MAX_CAPACITY to LogN.js after LinkCutTree (append-only, VERSION ->
+    1.5.0). The split / merge / rank / range-fold code is ITERATIVE over preallocated `_stk` scratch
+    (lesson 12.2.5). Spines touched by split / merge are recorded and pulled bottom-up. There are no
+    closures and no `number | undefined` on hot reads.
+  - LogN.d.ts + test/types; test/EulerTourTree.test.mjs (contract + fuzz vs an adjacency+BFS oracle,
+    4 kinds x int/frac, >= 80k ops, 0 mismatches); an EulerTourTree boundary suite (every door
+    typeof-first, byte-identical state after each rejection); a CROSS-ORACLE test that feeds one
+    link/cut stream to LinkCutTree and EulerTourTree and requires `connected` to agree at every step.
+  - A deep-shape test: a 2^20-vertex PATH graph, then subtreeAggregate / componentAggregate / clear,
+    with no RangeError (recursion is a capacity bug). An arc-table churn test: link/cut the same
+    pairs 1e6 times, and probe lengths stay bounded.
+  - torture lanes (build / churn / discard tracker + hot reads on a warmed forest), witness lane +
+    band, perf-gate scenarios under N1-N5 kinds from day one, bench Matrix/Dimensions cells (D7
+    insertion-order `n/a`; D8 a dynamic-connectivity trace next to LCT).
+  - decisions/0022-eulertourtree.md; llms.txt; README (tagline, roster row, TOC, API section, witness
+    row + details, D1 / D3 / D5 / D6 rows, zero-GC table row, "What this is not" bullet, test count);
+    GUIDE chapter; CHANGELOG 1.5.0; package.json description + keywords (euler-tour-tree,
+    dynamic-connectivity, subtree-aggregate).
+  - Cross-member: LCT docs (README 1066/1112, llms 391/882, GUIDE 1031, 0021 D-LCT6, CHANGELOG
+    note) change "a future EulerTourTree" to the shipped member, plus a two-line "LCT or ETT?"
+    chooser (path fold / evert -> LCT; subtree or component fold, read-only connectivity -> ETT).
+    QaAudit's LCT no-subtree assertion stays. Add the ETT no-path-fold assertion.
+
+ASSERTIONS
+  - Fuzz vs oracle: 0 mismatches on connected / componentAggregate / componentSize /
+    subtreeAggregate / subtreeSize / hasEdge / edges across 4 kinds.
+  - Cross-oracle: LCT.connected === ETT.connected at every step of an 80k link/cut stream.
+  - Reads are non-mutating: a column snapshot is byte-identical before and after every read op.
+  - link on connected endpoints, cut on a non-edge, and a bad / typeof-hostile id or value all
+    throw [lite-logn] as byte-identical no-ops.
+  - 2^20 path: no RangeError anywhere, including clear().
+  - torture ok: 0 B/op on link / cut / setValue / connected / componentSize / subtreeSize;
+    <= 1 box/op (S7) on the double-returning folds when not inlined; N1-N5 lanes green;
+    N4 teeth trip.
+  - Witness: subtreeAggregate R^2 >= 0.958 and slope in its band; the DFS foil misses the floor;
+    MAX single link / cut printed.
+  - npm run verify green; pack = the same files; d.ts == runtime surface (20 classes).
+
+HOT PATH
+  link = 2 rank climbs + <= 4 splits + <= 5 merges. cut = 2 rank climbs + 2 splits + 1 merge + 2 arc
+  frees + 1 table delete. Reads = parent climbs + top-down range folds. All iterative, all over
+  preallocated columns, zero allocation.
+
+NON-GOALS
+  No path folds or evert (LinkCutTree). No non-commutative folds. No edge weights (arc nodes carry
+  the identity; edge values are a later preset). No general-graph dynamic connectivity (Holm-de
+  Lichtenberg-Thorup levels over ETT forests: a possible future member that uses this as its
+  substrate). No growth.
+
+DONE WHEN
+  EulerTourTree shipped at 1.5.0; D-ETT1..8 recorded in 0022; all gates green incl. N1-N6; LCT docs
+  point at the shipped sibling; the README / llms / GUIDE / d.ts surface counts all read 20 members.
+```
 
 MIT (c) Zahary Shinikchiev

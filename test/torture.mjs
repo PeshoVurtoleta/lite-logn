@@ -30,6 +30,50 @@
  * `npm install` fails with a remedy, not a stack trace.
  */
 
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { parseFlags, semiSpacePinned, stripSemiSpacePins } from './perf/Flags.mjs';
+
+// TORTURE PINNING (stage-G QA item 3). The scavenge scale the G9 gate calibrates against
+// is only stable with a PINNED new-space (--min-semi-space-size=4 == --max). The CLAUDE.md
+// canonical command is `node --expose-gc test/torture.mjs`, with no semi-space flags, so
+// when this process starts UNPINNED it re-execs ITSELF as a child with the pins added (plus
+// the original flags and args) and exits with the child's code -- the canonical command
+// keeps working, now on a pinned new-space. When already pinned (`npm run torture`), it runs
+// normally. The last-value flag parser (test/perf/Flags.mjs) is shared with the Kinds gate.
+const TORTURE_REEXEC = 'LOGN_TORTURE_REEXEC';   // recursion guard marker
+
+// Returns true if this process should run the gate; re-execs (and never returns) or fails
+// closed otherwise. Async so parent signals are forwarded to the child (no orphan on
+// SIGTERM); spawnSync would block the event loop and orphan the child on a parent kill.
+async function pinnedBootstrap() {
+    if (semiSpacePinned(parseFlags(process.execArgv))) return true;
+    // The re-exec strips every semi-space spelling before adding the pins, so the child is
+    // always pinned. If a child STILL reads unpinned with the marker set, an override we did
+    // not anticipate survived -- fail closed rather than fork forever (blocker: 116 nested
+    // procs when an underscore spelling like --max_semi_space_size=8 slipped through).
+    if (process.env[TORTURE_REEXEC] === '1') {
+        process.stderr.write('[lite-logn] torture: FAIL -- new-space still unpinned after re-exec; a ' +
+            '--min/--max-semi-space-size override survived. Run `npm run torture`.\n');
+        process.exit(1);
+    }
+    const self = fileURLToPath(import.meta.url);
+    const passthru = stripSemiSpacePins(process.execArgv).filter((a) => a !== '--expose-gc');
+    const args = ['--expose-gc', '--min-semi-space-size=4', '--max-semi-space-size=4',
+        ...passthru, self, ...process.argv.slice(2)];
+    const child = spawn(process.execPath, args,
+        { stdio: 'inherit', env: { ...process.env, [TORTURE_REEXEC]: '1' } });
+    const forward = (sig) => { try { child.kill(sig); } catch { /* child already gone */ } };
+    process.on('SIGINT', forward);
+    process.on('SIGTERM', forward);
+    const { code, signal } = await new Promise((resolve) =>
+        child.on('close', (c, s) => resolve({ code: c, signal: s })));
+    process.off('SIGINT', forward);
+    process.off('SIGTERM', forward);
+    if (signal) { process.kill(process.pid, signal); return false; }  // re-raise, don't run
+    process.exit(code === null ? 1 : code);
+}
+
 // Module-scope release: closes over NOTHING (no reference to any tracked heap),
 // so it never defeats finalization -- the held-value contract (torture-harness).
 function noopRelease() {}
@@ -55,6 +99,27 @@ async function main() {
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
     const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } = await import('../LogN.js');
+
+    // Minor-GC (scavenge) counter for the G9 gate: transient boxes are young and
+    // scavenged, so a scavenge delta is the instrument that sees them (measureAllocs
+    // measures RETAINED bytes and cannot). Passive; deltas are read only in countG9.
+    const { PerformanceObserver, constants } = await import('node:perf_hooks');
+    let _g9minor = 0;
+    const _g9obs = new PerformanceObserver((list) => {
+        const es = list.getEntries();
+        for (let i = 0; i < es.length; i++) { const d = es[i].detail; if (d && d.kind === constants.NODE_PERFORMANCE_GC_MINOR) _g9minor++; }
+    });
+    _g9obs.observe({ entryTypes: ['gc'] });
+    function g9MinorNow() { return _g9minor; }
+
+    // SegmentTree 1D F4 (segGcd) is NOT gated here: torture's multi-phase single process
+    // tiers SegmentTree.update/query into a state that optimizes the sum-fold frac path
+    // to a non-boxing Float64 store, and the reading is extremely tier-sensitive (probed
+    // 0 / 61 / 253 depending on prior fold-usage history) -- not a reliable gate. F4 on a
+    // 1D SegmentTree is caught AUTHORITATIVELY by the Kinds gate (the seg + noinline
+    // shards, a fresh process per member: 146 / 69, RED, deterministic 3x). torture's G9
+    // still proves F4 via SegmentTree2D.query and PST.update (same segGcd machinery,
+    // reliably RED here), plus F3 (LCT) and F10 (Treap).
 
     const CYCLES = 4096;    // retention churn
     const HOT = 2000000;    // steady-state ops
@@ -1120,6 +1185,74 @@ async function main() {
         lctk = (lctk + 1) | 0;
     };
 
+    // ---- G9: frac + p31 value-fill lanes, MINOR-GC gated (stage G, v1.4.0) --
+    // The 1.3.0 audit's boxing defects fire only when a NON-Smi double crosses a
+    // fold: F3 (LinkCutTree _pull), F4 (SegmentTree / SegmentTree2D / PersistentSeg-
+    // Tree segGcd), F10 (Treap successor, WaveletTree quantile). Every prior torture
+    // input is a `& 0xffff` Smi, so those defects were invisible here. The box is
+    // TRANSIENT (a young HeapNumber, scavenged), so measureAllocs (RETAINED bytes)
+    // reads ~0 for it -- the WRONG instrument. These lanes are gated by a MINOR-GC
+    // (scavenge) count over a fixed window instead (see the g9Gate loop below), with
+    // the S7k per-lane k budget: a clean int lane reads ~0, a one-box control reads far
+    // above the k=0 ZERO budget, WaveletTree.quantile's single S7 return box PASSES its
+    // k=1 budget, and the multi-box F3 / F4 / F10 frac / p31 lanes read hundreds -> RED
+    // on 1.3.0 (the expected stage-G red). Ordered-map lanes are KEYED by the kind input
+    // (F10 blindness fix); the SegmentTree lanes are INT-warmed first (else the
+    // monomorphic-frac path optimizes to 0 in torture and is blind to F4).
+    const g9Frac = new Float64Array(4096);
+    const g9P31 = new Float64Array(4096);
+    const g9Int = new Float64Array(4096);
+    for (let gi = 0; gi < 4096; gi++) { const s = (gi * 2654435761 >>> 0) & 0xffff; g9Int[gi] = s; g9Frac[gi] = s + 0.37; g9P31[gi] = 2 ** 31 + s; }
+    const G9MASK = 4095;
+    let g9k = 0, g9acc = 0;
+
+    // A one-box control (teeth): exactly one HeapNumber per op. MUST exceed the
+    // scavenge budget, proving the minor-GC instrument can see a single box.
+    const g9Box = [{}];
+    const stepG9OneBox = () => { g9Box[0] = g9Frac[g9k & G9MASK]; g9acc = (g9acc + (g9Box[0] | 0)) | 0; g9k = (g9k + 1) | 0; };
+    // A clean int control: no double crosses a fold. MUST stay at ~0.
+    const stepG9Clean = () => { g9acc = (g9acc + (g9Int[g9k & G9MASK] | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+    // LinkCutTree (F3): setValue + at over a frac / p31 path.
+    function g9MakeLct(vals) {
+        const t = new LinkCutTree(4096, 'sum');
+        for (let i = 0; i < 4096; i++) t.setValue(i, vals[i]);
+        for (let i = 1; i < 4096; i++) t.link(i, i - 1);
+        return t;
+    }
+    const g9LctFrac = g9MakeLct(g9Frac), g9LctP31 = g9MakeLct(g9P31);
+    // setValue only (k=1: one double ARG). Do NOT also read at() -- that would cross a
+    // second double (a k=2 lane) while the report declares k=1 (nit b).
+    const stepG9LctFracSetValue = () => { g9LctFrac.setValue(g9k & G9MASK, g9Frac[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9LctP31SetValue = () => { g9LctP31.setValue(g9k & G9MASK, g9P31[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9LctFracPathAgg = () => { g9acc = (g9acc + (g9LctFrac.pathAggregate(g9k & G9MASK, (g9k * 3 + 7) & G9MASK) | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+
+    // SegmentTree2D (F4): rectangle query over a frac / p31 grid.
+    function g9MakeSt2(vals) { const s = new SegmentTree2D(64, 64, 'sum'); for (let r = 0; r < 64; r++) for (let c = 0; c < 64; c++) s.update(r, c, vals[(r * 64 + c) & G9MASK]); return s; }
+    const g9St2Frac = g9MakeSt2(g9Frac), g9St2P31 = g9MakeSt2(g9P31);
+    const stepG9St2FracQuery = () => { const r = g9k & 63, c = (g9k >> 6) & 63; g9acc = (g9acc + (g9St2Frac.query(r, c, r + 8 < 64 ? r + 8 : 63, c + 8 < 64 ? c + 8 : 63) | 0)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9St2P31Query = () => { const r = g9k & 63, c = (g9k >> 6) & 63; g9acc = (g9acc + (g9St2P31.query(r, c, r + 8 < 64 ? r + 8 : 63, c + 8 < 64 ? c + 8 : 63) | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+    // PersistentSegTree (F4): path-copy update over a frac / p31 seed.
+    function g9MakePst(vals) { const seed = new Float64Array(4096); for (let i = 0; i < 4096; i++) seed[i] = vals[i]; return PersistentSegTree.build(seed, 4096, 'sum'); }
+    const g9PstFrac = g9MakePst(g9Frac), g9PstP31 = g9MakePst(g9P31);
+    const stepG9PstFracUpdate = () => { if (g9PstFrac.versions >= g9PstFrac.versionCapacity) g9PstFrac.clear(); g9acc = (g9acc + (g9PstFrac.update(g9PstFrac.versions - 1, g9k & G9MASK, g9Frac[g9k & G9MASK]) | 0)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9PstP31Update = () => { if (g9PstP31.versions >= g9PstP31.versionCapacity) g9PstP31.clear(); g9acc = (g9acc + (g9PstP31.update(g9PstP31.versions - 1, g9k & G9MASK, g9P31[g9k & G9MASK]) | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+    // Treap (F10): successor over KIND-VALUED KEYS (fill set(v, i), query successor(v)).
+    // Dense integer keys always return a Smi and hide the box -- key with the kind.
+    function g9MakeTreap(vals) { const t = new Treap(8192); for (let i = 0; i < 4096; i++) t.set(vals[i], i); return t; }
+    const g9TrFrac = g9MakeTreap(g9Frac), g9TrP31 = g9MakeTreap(g9P31);
+    const stepG9TreapFracSucc = () => { const v = g9TrFrac.successor(g9Frac[g9k & G9MASK]); g9acc = (g9acc + (v === undefined ? 0 : v | 0)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9TreapP31Succ = () => { const v = g9TrP31.successor(g9P31[g9k & G9MASK]); g9acc = (g9acc + (v === undefined ? 0 : v | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+    // WaveletTree (F10): quantile over a frac / p31 sequence.
+    function g9MakeWt(vals) { const src = new Float64Array(4096); for (let i = 0; i < 4096; i++) src[i] = vals[i]; return WaveletTree.build(src); }
+    const g9WtFrac = g9MakeWt(g9Frac), g9WtP31 = g9MakeWt(g9P31);
+    const stepG9WtFracQuantile = () => { const lo = g9k & 2047; g9acc = (g9acc + (g9WtFrac.quantile(lo, lo + 50, 3) | 0)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9WtP31Quantile = () => { const lo = g9k & 2047; g9acc = (g9acc + (g9WtP31.quantile(lo, lo + 50, 3) | 0)) | 0; g9k = (g9k + 1) | 0; };
+
     // CONTROL (teeth): a lane that MUST allocate RETAINED bytes -- measureAllocs
     // reports per-call RETAINED heap growth (min over batches), so the control
     // pushes into a live array that grows every call. The instrument has to report
@@ -1171,6 +1304,73 @@ async function main() {
         const b = Math.max(0, Math.round(bpc));
         if (b > allocBytes) allocBytes = b;
     }
+    // G9: minor-GC (scavenge) gate over the frac / p31 lanes. countG9 runs a fixed
+    // window and returns the scavenge delta (transient boxes are young -> scavenged,
+    // so a scavenge count is the RIGHT instrument, unlike measureAllocs). The clean
+    // int control must stay <= G9_BUDGET and the one-box control must EXCEED it (the
+    // gate has teeth); a frac / p31 lane that exceeds it is RED. The window is large
+    // enough that the pinned new-space (the bootstrap re-execs to pin it) separates 0
+    // from a box cleanly.
+    const G9_ITERS = 4000000;          // large enough that the pinned new-space
+    async function countG9(step) {
+        for (let i = 0; i < 100000; i++) step();            // warm-up (in-process)
+        await new Promise((r) => setTimeout(r, 50));
+        const lo = g9MinorNow();
+        for (let i = 0; i < G9_ITERS; i++) step();
+        await new Promise((r) => setTimeout(r, 50));
+        return g9MinorNow() - lo;
+    }
+    // The one-box control calibrates the scale; re-measured after the lanes for drift.
+    const g9CleanScav = await countG9(stepG9Clean);
+    const g9OneBox = await countG9(stepG9OneBox);
+    // S7k budget: k=0 is the ROADMAP ZERO (2) so any box on a clean path fails; k>=1 is
+    // floor((k + 0.5) * oneBox), so box k+1 always fails (the corrected amendment). torture
+    // is a NORMAL-tier process (no --max-inlined-bytecode-size=0), so per-shard k uses the
+    // normal count. WaveletTree.quantile returns one double (k=1) -> its single box PASSES;
+    // the multi-box F3 / F4 / F10 lanes read >> k and FAIL.
+    const G9_ZERO = 2;                            // the k=0 budget (ROADMAP ZERO)
+    const g9Budget = (k) => (k === 0 ? G9_ZERO : Math.floor((k + 0.5) * g9OneBox));
+    // DEFERRED (ROADMAP 8.4), the SAME policy + F-ids as test/perf/Kinds.mjs DEFERRED, keyed the
+    // same way. torture is a normal-tier process, so only the F10 Treap.successor lanes are still
+    // RED here (F3 / F4 closed LCT / 2D / PST). A deferred-RED lane PASSES and is printed as DEFER;
+    // a deferred lane that turns GREEN FAILS ("remove from DEFERRED"), so the list only shrinks.
+    const G9_DEFERRED = new Map([
+        ['Treap.successor[frac]', 'F10'], ['Treap.successor[p31]', 'F10'],
+    ]);
+    const g9Report = [];
+    let g9Red = 0;
+    let g9Undefer = 0;                            // deferred lanes that went GREEN (must be removed)
+    for (const [name, step, k] of [
+        ['LCT.setValue[frac]', stepG9LctFracSetValue, 1], ['LCT.setValue[p31]', stepG9LctP31SetValue, 1],
+        ['LCT.pathAggregate[frac]', stepG9LctFracPathAgg, 1],
+        ['SegmentTree2D.query[frac]', stepG9St2FracQuery, 1], ['SegmentTree2D.query[p31]', stepG9St2P31Query, 1],
+        ['PST.update[frac]', stepG9PstFracUpdate, 1], ['PST.update[p31]', stepG9PstP31Update, 1],
+        ['Treap.successor[frac]', stepG9TreapFracSucc, 1], ['Treap.successor[p31]', stepG9TreapP31Succ, 1],
+        ['WaveletTree.quantile[frac]', stepG9WtFracQuantile, 1], ['WaveletTree.quantile[p31]', stepG9WtP31Quantile, 1]]) {
+        const scav = await countG9(step);
+        const budget = g9Budget(k);
+        const red = scav > budget;
+        const fid = G9_DEFERRED.get(name);
+        if (fid) {
+            if (red) g9Report.push(name + '(k' + k + ')=' + scav + '/' + budget + '(DEFER ' + fid + ')');
+            else { g9Undefer++; g9Report.push(name + '(k' + k + ')=' + scav + '/' + budget + '(UNDEFER ' + fid + ' -- GREEN, remove)'); }
+        } else {
+            if (red) g9Red++;
+            g9Report.push(name + '(k' + k + ')=' + scav + '/' + budget + (red ? '(RED)' : ''));
+        }
+    }
+    // Blocker 5: re-measure the one-box control AFTER the lanes; fail on > 25% scale drift.
+    const g9OneBoxLate = await countG9(stepG9OneBox);
+    const g9Drift = Math.abs(g9OneBoxLate - g9OneBox);
+    const g9DriftOk = g9Drift <= 0.25 * g9OneBox;
+    // Flag assert (stage-G QA item 3): G9 is only trustworthy on a pinned new-space. The
+    // re-exec above guarantees it, but assert the EFFECTIVE (last-value) flags here so a
+    // future caller that bypasses the bootstrap fails closed instead of silently drifting.
+    const g9FlagsOk = semiSpacePinned(parseFlags(process.execArgv));
+    // The gate has teeth iff the one-box control exceeds the k=0 budget AND the clean
+    // int control does not. If either fails, the G9 instrument is untrustworthy.
+    const g9TeethOk = g9OneBox > G9_ZERO && g9CleanScav <= G9_ZERO && g9DriftOk;
+    if (g9acc === 0x7fffffff) throw new Error('unreachable'); // keep g9acc live
     if (racc === 0x7fffffff) throw new Error('unreachable'); // keep racc live
     if (facc === 0x7fffffff) throw new Error('unreachable'); // keep facc live
     if (feAcc === 0x7fffffff) throw new Error('unreachable'); // keep feAcc live
@@ -1692,8 +1892,13 @@ async function main() {
     const abOk = abDelta <= 0;
 
     // ---- verdict + GATE line ----------------------------------------------
+    // G9 gate: the minor-GC instrument must have teeth (one-box control trips, clean
+    // int control does not), and NO frac / p31 boxing lane may exceed the budget. On
+    // 1.3.0 the F3 / F4 / F10 lanes DO exceed it, so g9Ok is false and torture is RED
+    // -- the expected stage-G red (the boxing is not yet fixed; that is stage A / M).
+    const g9Ok = g9FlagsOk && g9TeethOk && g9Red === 0 && g9Undefer === 0;
     const ok = report.ok && live === 0 && leaks.length === 0 &&
-        findings.length === 0 && allocOk && controlOk && abOk && conservationOk;
+        findings.length === 0 && allocOk && controlOk && abOk && conservationOk && g9Ok;
 
     console.log(
         'GATE leak=size ' + live + '/0 findings=' + findings.length +
@@ -1705,6 +1910,11 @@ async function main() {
         ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree + LinkCutTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
+    // G9: frac / p31 value-fill lanes, MINOR-GC gated, S7k per-lane k budgets.
+    console.log('G9 scavenge gate (S7k; flags=' + (g9FlagsOk ? 'ok' : 'UNPINNED') + ' zero=' + G9_ZERO + ' clean=' + g9CleanScav + ' oneBox=' + g9OneBox +
+        '->' + g9OneBoxLate + ' drift=' + (g9DriftOk ? 'ok' : 'DRIFT') + ' teeth=' + (g9TeethOk ? 'ok' : 'BLIND') +
+        ' red=' + g9Red + '/' + g9Report.length + '): ' + g9Report.join(' '));
+
     if (!ok) {
         for (const v of report.violations) {
             console.error('  violation ' + v.metric + ' limit=' + v.limit + ' actual=' + v.actual);
@@ -1715,8 +1925,23 @@ async function main() {
         if (!controlOk) console.error('  control lane read ' + controlBytes + ' B/op (expected > 0 -- instrument is blind)');
         if (!abOk) console.error('  arrayBuffers growth ' + abDelta + ' (expected <= 0)');
         if (!conservationOk) console.error('  SkipList conservation invariant broke (activeSlots + freeListLength !== capacity)');
+        if (!g9FlagsOk) console.error('  G9 new-space UNPINNED (--min/--max-semi-space-size=4 missing) -- run via `node --expose-gc test/torture.mjs` (self-pins) or `npm run torture`');
+        if (!g9TeethOk) console.error('  G9 minor-GC instrument BLIND/DRIFT (clean=' + g9CleanScav + ' oneBox=' + g9OneBox + '->' + g9OneBoxLate + ' zero=' + G9_ZERO + ')');
+        if (g9Red > 0) console.error('  G9 boxing lanes RED (' + g9Red + '/' + g9Report.length + ', S7k budget exceeded): ' + g9Report.filter((r) => r.indexOf('(RED)') !== -1).join(' '));
         process.exitCode = 1;
     }
 }
 
-main();
+if (await pinnedBootstrap()) {
+    // `--bootstrap-only` (a SCRIPT arg after the file path, forwarded through the re-exec):
+    // a repo-only probe for the harness self-test to prove the re-exec RESOLVES to a pinned
+    // child quickly, without running the multi-minute gate. It FAILS CLOSED -- it exits with
+    // the sentinel 3 (NEVER 0), so a probe run can never read as a green gate, and it is
+    // gated on the explicit argv TOKEN (not an env var), so no inherited/CI env can turn a
+    // real `node ... test/torture.mjs` into a fake pass.
+    if (process.argv.slice(2).includes('--bootstrap-only')) {
+        process.stdout.write('BOOTSTRAP pinned=' + semiSpacePinned(parseFlags(process.execArgv)) + '\n');
+        process.exit(3);
+    }
+    main();
+}

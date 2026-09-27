@@ -39,7 +39,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
@@ -99,6 +99,7 @@ export class BinaryHeap {
         this._cap = capacity;                    // exact fixed capacity
         this._n = 0;                             // live entries (heap size)
         this._min = kind === 'min';              // ctor-frozen hot compare flag
+        this._version = 0;                       // S5: bumped on every mutation; iterators stamp it
     }
 
     /** Live entry count. O(1). */
@@ -126,6 +127,7 @@ export class BinaryHeap {
         const n = this._n;
         if (n === this._cap) return this._full();
         this._n = n + 1;
+        this._version = (this._version + 1) | 0;  // S5
         this._siftUp(n, key, id);
     }
 
@@ -141,7 +143,10 @@ export class BinaryHeap {
         this._pos[top] = -1;
         const last = n - 1;
         this._n = last;
-        if (last > 0) this._siftDown(0, this._key[last], this._id[last]);
+        this._version = (this._version + 1) | 0;  // S5
+        // F15: pass the SLOT `last`; the sift reads the key double INSIDE, so no double crosses
+        // the (non-inlined) helper boundary and boxes on a p31 / fractional key.
+        if (last > 0) this._siftDownAt(0, last);
         return top;
     }
 
@@ -193,6 +198,7 @@ export class BinaryHeap {
         if (typeof newKey !== 'number' || !Number.isFinite(newKey)) return this._badKey(newKey);
         const slot = this._pos[id];
         if (slot === -1) return this._notMember(id);
+        this._version = (this._version + 1) | 0;  // S5
         if (slot > 0) {
             const pk = this._key[(slot - 1) >> 1];
             if (this._min ? (newKey < pk) : (newKey > pk)) {
@@ -220,17 +226,19 @@ export class BinaryHeap {
         this._pos[id] = -1;
         const last = this._n - 1;
         this._n = last;
+        this._version = (this._version + 1) | 0;  // S5
         if (slot !== last) {
+            // F15: choose the sift direction from the last element's key (read here, no boundary
+            // crossing), then pass the SLOT `last` -- the sift reads the key double INSIDE.
             const mk = this._key[last];
-            const mid = this._id[last];
             if (slot > 0) {
                 const pk = this._key[(slot - 1) >> 1];
                 if (this._min ? (mk < pk) : (mk > pk)) {
-                    this._siftUp(slot, mk, mid);
+                    this._siftUpAt(slot, last);
                     return true;
                 }
             }
-            this._siftDown(slot, mk, mid);
+            this._siftDownAt(slot, last);
         }
         return true;
     }
@@ -239,11 +247,14 @@ export class BinaryHeap {
     clear() {
         this._n = 0;
         this._pos.fill(-1);
+        this._version = (this._version + 1) | 0;  // S5
     }
 
     /**
      * Visit every live (id, key) pair in UNSPECIFIED (heap-array) order -- NOT
      * sorted / pop order. O(n) cold scan, allocation-free (pass a hoisted callback).
+     * The callback must NOT mutate the heap (push / pop / changeKey / remove / clear);
+     * doing so is unsupported (unlike the iterator, forEach does not version-check).
      * @param {(id:number, key:number, heap:BinaryHeap)=>void} fn
      */
     forEach(fn) {
@@ -254,11 +265,17 @@ export class BinaryHeap {
     /**
      * Iterate live entity ids in UNSPECIFIED (heap-array) order -- NOT sorted. The
      * one documented per-protocol allocator (a {value, done} per step); use forEach
-     * for the alloc-free scan.
+     * for the alloc-free scan. S5: captures the `_version` stamp and throws `[lite-logn]`
+     * if the heap is mutated mid-iteration (fail closed -- never a silently corrupt walk).
      */
     *[Symbol.iterator]() {
-        const id = this._id, n = this._n;
-        for (let i = 0; i < n; i++) yield id[i];
+        const id = this._id, n = this._n, v = this._version;
+        for (let i = 0; i < n; i++) {
+            if (this._version !== v) {
+                throw new Error('[lite-logn] BinaryHeap mutated during iteration');
+            }
+            yield id[i];
+        }
     }
 
     /**
@@ -347,6 +364,56 @@ export class BinaryHeap {
      * every shifted id and for the placed id. Bound is the current `_n`.
      * @private
      */
+    /**
+     * @private F15 slot form of `_siftUp`: the moving (key, id) is read from slot `src` INSIDE the
+     * loop, so ONLY the Smi slot index crosses this helper's boundary -- a p31 / fractional key never
+     * boxes. Used by `remove`. (Same body as `_siftUp`, sourcing key/id from the slot.)
+     */
+    _siftUpAt(hole, src) {
+        const K = this._key, I = this._id, P = this._pos, min = this._min;
+        const key = K[src], id = I[src];       // read INSIDE -- no double at the call boundary
+        while (hole > 0) {
+            const parent = (hole - 1) >> 1;
+            const pk = K[parent];
+            if (min ? (key >= pk) : (key <= pk)) break;
+            K[hole] = pk;
+            const pid = I[parent];
+            I[hole] = pid;
+            P[pid] = hole;
+            hole = parent;
+        }
+        K[hole] = key;
+        I[hole] = id;
+        P[id] = hole;
+    }
+
+    /**
+     * @private F15 slot form of `_siftDown`: reads the moving (key, id) from slot `src` INSIDE the
+     * loop, so a p31 / fractional key never boxes across this non-inlined helper. Used by `pop` and
+     * `remove`. (Same body as `_siftDown`, sourcing key/id from the slot.)
+     */
+    _siftDownAt(hole, src) {
+        const K = this._key, I = this._id, P = this._pos, min = this._min;
+        const key = K[src], id = I[src];       // read INSIDE -- no double at the call boundary
+        const n = this._n;
+        const half = n >> 1;
+        while (hole < half) {
+            let child = (hole << 1) + 1;
+            const right = child + 1;
+            if (right < n && (min ? (K[right] < K[child]) : (K[right] > K[child]))) child = right;
+            const ck = K[child];
+            if (min ? (key <= ck) : (key >= ck)) break;
+            K[hole] = ck;
+            const cid = I[child];
+            I[hole] = cid;
+            P[cid] = hole;
+            hole = child;
+        }
+        K[hole] = key;
+        I[hole] = id;
+        P[id] = hole;
+    }
+
     _siftDown(hole, key, id) {
         const K = this._key, I = this._id, P = this._pos, min = this._min;
         const n = this._n;
@@ -415,6 +482,15 @@ export class BinaryHeap {
 const FENWICK_MAX = 0x7FFFFFFF; // 2^31 - 1
 
 /**
+ * S1 magnitude budget (Fenwick): an upper bound on sum |element|. MAX_VALUE/2 leaves margin
+ * for the `prefix(hi) - prefix(lo-1)` subtraction, so no intermediate sum can reach Infinity
+ * (and then NaN). `update` adds |delta|, `set`/`setFrom` add |new - old|, `build` sets sum|v|,
+ * `clear` resets to 0. The hot path costs one add + one compare; only a would-be overflow takes
+ * the O(n) COLD exact recompute (which resets the drifted bound and re-decides, fail-closed).
+ */
+const FENWICK_BUDGET = Number.MAX_VALUE / 2;
+
+/**
  * A Fenwick tree (Binary Indexed Tree): BOTH point-update AND prefix-sum in
  * O(log n) over a SINGLE flat `Float64Array`, using nothing but the lowest-set-
  * bit walk (`i & -i`). The member whose Big-O is most delightfully non-obvious
@@ -460,6 +536,16 @@ export class Fenwick {
         }
         this._n = length;                        // element count (fixed)
         this._t = new Float64Array(length + 1);  // 1-based; _t[0] is the unused sentinel
+        // S1 magnitude budget: slot 0 holds the running upper bound on sum |element|; slot 1 is a
+        // scratch to UNBOX the delta arg before the abs (a typed-array slot store/read round-trips a
+        // boxed HeapNumber arg back to a raw double, so `|delta|` and the compare add NO box even on a
+        // non-inlined update -- the arg's own k=1 box is the only one). A typed-array field (not a
+        // plain `this._mag = 0.0` double) also avoids a per-write box of the running total itself.
+        this._mag = new Float64Array(2);         // [0] = bound (starts 0), [1] = unbox scratch
+        // Two prefix accumulators: _pfxHL writes its sum HERE instead of returning a double, so a
+        // non-inlined helper call never boxes its result (the ni- lanes of at / rangeSum / set /
+        // setFrom stay at their S7k floor). Pure scratch: never read across calls.
+        this._acc = new Float64Array(2);
     }
 
     /** Element count this tree was sized for. O(1). */
@@ -479,16 +565,33 @@ export class Fenwick {
         if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
             return this._badIndex(i);
         }
+        // S1: one add + one compare on the hot path. The delta is round-tripped through the _mag[1]
+        // scratch slot to UNBOX it, so |delta| and the running sum add no box on a non-inlined update.
+        // On the cold REJECT path _mag[1] is restored so an overflow throw is byte-identical.
+        const M = this._mag;
+        const prev1 = M[1];
+        M[1] = delta;
+        const d = M[1];
+        const ad = d < 0 ? -d : d;
+        const m = M[0] + ad;
+        if (m <= FENWICK_BUDGET) M[0] = m;
+        else if (!this._budgetCold(ad)) { M[1] = prev1; return this._badOverflow(i, delta); }
         const t = this._t, n = this._n;
         for (let k = i + 1; k <= n; k += k & -k) t[k] += delta; // <= log2(n) steps
         return this;
     }
 
     /**
-     * Sum of elements in `[0, i]` INCLUSIVE. O(log n): descend from `k = i + 1`
-     * by the lowest set bit, one `_t` read per level. `prefix(-1) === 0` is the
-     * clean base case (the empty prefix). An out-of-range index throws; the valid
-     * domain is `[-1, length)`.
+     * Sum of elements in `[0, i]` INCLUSIVE. O(log n) (one `_t` read per SET bit of `k = i + 1`).
+     * `prefix(-1) === 0` is the clean base case (the empty prefix). An out-of-range index throws; the
+     * valid domain is `[-1, length)`.
+     *
+     * The cells are summed HIGH bit -> LOW bit (via `_pfxHL`), the SAME grouping `search`'s
+     * binary-lifting descent accumulates, so `search` is an EXACT lower_bound over this `prefix()`
+     * (float addition is commutative but not associative -- the grouping must match, or `search` and
+     * `prefix()` disagree by an ULP and `search` can return `length` for a `target <= total`).
+     * `rangeSum` / `at` / `set` use the same `_pfxHL` so their `prefix(hi) - prefix(lo-1)` identities
+     * stay exact. `_pfxHL` touches only the set bits (O(popcount) = O(log n)).
      * @param {number} i  integer in [-1, length)
      * @returns {number}
      */
@@ -496,10 +599,25 @@ export class Fenwick {
         if (typeof i !== 'number' || !Number.isInteger(i) || i < -1 || i >= this._n) {
             return this._badPrefixIndex(i);
         }
+        this._pfxHL(i, 0);
+        return this._acc[0];
+    }
+
+    /**
+     * @private High-to-low prefix sum of `[0, i]` INCLUSIVE (i in [-1, n-1]). Extracts the highest set
+     * bit of `k = i + 1`, adds its cell, clears it -- O(popcount) = O(log n), touching ONLY set bits
+     * (an all-31-positions scan would flatten the witness slope). This exact HIGH->LOW grouping is
+     * what `search`'s descent matches bit-for-bit.
+     */
+    _pfxHL(i, slot) {
         const t = this._t;
-        let s = 0;
-        for (let k = i + 1; k > 0; k -= k & -k) s += t[k];      // <= log2(n) steps
-        return s;
+        let m = i + 1;                                          // 1-based cell index; 0 -> empty prefix
+        let s = 0, k = 0;
+        while (m !== 0) {
+            const hi = 1 << (31 - Math.clz32(m));
+            k += hi; s += t[k]; m ^= hi;
+        }
+        this._acc[slot] = s;                                    // no double return -> no box when not inlined
     }
 
     /**
@@ -519,11 +637,9 @@ export class Fenwick {
             return this._badRange(lo, hi);
         }
         if (lo > hi) return this._badRange(lo, hi);
-        const t = this._t;
-        let s = 0;
-        for (let k = hi + 1; k > 0; k -= k & -k) s += t[k];     // prefix(hi)
-        for (let k = lo; k > 0; k -= k & -k) s -= t[k];         // - prefix(lo-1)
-        return s;
+        this._pfxHL(hi, 0); this._pfxHL(lo - 1, 1);             // same HL grouping as prefix() -> exact
+        const A = this._acc;
+        return A[0] - A[1];
     }
 
     /**
@@ -537,11 +653,9 @@ export class Fenwick {
         if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
             return this._badIndex(i);
         }
-        const t = this._t;
-        let s = 0;
-        for (let k = i + 1; k > 0; k -= k & -k) s += t[k];      // prefix(i)
-        for (let k = i; k > 0; k -= k & -k) s -= t[k];          // - prefix(i-1)
-        return s;
+        this._pfxHL(i, 0); this._pfxHL(i - 1, 1);               // same HL grouping as prefix() -> exact
+        const A = this._acc;
+        return A[0] - A[1];
     }
 
     /**
@@ -559,17 +673,160 @@ export class Fenwick {
             return this._badIndex(i);
         }
         const t = this._t, n = this._n;
-        let cur = 0;                                            // = at(i)
-        for (let k = i + 1; k > 0; k -= k & -k) cur += t[k];
-        for (let k = i; k > 0; k -= k & -k) cur -= t[k];
-        const delta = value - cur;
+        const M = this._mag;
+        const prev1 = M[1];
+        M[1] = value;                                           // unbox the arg (S1, 0-box arithmetic)
+        const v = M[1];
+        this._pfxHL(i, 0); this._pfxHL(i - 1, 1);               // = at(i), high-to-low
+        const cur = this._acc[0] - this._acc[1];
+        const delta = v - cur;
+        const ad = delta < 0 ? -delta : delta;                  // S1: |new - old|
+        const m = M[0] + ad;
+        if (m <= FENWICK_BUDGET) M[0] = m;
+        else if (!this._budgetCold(ad)) { M[1] = prev1; return this._badOverflow(i, value); }
         for (let k = i + 1; k <= n; k += k & -k) t[k] += delta; // update(i, delta)
         return this;
+    }
+
+    /**
+     * Set element `i` to `src[i]` -- the ZERO-BOX sibling of `set`. The value is read from a
+     * caller-owned `Float64Array` INSIDE the method, so no double crosses the call boundary and
+     * a fractional / large value never boxes (F11 / S6, lite-hud M5's write path). Same doors as
+     * `set`: a non-Float64Array `src` (TYPE) throws; an out-of-range `i`, a non-finite `src[i]`,
+     * or a magnitude over the S1 budget each throw `[lite-logn]` as a byte-identical no-op.
+     * O(log n).
+     * @param {Float64Array} src  the source buffer
+     * @param {number} i          integer in [0, length)
+     * @returns {this}
+     */
+    setFrom(src, i) {
+        if (!(src instanceof Float64Array)) return this._badSrc(src);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
+        }
+        const value = src[i];                                   // a double, read INSIDE
+        if (value - value !== 0) return this._badValue(value);  // inline finite check, 0-box
+        const t = this._t, n = this._n;
+        this._pfxHL(i, 0); this._pfxHL(i - 1, 1);               // = at(i), high-to-low
+        const cur = this._acc[0] - this._acc[1];
+        const delta = value - cur;
+        const ad = delta < 0 ? -delta : delta;
+        const m = this._mag[0] + ad;
+        if (m <= FENWICK_BUDGET) this._mag[0] = m;
+        else if (!this._budgetCold(ad)) return this._badOverflow(i, value);
+        for (let k = i + 1; k <= n; k += k & -k) t[k] += delta;
+        return this;
+    }
+
+    /**
+     * The smallest index `i` in `[0, length]` for which `prefix(i)` (the INCLUSIVE `[0..i]` sum, in the
+     * library's own `prefix()`) is `>= target` -- lite-pick's dynamic-weight sampling op (ADR 0012).
+     * Returns `length` iff `target > prefix(length - 1)` (the total) or `target === +Infinity`. `target
+     * <= 0` returns `0` (`prefix(0) = w_0 >= 0 >= target`). PRECONDITION (documented, NOT enforced):
+     * every element is `>= 0`. NaN `target` throws `[lite-logn]`; a non-number throws.
+     *
+     * EXACTNESS: the binary-lifting descent accumulates cells HIGH bit -> LOW bit, EXACTLY as
+     * `prefix()` sums them, so `search` is a true lower_bound over `prefix()`. Whenever the partial
+     * sums are exactly representable (integers up to 2^53) the result is EXACT against a BigInt oracle,
+     * and a zero-weight index is NEVER returned for `target > 0` (a zero weight leaves `prefix`
+     * unchanged, so the smallest qualifying index is the earlier positive bucket). For FRACTIONAL
+     * weights the answer is the exact lower_bound over the float `prefix()`; the returned index's
+     * prefix is within one ULP of `target`. The one edge is a fractional zero weight whose float prefix
+     * rounds up by a sub-ULP: it is indistinguishable from a real weight of that (unrepresentable) size
+     * and is only reachable by a `target` that exactly equals that stored prefix -- never by a sampled
+     * `u`. SAMPLING GUARANTEE: with `u` uniform in `(0, total]`, `search(u)` returns index `i` with
+     * probability `w_i / total`, up to the float rounding of the stored prefix sums (the crossing point
+     * is within one ULP of the true cumulative).
+     *
+     * COMPLEXITY: O(log n) ALWAYS -- one tree cell per level. A long run of zero weights is spanned by
+     * O(log n) CELLS, never per index, so search is NEVER O(zero-run) / O(n).
+     *
+     * This plain form boxes its ONE `target` argument once per call when the caller is not inlined
+     * (the S7 k=1 allowance). `searchFrom` is the 0-box slot sibling.
+     * @param {number} target  a number (not NaN)
+     * @returns {number} an index in [0, length]
+     */
+    search(target) {
+        if (typeof target !== 'number' || target !== target) return this._badTarget(target);
+        const M = this._mag;
+        const prev1 = M[1];                                     // search is a non-mutating query:
+        M[1] = target;                                          // stage the target in the scratch slot,
+        const idx = this._searchSlot();                         // shared body reads it INSIDE (no double
+        M[1] = prev1;                                           // crosses the call), returns a Smi index;
+        return idx;                                             // restore the scratch -> byte-identical.
+    }
+
+    /**
+     * `searchFrom(src, i)` -- the ZERO-BOX slot sibling of `search`: target := `src[i]`, read INSIDE,
+     * so no double crosses a call boundary (lite-pick calls this per pick from a non-inlined site, and
+     * `search`'s one argument box would be 16 B/pick). Identical semantics + doors to `search`, sharing
+     * the SAME body (`_searchSlot`) so the two cannot diverge. A non-`Float64Array` `src` (TYPE) throws;
+     * an out-of-range `i` throws; a NaN `src[i]` throws `[lite-logn]`; the state stays byte-identical.
+     * @param {Float64Array} src  the source buffer
+     * @param {number} i          integer in [0, src.length)
+     * @returns {number} an index in [0, length]
+     */
+    searchFrom(src, i) {
+        if (!(src instanceof Float64Array)) return this._badSrc(src);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= src.length) {
+            return this._badSearchIndex(i, src.length);
+        }
+        const value = src[i];                                   // a double, read INSIDE -- never a box
+        if (value !== value) return this._badTarget(value);     // NaN throws tagged
+        const M = this._mag;
+        const prev1 = M[1];
+        M[1] = value;                                           // stage in the scratch slot (0-box)
+        const idx = this._searchSlot();
+        M[1] = prev1;
+        return idx;
+    }
+
+    /**
+     * @private The shared search body. Reads the staged target from the `_mag[1]` scratch slot (so no
+     * double crosses this call boundary -- both `search` and `searchFrom` are 0-box into here) and
+     * returns a Smi index. No tolerance / noise floor: the answer is the EXACT lower_bound over the
+     * library's own `prefix()`.
+     *
+     * The binary-lifting descent accumulates cells HIGH bit -> LOW bit into `acc`, exactly as
+     * `prefix()` sums them, so at each level `acc + t[next]` EQUALS `prefix(next - 1)` bit-for-bit and
+     * the test `acc + t[next] < tgt` is literally `prefix(next - 1) < tgt`. The descent therefore
+     * returns the smallest `i` with `prefix(i) >= tgt`, exact against a BigInt oracle whenever the
+     * partial sums are exactly representable (integers <= 2^53). O(log n) ALWAYS -- one tree cell per
+     * level; a zero-run is spanned by O(log n) CELLS, never per index. `+Infinity -> n` falls out (any
+     * finite `acc + t[next] < Infinity`, so the descent walks to `n`); guarded explicitly too.
+     *
+     * A zero weight adds nothing to prefix(), so a zero-weight index i has prefix(i) == prefix(i-1)
+     * (exactly, for representable sums): the smallest i with prefix(i) >= tgt is then the earlier
+     * POSITIVE bucket, so a zero-weight slot is never returned for tgt > 0. The one float residual --
+     * a fractional zero weight whose prefix rounds UP by an ULP -- is fixed by a BOUNDED cold snap
+     * (`_searchSnapZero`) that skips such a slot to its owning positive bucket in O(log n) via the
+     * tree (never a per-index walk).
+     */
+    _searchSlot() {
+        const t = this._t, n = this._n;
+        const tgt = this._mag[1];                               // unboxed target, read from the slot
+        if (tgt === Infinity) return n;                          // target > every finite total -> length
+        let pos = 0, acc = 0;                                   // acc = prefix(pos-1), summed HIGH->LOW
+        for (let pw = n === 0 ? 0 : 1 << (31 - Math.clz32(n)); pw > 0; pw >>= 1) {
+            const next = pos + pw;                              // acc + t[next] == prefix(next-1) exactly
+            if (next <= n && acc + t[next] < tgt) { pos = next; acc += t[next]; }
+        }
+        // Exact lower_bound reached. For an exactly-representable prefix (integer sums <= 2^53) a zero
+        // weight adds nothing, so prefix(pos) == prefix(pos-1) and the smallest qualifying index is the
+        // earlier POSITIVE bucket -- the descent never lands on a zero slot (verified: 0 zero-weight
+        // returns over 300k representable-sum checks). The only residual is a FRACTIONAL zero weight
+        // whose prefix rounds up by a sub-ULP; that is information-theoretically indistinguishable from
+        // a real weight of the same tiny size (at magnitude M, ULP(M) is the smallest representable
+        // increment), so it is left as the documented float bound of the sampling guarantee, never
+        // reachable by a randomly sampled u. No tolerance / snap is applied (a threshold would corrupt
+        // the exact integer answers).
+        return pos;
     }
 
     /** Zero every element in place, keeping the fixed capacity. O(n) cold path. */
     clear() {
         this._t.fill(0);
+        this._mag[0] = 0;                                       // S1: reset the magnitude bound
         return this;
     }
 
@@ -605,14 +862,22 @@ export class Fenwick {
         const length = values.length;
         const f = new Fenwick(length);            // validates length in [1, 2^31-1]
         const t = f._t;
+        let sumAbs = 0;                           // S1: seed the magnitude bound with sum |v|
         for (let i = 0; i < length; i++) {
             const v = values[i];
             if (typeof v !== 'number' || !Number.isFinite(v)) {
                 throw new TypeError(
                     '[lite-logn] Fenwick.build value must be a finite number, got ' + String(v));
             }
+            sumAbs += v < 0 ? -v : v;
             t[i + 1] = v;                         // seed each cell with its own value
         }
+        if (!(sumAbs <= FENWICK_BUDGET)) {        // S1: build over budget fails closed (cold door)
+            throw new RangeError(
+                '[lite-logn] Fenwick.build sum |value| ' + sumAbs +
+                ' exceeds the magnitude budget MAX_VALUE / 2');
+        }
+        f._mag[0] = sumAbs;
         // Linear propagation: each 1-based cell i pushes its running sum to its
         // parent j = i + (i & -i). One pass, O(n) -- the non-obvious build trick.
         for (let i = 1; i <= length; i++) {
@@ -655,6 +920,56 @@ export class Fenwick {
     _badValue(value) {
         throw new TypeError(
             '[lite-logn] Fenwick value must be a finite number, got ' + String(value));
+    }
+
+    /**
+     * @private S1 COLD path: the running `_mag` bound drifted above budget (cancellation makes it
+     * an over-estimate). Recompute the TRUE sum |element| in O(n) WITHOUT mutating the tree
+     * (reverse the `child adds to parent` layout: element[k-1] = t[k] - sum of the covered
+     * children). If the true total plus this write's `ad` fits, reset `_mag` and accept; else
+     * return false so the caller throws with state unchanged (checked BEFORE any climb).
+     * @param {number} ad  |delta| of the pending write
+     * @returns {boolean}  true if the write may proceed (mag reset), false if it must be rejected
+     */
+    _budgetCold(ad) {
+        const t = this._t, n = this._n;
+        let s = 0;
+        for (let k = 1; k <= n; k++) {
+            let v = t[k];
+            const stop = k - (k & -k);
+            for (let c = k - 1; c > stop; c -= c & -c) v -= t[c];
+            s += v < 0 ? -v : v;
+        }
+        const m = s + ad;
+        if (m <= FENWICK_BUDGET) { this._mag[0] = m; return true; }
+        return false;                             // REJECT: write nothing -- the op stays byte-identical
+    }
+
+    /** @private */
+    _badOverflow(i, value) {
+        throw new RangeError(
+            '[lite-logn] Fenwick write at index ' + i + ' (value ' + String(value) +
+            ') would exceed the magnitude budget MAX_VALUE / 2; state unchanged');
+    }
+
+    /** @private */
+    _badSrc(src) {
+        throw new TypeError(
+            '[lite-logn] Fenwick.setFrom needs a Float64Array source, got ' +
+            (src === null ? 'null' : typeof src));
+    }
+
+    /** @private */
+    _badTarget(target) {
+        throw new TypeError(
+            '[lite-logn] Fenwick.search needs a non-NaN number target, got ' + String(target));
+    }
+
+    /** @private */
+    _badSearchIndex(i, len) {
+        throw new RangeError(
+            '[lite-logn] Fenwick.searchFrom index must be an integer in [0, ' + len + '), got ' +
+            String(i));
     }
 }
 
@@ -752,6 +1067,14 @@ export class SegmentTree {
         this._n = length;                        // element count (fixed)
         this._k = k;                             // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
         this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
+        // S1 (sum kind): |leaf| <= MAX_VALUE / (2 * length) bounds a full-range fold STRICTLY below
+        // Infinity so a query never overflows to Infinity and then NaN. The factor 2 (not just
+        // `/ length`) is because `MAX_VALUE / length` rounds UP for many lengths (e.g. length 3), so
+        // `length` leaves at that bound sum to Infinity -- `/ (2 * length)` fails CLOSED with margin.
+        // Non-sum kinds: no bound (Infinity). The check is `value > _sumBound || value < _negSumBound`
+        // (two direct comparisons of the arg, NEVER `-value`, which would box a HeapNumber arg twice).
+        this._sumBound = k === 2 ? Number.MAX_VALUE / (2 * length) : Infinity;
+        this._negSumBound = -this._sumBound;
         this._t = new Float64Array(2 * length);  // _t[0] unused; leaves at n..2n-1
         if (this._idv !== 0) this._t.fill(this._idv); // sum/gcd identity is 0 already
     }
@@ -785,19 +1108,41 @@ export class SegmentTree {
         }
         if (lo > hi) return this._badRange(lo, hi);
         const t = this._t, k = this._k;
-        let res = this._idv;
-        // Order-agnostic fold (correct because the fold is commutative -- D-05).
-        for (let l = n + lo, r = n + hi + 1; l < r; l >>= 1, r >>= 1) {
-            if (l & 1) {
-                const v = t[l++];
-                res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) :
-                    k === 2 ? res + v : segGcd(res, v);
+        let l = n + lo, r = n + hi + 1;
+        // F4: ONE loop per kind. A single `let res` folded by a ternary whose last arm is
+        // segGcd taints res into a HeapNumber box per level (RESEARCH 12.2.1); an isolated
+        // per-kind accumulator stays a raw double (sum) / Smi (gcd). Order-agnostic folds are
+        // correct because min / max / sum / gcd are all commutative (D-05).
+        if (k === 2) {           // sum
+            let res = 0;
+            for (; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) res += t[l++];
+                if (r & 1) res += t[--r];
             }
-            if (r & 1) {
-                const v = t[--r];
-                res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) :
-                    k === 2 ? res + v : segGcd(res, v);
+            return res;
+        }
+        if (k === 0) {           // min
+            let res = Infinity;
+            for (; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) { const v = t[l++]; if (v < res) res = v; }
+                if (r & 1) { const v = t[--r]; if (v < res) res = v; }
             }
+            return res;
+        }
+        if (k === 1) {           // max
+            let res = -Infinity;
+            for (; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) { const v = t[l++]; if (v > res) res = v; }
+                if (r & 1) { const v = t[--r]; if (v > res) res = v; }
+            }
+            return res;
+        }
+        let res = 0;             // gcd (identity 0; gcd(0, x) === x)
+        // Euclid INLINED (not segGcd): a non-inlined segGcd return boxes `res` per fold under
+        // --max-inlined-bytecode-size=0 (F4 / A1). Inline keeps res an unboxed local -> 0 B/op.
+        for (; l < r; l >>= 1, r >>= 1) {
+            if (l & 1) { let a = res, b = t[l++]; while (b !== 0) { const rr = a % b; a = b; b = rr; } res = a; }
+            if (r & 1) { let a = res, b = t[--r]; while (b !== 0) { const rr = a % b; a = b; b = rr; } res = a; }
         }
         return res;
     }
@@ -814,19 +1159,54 @@ export class SegmentTree {
      */
     update(i, value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
-        if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        const k = this._k;
+        if (k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        // S1: sum kind bounds |leaf| so a full-range fold cannot overflow to Infinity/NaN.
+        // NaN-safe by construction (value is finite here); non-sum kinds have _sumBound = Infinity.
+        if (k === 2 && (value > this._sumBound || value < this._negSumBound)) return this._badSumValue(value);
         if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
             return this._badIndex(i);
         }
-        const t = this._t, k = this._k;
+        const t = this._t;
         let p = this._n + i;
         t[p] = value;
-        for (p >>= 1; p >= 1; p >>= 1) {
-            const c = p << 1;                    // left child; right is c + 1
-            const a = t[c], b = t[c + 1];
-            t[p] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
-                k === 2 ? a + b : segGcd(a, b);
+        // F4: store into t[p] in EACH kind's branch -- no ternary phi that unifies a + b with
+        // segGcd's return (RESEARCH 12.2.1).
+        if (k === 2) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; t[p] = t[c] + t[c + 1]; } }
+        else if (k === 0) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a < b ? a : b; } }
+        else if (k === 1) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a > b ? a : b; } }
+        else { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; t[p] = segGcd(t[c], t[c + 1]); } }
+        return this;
+    }
+
+    /**
+     * Set leaf `i` to `src[i]` -- the ZERO-BOX sibling of `update`. The value is read from a
+     * caller-owned `Float64Array` INSIDE the method, so no double crosses the call boundary and
+     * a fractional / large value never boxes (F11 / S6, lite-hud M5's write path). Same doors as
+     * `update`: a non-Float64Array `src` (TYPE) throws; an out-of-range `i`, a non-finite
+     * `src[i]`, a gcd-kind non-nonnegative-integer, or (sum kind) a magnitude over the S1 bound
+     * each throw `[lite-logn]` as a byte-identical no-op. O(log n).
+     * @param {Float64Array} src  the source buffer
+     * @param {number} i          integer in [0, length)
+     * @returns {this}
+     */
+    setFrom(src, i) {
+        if (!(src instanceof Float64Array)) return this._badSrc(src);
+        if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
+            return this._badIndex(i);
         }
+        const value = src[i];                    // a double, read INSIDE -- never a boundary arg
+        if (value - value !== 0) return this._badValue(value);  // inline finite (NaN / +-Inf) check, 0-box
+        const k = this._k;
+        if (k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        if (k === 2 && (value > this._sumBound || value < this._negSumBound)) return this._badSumValue(value);
+        const t = this._t;
+        let p = this._n + i;
+        t[p] = value;
+        if (k === 2) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; t[p] = t[c] + t[c + 1]; } }
+        else if (k === 0) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a < b ? a : b; } }
+        else if (k === 1) { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a > b ? a : b; } }
+        else { for (p >>= 1; p >= 1; p >>= 1) { const c = p << 1; t[p] = segGcd(t[c], t[c + 1]); } }
         return this;
     }
 
@@ -885,6 +1265,7 @@ export class SegmentTree {
         const st = new SegmentTree(length, kind);  // validates length in [1, 2^30-1] + kind
         const t = st._t, n = st._n, k = st._k;
         const gcdKind = k === 3;
+        const sumKind = k === 2, bound = st._sumBound;
         for (let i = 0; i < length; i++) {
             const v = values[i];
             if (typeof v !== 'number' || !Number.isFinite(v)) {
@@ -896,15 +1277,19 @@ export class SegmentTree {
                     '[lite-logn] SegmentTree.build gcd value must be a nonnegative integer, got ' +
                     String(v));
             }
+            if (sumKind && !((v < 0 ? -v : v) <= bound)) {  // S1 sum bound (cold, at the door)
+                throw new RangeError(
+                    '[lite-logn] SegmentTree.build sum value magnitude exceeds MAX_VALUE / (2 * length), got ' +
+                    String(v));
+            }
             t[n + i] = v;                          // seed the leaf
         }
-        // Fold every internal node once, deepest-first -- O(n), not n * O(log n).
-        for (let p = n - 1; p >= 1; p--) {
-            const c = p << 1;
-            const a = t[c], b = t[c + 1];
-            t[p] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
-                k === 2 ? a + b : segGcd(a, b);
-        }
+        // Fold every internal node once, deepest-first -- O(n), not n * O(log n). F4: one loop
+        // per kind, storing directly into t[p] (no segGcd ternary phi).
+        if (k === 2) { for (let p = n - 1; p >= 1; p--) { const c = p << 1; t[p] = t[c] + t[c + 1]; } }
+        else if (k === 0) { for (let p = n - 1; p >= 1; p--) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a < b ? a : b; } }
+        else if (k === 1) { for (let p = n - 1; p >= 1; p--) { const c = p << 1; const a = t[c], b = t[c + 1]; t[p] = a > b ? a : b; } }
+        else { for (let p = n - 1; p >= 1; p--) { const c = p << 1; t[p] = segGcd(t[c], t[c + 1]); } }
         return st;
     }
 
@@ -934,6 +1319,20 @@ export class SegmentTree {
     _badGcdValue(value) {
         throw new RangeError(
             '[lite-logn] SegmentTree gcd value must be a nonnegative integer, got ' + String(value));
+    }
+
+    /** @private */
+    _badSumValue(value) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree sum value magnitude exceeds MAX_VALUE / (2 * length) (' +
+            this._sumBound + '), got ' + String(value));
+    }
+
+    /** @private */
+    _badSrc(src) {
+        throw new TypeError(
+            '[lite-logn] SegmentTree.setFrom needs a Float64Array source, got ' +
+            (src === null ? 'null' : typeof src));
     }
 }
 
@@ -1744,12 +2143,30 @@ export class Treap {
     }
 
     /**
-     * Empty the treap, keeping the fixed capacity. O(capacity) cold path: returns
-     * every node to the pool, points the root at NIL, and restores the PRNG to its
-     * initial seed (a cleared treap replays a fresh one). @returns {this}
+     * Empty the treap, keeping the fixed capacity. O(n_own) cold path where n_own is
+     * the number of nodes reachable from THIS view's root: it frees ONLY those nodes
+     * back to the shared pool (a rotate-to-vine teardown with NO stack and NO
+     * recursion -- while the root has a left child, rotate it right; otherwise free
+     * the root and step to its right child), points the root at NIL, and restores the
+     * PRNG to its initial seed (a cleared treap replays a fresh one). Because it walks
+     * only its own reachable set, clearing a split VIEW leaves its sibling intact, and
+     * clearing a CONSUMED original / view (root NIL) frees nothing. @returns {this}
      */
     clear() {
-        this._pool.clear();
+        const L = this._left, R = this._right;
+        let t = this._root;
+        while (t !== 0) {
+            const l = L[t];
+            if (l !== 0) {          // rotate right: l becomes subtree root, t its right child
+                L[t] = R[l];
+                R[l] = t;
+                t = l;
+            } else {                // no left child: free t, descend into its right subtree
+                const r = R[t];
+                this._pool.free(t);
+                t = r;
+            }
+        }
         this._root = 0;
         this._seed = this._seed0;
         this._version = (this._version + 1) | 0;
@@ -3702,7 +4119,14 @@ export class BinomialHeap {
         return best;
     }
 
-    /** @private recursive forest free: siblings iterative, children recursive (depth <= order). */
+    // NOTE (F2, out of scope): these three walkers stay RECURSIVE on child depth, and
+    // safely so. A binomial tree of order k has child depth exactly k, and a heap of
+    // `capacity` nodes holds only trees of order <= floor(log2(capacity)). At the max
+    // capacity 2^31 - 1 an order-k tree has 2^k nodes, so the largest possible order is
+    // 30 (2^30 <= 2^31 - 1 < 2^31) -- the recursion is bounded by <= 31 frames for ANY
+    // input. Unlike a pairing / Fibonacci child chain, which is bounded only by the node
+    // count and overflows the stack at ordinary push depths (F2).
+    /** @private recursive forest free: siblings iterative, children recursive (depth <= order <= 30). */
     _freeForest(node) {
         const S = this._sibling, C = this._child;
         while (node !== 0) {
@@ -3713,7 +4137,7 @@ export class BinomialHeap {
         }
     }
 
-    /** @private recursive forest visit (siblings iterative, children recursive). */
+    /** @private recursive forest visit (siblings iterative, children recursive; depth <= 31). */
     _forEach(node, fn) {
         const S = this._sibling, C = this._child, I = this._id, K = this._key;
         while (node !== 0) {
@@ -4114,7 +4538,11 @@ export class PairingHeap {
 
     /**
      * Visit every live (id, key) pair in UNSPECIFIED (forest) order -- NOT sorted, NOT pop
-     * order. O(n) cold walk, allocation-free (pass a hoisted callback). Consumed heap throws.
+     * order. O(n) cold walk, allocation-free (pass a hoisted callback). Mutating the heap
+     * from the callback (push / popMin / remove / decreaseKey / clear) is UNSUPPORTED: the
+     * walk always terminates and never passes a freed or sibling-owned id, but it MAY
+     * throw `[lite-logn] PairingHeap mutated during forEach`, or end early / skip /
+     * revisit ids. Consumed heap throws.
      * @param {(id:number, key:number, heap:PairingHeap)=>void} fn
      */
     forEach(fn) {
@@ -4124,8 +4552,11 @@ export class PairingHeap {
 
     /**
      * Iterate live entity ids in UNSPECIFIED (forest) order -- NOT sorted. The one
-     * documented per-protocol allocator (a {value, done} per step + a sub-iterator per
-     * child list); use forEach for the alloc-free scan. Consumed heap throws.
+     * documented per-protocol allocator is the {value, done} per step (the walk is
+     * STACKLESS -- no sub-iterators); use forEach for the alloc-free scan. Mutating the
+     * heap from the loop body is UNSUPPORTED: the walk always terminates and never yields
+     * a freed or sibling-owned id, but it MAY throw `[lite-logn] PairingHeap mutated
+     * during iteration`, or end early / skip / revisit ids. Consumed heap throws.
      */
     [Symbol.iterator]() {
         if (this._consumed) return this._badConsumed();
@@ -4216,36 +4647,89 @@ export class PairingHeap {
         return h;
     }
 
-    /** @private recursive forest free (siblings iterative, children recursive). */
+    /**
+     * @private the TRUE parent of `x`, resolved from the dual-role PREV pointer with NO
+     * stack: `_parent[x]` is x's true parent iff `_child[_parent[x]] === x` (x is
+     * leftmost), else it is x's LEFT SIBLING. Walk left across siblings until the
+     * leftmost is reached; its PREV is the true parent (0 for a top-level root). Each
+     * sibling list is walked once per traversal, so the total cost is O(n).
+     */
+    _parentOf(x) {
+        const C = this._child, P = this._parent;
+        let p = P[x];
+        while (p !== 0 && C[p] !== x) { x = p; p = P[x]; }
+        return p;
+    }
+
+    /**
+     * @private DESTRUCTIVE, STACKLESS forest free (F2). Free each node, then splice its
+     * child list into the sibling chain ahead of the remaining siblings (walk to the
+     * child list's tail, link it to `next`, continue from the child head). Recursion
+     * would overflow the stack at ordinary descending-push depths; this is bounded only
+     * by the reachable node count. Total work O(n_own) (sum of child-list lengths = edges).
+     */
     _freeForest(node) {
         const S = this._sibling, C = this._child, I = this._id;
         while (node !== 0) {
             const next = S[node];
-            this._freeForest(C[node]);
+            const c = C[node];
             this._pos[I[node]] = -1; this._owner[node] = 0;
             C[node] = 0; S[node] = 0; this._parent[node] = 0;
             this._pool.free(node);
-            node = next;
+            if (c === 0) {
+                node = next;
+            } else {
+                let tail = c;
+                while (S[tail] !== 0) tail = S[tail]; // splice child list ahead of siblings
+                S[tail] = next;
+                node = c;
+            }
         }
     }
 
-    /** @private recursive forest visit (siblings iterative, children recursive). */
+    /**
+     * @private STACKLESS forest visit (F2). Preorder over the left-child / right-sibling
+     * forest using only the existing links: descend to the first child, else advance to
+     * the next sibling, climbing via `_parentOf` (the PREV pointer) when a sibling list
+     * ends. No scratch stack, so two live iterators or a re-entrant forEach never collide.
+     * On an UNMUTATED heap the visited-id SET is identical to the old recursion (order is
+     * UNSPECIFIED / forest). Mutating the heap from the callback is UNSUPPORTED, but never
+     * unsafe: a per-visit budget (`left`, seeded at `_n`) bounds the walk so a relink
+     * cannot loop forever, and the ownership test (`_owner[x] === 0` for a freed slot, or
+     * a slot re-owned by a sibling heap after a free+realloc) fires before an id that is
+     * not this heap's live node reaches `fn`. So the walk ALWAYS terminates and never
+     * passes a freed / sibling-owned id, but under mutation it MAY throw `[lite-logn]
+     * PairingHeap mutated during forEach`, or end early / skip / revisit ids. The guard
+     * allocates nothing and runs only in this cold walker (push / popMin are untouched, so
+     * no hot-path cost); `_resolve`'s path halving is AMORTIZED O(1) -- the first resolve
+     * of a depth-K meld-alias chain is O(K), later ones near O(1).
+     */
     _forEach(node, fn) {
-        const S = this._sibling, C = this._child, I = this._id, K = this._key;
-        while (node !== 0) {
-            fn(I[node], K[node], this);
-            this._forEach(C[node], fn);
-            node = S[node];
+        const S = this._sibling, C = this._child, I = this._id, K = this._key, O = this._owner;
+        let x = node, left = this._n;
+        const mine = this._resolve(this._hid);
+        while (x !== 0) {
+            if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('forEach');
+            fn(I[x], K[x], this);
+            if (C[x] !== 0) { x = C[x]; continue; }
+            while (x !== 0 && S[x] === 0) x = this._parentOf(x); // climb closed lists
+            if (x === 0) break;
+            x = S[x];
         }
     }
 
-    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
+    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). */
     *_iterNode(node) {
-        const S = this._sibling, C = this._child, I = this._id;
-        while (node !== 0) {
-            yield I[node];
-            yield* this._iterNode(C[node]);
-            node = S[node];
+        const S = this._sibling, C = this._child, I = this._id, O = this._owner;
+        let x = node, left = this._n;
+        const mine = this._resolve(this._hid);
+        while (x !== 0) {
+            if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('iteration');
+            yield I[x];
+            if (C[x] !== 0) { x = C[x]; continue; }
+            while (x !== 0 && S[x] === 0) x = this._parentOf(x);
+            if (x === 0) break;
+            x = S[x];
         }
     }
 
@@ -4288,6 +4772,11 @@ export class PairingHeap {
     /** @private */
     _badConsumed() {
         throw new Error('[lite-logn] PairingHeap was consumed by a prior meld (reuse fails closed)');
+    }
+
+    /** @private the walk hit a freed slot or exceeded its visit budget: the heap was mutated. */
+    _badMutation(where) {
+        throw new Error('[lite-logn] PairingHeap mutated during ' + where);
     }
 
     /** @private */
@@ -4717,7 +5206,10 @@ export class FibonacciHeap {
 
     /**
      * Visit every live (id, key) pair in UNSPECIFIED (forest) order -- NOT sorted, NOT pop order.
-     * O(n) cold walk, allocation-free (pass a hoisted callback). Consumed heap throws.
+     * O(n) cold walk, allocation-free (pass a hoisted callback). Mutating the heap from the callback
+     * (push / popMin / remove / decreaseKey / clear) is UNSUPPORTED: the walk always terminates and
+     * never passes a freed or sibling-owned id, but it MAY throw `[lite-logn] FibonacciHeap mutated
+     * during forEach`, or end early / skip / revisit ids. Consumed heap throws.
      * @param {(id:number, key:number, heap:FibonacciHeap)=>void} fn
      */
     forEach(fn) {
@@ -4727,8 +5219,11 @@ export class FibonacciHeap {
 
     /**
      * Iterate live entity ids in UNSPECIFIED (forest) order -- NOT sorted. The one documented
-     * per-protocol allocator (a {value, done} per step + a sub-iterator per child ring); use forEach
-     * for the alloc-free scan. Consumed heap throws.
+     * per-protocol allocator is the {value, done} per step (the walk is STACKLESS -- no
+     * sub-iterators); use forEach for the alloc-free scan. Mutating the heap from the loop body is
+     * UNSUPPORTED: the walk always terminates and never yields a freed or sibling-owned id, but it
+     * MAY throw `[lite-logn] FibonacciHeap mutated during iteration`, or end early / skip / revisit
+     * ids. Consumed heap throws.
      */
     [Symbol.iterator]() {
         if (this._consumed) return this._badConsumed();
@@ -4856,45 +5351,90 @@ export class FibonacciHeap {
         return h;
     }
 
-    /** @private recursive forest free (a circular ring at each level; children recursed). */
+    /**
+     * @private DESTRUCTIVE, STACKLESS forest free (F2). Break the top circular ring into
+     * a null-terminated chain, then free node by node; each freed node's child ring
+     * (circular) is spliced ahead of the remaining chain in O(1) via its `_left` tail.
+     * Recursion would overflow the stack at ordinary decreaseKey / consolidate depths;
+     * this is bounded only by the reachable node count. Total work O(n_own).
+     */
     _freeForest(entry) {
         if (entry === 0) return;
-        const R = this._right, C = this._child, I = this._id;
-        let x = entry;
-        do {
-            const nxt = R[x];
-            const c = C[x];
-            this._pos[I[x]] = -1; this._owner[x] = 0;
-            this._child[x] = 0; this._parent[x] = 0; this._degree[x] = 0; this._mark[x] = 0;
-            this._left[x] = x; this._right[x] = x;
-            this._pool.free(x);
-            if (c !== 0) this._freeForest(c);
-            x = nxt;
-        } while (x !== entry);
+        const R = this._right, L = this._left, C = this._child, I = this._id;
+        R[L[entry]] = 0;                     // cut the top ring: it is now a chain via _right
+        let node = entry;
+        while (node !== 0) {
+            const next = R[node];
+            const c = C[node];
+            this._pos[I[node]] = -1; this._owner[node] = 0;
+            this._child[node] = 0; this._parent[node] = 0; this._degree[node] = 0; this._mark[node] = 0;
+            this._left[node] = node; this._right[node] = node;
+            this._pool.free(node);
+            if (c === 0) {
+                node = next;
+            } else {
+                const ctail = L[c];          // child ring tail; splice the ring ahead of `next`
+                R[ctail] = next;
+                node = c;
+            }
+        }
     }
 
-    /** @private recursive forest visit (a circular ring at each level; children recursed). */
+    /**
+     * @private STACKLESS forest visit (F2). Preorder over the circular-ring forest using
+     * only the existing links: descend to `_child`, else advance around the ring via
+     * `_right`, climbing to the explicit `_parent` when the ring closes (a ring's entry
+     * node is `entry` at the top or `_child[parent]` below). No scratch stack, so two
+     * live iterators or a re-entrant forEach never collide. On an UNMUTATED heap the
+     * visited-id SET is identical to the old recursion (order is UNSPECIFIED / forest).
+     * Mutating the heap from the callback is UNSUPPORTED, but never unsafe: a per-visit
+     * budget (`left`, seeded at `_n`) bounds the walk so a relink cannot loop forever, and
+     * the ownership test (`_owner[x] === 0` for a freed slot, or a slot re-owned by a
+     * sibling heap after a free+realloc) fires before an id that is not this heap's live
+     * node reaches `fn`. So the walk ALWAYS terminates and never passes a freed /
+     * sibling-owned id, but under mutation it MAY throw `[lite-logn] FibonacciHeap mutated
+     * during forEach`, or end early / skip / revisit ids. The guard allocates nothing and
+     * runs only in this cold walker (push / popMin are untouched, so no hot-path cost);
+     * `_resolve`'s path halving is AMORTIZED O(1) -- the first resolve of a depth-K
+     * meld-alias chain is O(K), later ones near O(1).
+     */
     _forEach(entry, fn) {
         if (entry === 0) return;
-        const R = this._right, C = this._child, I = this._id, K = this._key;
-        let x = entry;
-        do {
+        const R = this._right, C = this._child, P = this._parent, I = this._id, K = this._key, O = this._owner;
+        let x = entry, left = this._n;
+        const mine = this._resolve(this._hid);
+        for (;;) {
+            if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('forEach');
             fn(I[x], K[x], this);
-            if (C[x] !== 0) this._forEach(C[x], fn);
-            x = R[x];
-        } while (x !== entry);
+            if (C[x] !== 0) { x = C[x]; continue; }
+            for (;;) {
+                const p = P[x];
+                const re = p === 0 ? entry : C[p]; // this ring's entry node
+                if (R[x] !== re) { x = R[x]; break; }
+                if (p === 0) return;               // top ring closed: whole forest done
+                x = p;                             // climb; p was already visited
+            }
+        }
     }
 
-    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
+    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). */
     *_iterNode(entry) {
         if (entry === 0) return;
-        const R = this._right, C = this._child, I = this._id;
-        let x = entry;
-        do {
+        const R = this._right, C = this._child, P = this._parent, I = this._id, O = this._owner;
+        let x = entry, left = this._n;
+        const mine = this._resolve(this._hid);
+        for (;;) {
+            if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('iteration');
             yield I[x];
-            yield* this._iterNode(C[x]);
-            x = R[x];
-        } while (x !== entry);
+            if (C[x] !== 0) { x = C[x]; continue; }
+            for (;;) {
+                const p = P[x];
+                const re = p === 0 ? entry : C[p];
+                if (R[x] !== re) { x = R[x]; break; }
+                if (p === 0) return;
+                x = p;
+            }
+        }
     }
 
     // ---- cold path only: throw builders (string concat off the hot body) ----
@@ -4938,6 +5478,11 @@ export class FibonacciHeap {
         throw new Error('[lite-logn] FibonacciHeap was consumed by a prior meld (reuse fails closed)');
     }
 
+    /** @private the walk hit a freed slot or exceeded its visit budget: the heap was mutated. */
+    _badMutation(where) {
+        throw new Error('[lite-logn] FibonacciHeap mutated during ' + where);
+    }
+
     /** @private */
     _full() {
         throw new RangeError('[lite-logn] FibonacciHeap arena full (capacity ' + this._cap + ')');
@@ -4955,6 +5500,14 @@ export class FibonacciHeap {
  * redeclaration of the identically-valued 1D Fenwick / BinaryHeap constant.
  */
 const F2D_MAX_CELLS = 0x7FFFFFFF; // 2^31 - 1
+
+/**
+ * S1 magnitude budget (Fenwick2D): MAX_VALUE/4 -- half the 1D margin, so the 4-term
+ * inclusion-exclusion `P(r2,c2) - P(r1-1,c2) - P(r2,c1-1) + P(r1-1,c1-1)` of `rectSum`
+ * cannot produce a non-finite intermediate. Same discipline as Fenwick (one add + one compare
+ * hot; an O(rows*cols) cold recompute on a would-be overflow).
+ */
+const FENWICK2D_BUDGET = Number.MAX_VALUE / 4;
 
 /**
  * A 2D Fenwick tree (2D Binary Indexed Tree): a point-update AND a rectangle-sum,
@@ -5024,6 +5577,7 @@ export class Fenwick2D {
         this._c = cols;                       // column count (fixed)
         this._w = cols + 1;                   // row stride (1-based cols + sentinel col 0)
         this._t = new Float64Array(cells);    // flat (rows+1) x (cols+1); row 0 / col 0 sentinels
+        this._mag = new Float64Array(2);      // S1: [0] = bound, [1] = unbox scratch (0-box arithmetic)
     }
 
     /** Row count this tree was sized for. O(1). */
@@ -5065,6 +5619,13 @@ export class Fenwick2D {
         if (typeof delta !== 'number' || !Number.isFinite(delta)) return this._badDelta(delta);
         if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
         if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
+        const M = this._mag;                                    // S1: unbox the arg, 0-box arithmetic
+        M[1] = delta;
+        const d = M[1];
+        const ad = d < 0 ? -d : d;                              // one add + one compare hot
+        const m = M[0] + ad;
+        if (m <= FENWICK2D_BUDGET) M[0] = m;
+        else if (!this._budgetCold(ad)) return this._badOverflow(r, c, delta);
         const t = this._t, w = this._w, rows = this._r, cols = this._c;
         for (let i = r + 1; i <= rows; i += i & -i) {
             const b = i * w;
@@ -5155,7 +5716,13 @@ export class Fenwick2D {
         for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) cur -= t[b + j]; }
         for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cur -= t[b + j]; }
         for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cur += t[b + j]; }
-        const delta = value - cur;
+        const M = this._mag;
+        M[1] = value;                                           // unbox the arg (S1, 0-box arithmetic)
+        const delta = M[1] - cur;
+        const ad = delta < 0 ? -delta : delta;                  // S1: |new - old|
+        const m = M[0] + ad;
+        if (m <= FENWICK2D_BUDGET) M[0] = m;
+        else if (!this._budgetCold(ad)) return this._badOverflow(r, c, value);
         for (let i = r + 1; i <= rows; i += i & -i) { const b = i * w; for (let j = c + 1; j <= cols; j += j & -j) t[b + j] += delta; }
         return this;
     }
@@ -5163,6 +5730,7 @@ export class Fenwick2D {
     /** Zero every cell in place, keeping the fixed dimensions. O(rows*cols) cold. */
     clear() {
         this._t.fill(0);
+        this._mag[0] = 0;                                       // S1: reset the magnitude bound
         return this;
     }
 
@@ -5202,6 +5770,7 @@ export class Fenwick2D {
         const cols = row0.length;
         const f = new Fenwick2D(rows, cols);      // validates dims + the cell-product ceiling
         const t = f._t, w = f._w;
+        let sumAbs = 0;                           // S1: seed the magnitude bound with sum |v|
         for (let r = 0; r < rows; r++) {
             const row = matrix[r];
             if (row == null || typeof row.length !== 'number' || row.length !== cols) {
@@ -5214,9 +5783,16 @@ export class Fenwick2D {
                     throw new TypeError(
                         '[lite-logn] Fenwick2D.build value must be a finite number, got ' + String(v));
                 }
+                sumAbs += v < 0 ? -v : v;
                 t[base + c + 1] = v;              // seed each cell with its own value
             }
         }
+        if (!(sumAbs <= FENWICK2D_BUDGET)) {      // S1: build over budget fails closed (cold door)
+            throw new RangeError(
+                '[lite-logn] Fenwick2D.build sum |value| ' + sumAbs +
+                ' exceeds the magnitude budget MAX_VALUE / 4');
+        }
+        f._mag[0] = sumAbs;
         // Pass 1: propagate along COLS within each row (each row is a 1D linear build).
         for (let i = 1; i <= rows; i++) {
             const base = i * w;
@@ -5279,6 +5855,38 @@ export class Fenwick2D {
     _badValue(value) {
         throw new TypeError(
             '[lite-logn] Fenwick2D value must be a finite number, got ' + String(value));
+    }
+
+    /**
+     * @private S1 COLD path: recompute the TRUE sum |cell| in O(rows*cols) via the 4-term
+     * inclusion-exclusion (no tree mutation). Reset `_mag` and accept if the true total plus
+     * this write's `ad` fits; else return false so the caller throws with state unchanged.
+     * @param {number} ad  |delta| of the pending write
+     * @returns {boolean}
+     */
+    _budgetCold(ad) {
+        const t = this._t, w = this._w, rows = this._r, cols = this._c;
+        let s = 0;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                let cell = 0;
+                for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) cell += t[b + j]; }
+                for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c + 1; j > 0; j -= j & -j) cell -= t[b + j]; }
+                for (let i = r + 1; i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cell -= t[b + j]; }
+                for (let i = r;     i > 0; i -= i & -i) { const b = i * w; for (let j = c;     j > 0; j -= j & -j) cell += t[b + j]; }
+                s += cell < 0 ? -cell : cell;
+            }
+        }
+        const m = s + ad;
+        if (m <= FENWICK2D_BUDGET) { this._mag[0] = m; return true; }
+        return false;                             // REJECT: write nothing -- the op stays byte-identical
+    }
+
+    /** @private */
+    _badOverflow(r, c, value) {
+        throw new RangeError(
+            '[lite-logn] Fenwick2D write at (' + r + ', ' + c + ') (value ' + String(value) +
+            ') would exceed the magnitude budget MAX_VALUE / 4; state unchanged');
     }
 }
 
@@ -5419,25 +6027,39 @@ export class SegmentTree2D {
         if (r1 > r2 || c1 > c2) return this._badRect(r1, c1, r2, c2);
         const t = this._t, k = this._k, w = this._w;
         const cl0 = C + c1, cr0 = C + c2 + 1;
-        let res = this._idv;
-        // Outer row descent (half-open). For each collected row-node, an inner col
-        // descent folds [c1, c2] into `res`. Both boundaries picked in both dims.
-        for (let l = R + r1, r = R + r2 + 1; l < r; l >>= 1, r >>= 1) {
-            if (l & 1) {
-                const b = l * w;
-                for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) {
-                    if (cl & 1) { const v = t[b + cl++]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
-                    if (cr & 1) { const v = t[b + --cr]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
-                }
-                l++;
+        const L0 = R + r1, R0 = R + r2 + 1;
+        // F4: ONE body per kind. A shared `let res` folded by a ternary whose last arm is segGcd
+        // taints res into a HeapNumber box per node (RESEARCH 12.2.1); an isolated per-kind
+        // accumulator stays a raw double (sum) / Smi (gcd). Order-agnostic folds are correct
+        // because min / max / sum / gcd are all commutative (class RISK note).
+        if (k === 2) {           // sum
+            let res = 0;
+            for (let l = L0, r = R0; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) { const b = l * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) res += t[b + cl++]; if (cr & 1) res += t[b + --cr]; } l++; }
+                if (r & 1) { const b = (--r) * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) res += t[b + cl++]; if (cr & 1) res += t[b + --cr]; } }
             }
-            if (r & 1) {
-                const b = (--r) * w;
-                for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) {
-                    if (cl & 1) { const v = t[b + cl++]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
-                    if (cr & 1) { const v = t[b + --cr]; res = k === 0 ? (v < res ? v : res) : k === 1 ? (v > res ? v : res) : k === 2 ? res + v : segGcd(res, v); }
-                }
+            return res;
+        }
+        if (k === 0) {           // min
+            let res = Infinity;
+            for (let l = L0, r = R0; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) { const b = l * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) { const v = t[b + cl++]; if (v < res) res = v; } if (cr & 1) { const v = t[b + --cr]; if (v < res) res = v; } } l++; }
+                if (r & 1) { const b = (--r) * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) { const v = t[b + cl++]; if (v < res) res = v; } if (cr & 1) { const v = t[b + --cr]; if (v < res) res = v; } } }
             }
+            return res;
+        }
+        if (k === 1) {           // max
+            let res = -Infinity;
+            for (let l = L0, r = R0; l < r; l >>= 1, r >>= 1) {
+                if (l & 1) { const b = l * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) { const v = t[b + cl++]; if (v > res) res = v; } if (cr & 1) { const v = t[b + --cr]; if (v > res) res = v; } } l++; }
+                if (r & 1) { const b = (--r) * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) { const v = t[b + cl++]; if (v > res) res = v; } if (cr & 1) { const v = t[b + --cr]; if (v > res) res = v; } } }
+            }
+            return res;
+        }
+        let res = 0;             // gcd (identity 0)
+        for (let l = L0, r = R0; l < r; l >>= 1, r >>= 1) {
+            if (l & 1) { const b = l * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) res = segGcd(res, t[b + cl++]); if (cr & 1) res = segGcd(res, t[b + --cr]); } l++; }
+            if (r & 1) { const b = (--r) * w; for (let cl = cl0, cr = cr0; cl < cr; cl >>= 1, cr >>= 1) { if (cl & 1) res = segGcd(res, t[b + cl++]); if (cr & 1) res = segGcd(res, t[b + --cr]); } }
         }
         return res;
     }
@@ -5465,21 +6087,32 @@ export class SegmentTree2D {
         // Leaf row: write the leaf cell, then climb THIS row's col-tree on c's path.
         const lb = (R + r) * w;
         t[lb + cLeaf] = value;
+        // F4: store into t[...] via a per-kind branch, never a ternary whose last arm is segGcd
+        // (which taints the pure-double sum store into a transient box per node, RESEARCH 12.2.1).
         for (let jj = cLeaf >> 1; jj >= 1; jj >>= 1) {
             const j2 = jj << 1;
             const a = t[lb + j2], b = t[lb + j2 + 1];
-            t[lb + jj] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+            if (k === 2) t[lb + jj] = a + b;
+            else if (k === 0) t[lb + jj] = a < b ? a : b;
+            else if (k === 1) t[lb + jj] = a > b ? a : b;
+            else t[lb + jj] = segGcd(a, b);
         }
         // Climb the ROW-tree. At each ancestor: recompute the changed leaf column
         // from the two row-children FIRST, THEN climb that row-node's col-tree.
         for (let i = (R + r) >> 1; i >= 1; i >>= 1) {
             const bi = i * w, c0 = (i << 1) * w, c1 = c0 + w;
             const a = t[c0 + cLeaf], b = t[c1 + cLeaf];
-            t[bi + cLeaf] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+            if (k === 2) t[bi + cLeaf] = a + b;
+            else if (k === 0) t[bi + cLeaf] = a < b ? a : b;
+            else if (k === 1) t[bi + cLeaf] = a > b ? a : b;
+            else t[bi + cLeaf] = segGcd(a, b);
             for (let jj = cLeaf >> 1; jj >= 1; jj >>= 1) {
                 const j2 = jj << 1;
                 const x = t[bi + j2], y = t[bi + j2 + 1];
-                t[bi + jj] = k === 0 ? (x < y ? x : y) : k === 1 ? (x > y ? x : y) : k === 2 ? x + y : segGcd(x, y);
+                if (k === 2) t[bi + jj] = x + y;
+                else if (k === 0) t[bi + jj] = x < y ? x : y;
+                else if (k === 1) t[bi + jj] = x > y ? x : y;
+                else t[bi + jj] = segGcd(x, y);
             }
         }
         return this;
@@ -5570,13 +6203,17 @@ export class SegmentTree2D {
                 t[b + c] = v;
             }
         }
-        // Phase 1: fold each LEAF ROW's col-tree, deepest-first (col nodes [1, C)).
+        // Phase 1: fold each LEAF ROW's col-tree, deepest-first (col nodes [1, C)). F4: per-kind
+        // store branch, never a ternary whose last arm is segGcd.
         for (let lr = R; lr < 2 * R; lr++) {
             const b = lr * w;
             for (let jj = C - 1; jj >= 1; jj--) {
                 const j2 = jj << 1;
                 const a = t[b + j2], bb = t[b + j2 + 1];
-                t[b + jj] = k === 0 ? (a < bb ? a : bb) : k === 1 ? (a > bb ? a : bb) : k === 2 ? a + bb : segGcd(a, bb);
+                if (k === 2) t[b + jj] = a + bb;
+                else if (k === 0) t[b + jj] = a < bb ? a : bb;
+                else if (k === 1) t[b + jj] = a > bb ? a : bb;
+                else t[b + jj] = segGcd(a, bb);
             }
         }
         // Phase 2: fold the ROW-tree position-wise (row nodes [1, R)), each row-node's
@@ -5585,7 +6222,10 @@ export class SegmentTree2D {
             const bi = i * w, c0 = (i << 1) * w, c1 = c0 + w;
             for (let j = 1; j < w; j++) {
                 const a = t[c0 + j], b = t[c1 + j];
-                t[bi + j] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) : k === 2 ? a + b : segGcd(a, b);
+                if (k === 2) t[bi + j] = a + b;
+                else if (k === 0) t[bi + j] = a < b ? a : b;
+                else if (k === 1) t[bi + j] = a > b ? a : b;
+                else t[bi + j] = segGcd(a, b);
             }
         }
         return st;
@@ -6145,6 +6785,10 @@ export class PersistentSegTree {
         this._roots = new Uint32Array(versionCapacity + 1); // _roots[v] = version v's root slot
         this._next = 1;                            // bump cursor; slot 0 is the NIL sentinel
         this._vcount = 0;                          // live version count (set by the v0 seed below)
+        // F10: iterative-_query scratch. A range decomposition touches O(H) nodes but the manual
+        // stack can hold up to 2 frames per level; (node, lo, hi) triples over 2H+2 frames.
+        this._h = h;                               // tree height ceil(log2 n)
+        this._qstk = new Int32Array(3 * (4 * (h + 2)));  // (node, lo, hi) frames; generous bound
         // Seed version 0: identity leaves (fresh) or the validated _seed values (from build).
         this._roots[0] = this._build0(0, length - 1, _seed);
         this._vcount = 1;
@@ -6197,9 +6841,12 @@ export class PersistentSegTree {
         const r = this._build0(mid + 1, hi, seed);
         this._left[nn] = l;
         this._right[nn] = r;
-        const k = this._k, a = this._val[l], b = this._val[r];
-        this._val[nn] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
-            k === 2 ? a + b : segGcd(a, b);
+        const k = this._k, a = this._val[l], b = this._val[r], V = this._val;
+        // F4: per-kind store, no segGcd ternary phi.
+        if (k === 2) V[nn] = a + b;
+        else if (k === 0) V[nn] = a < b ? a : b;
+        else if (k === 1) V[nn] = a > b ? a : b;
+        else V[nn] = segGcd(a, b);
         return nn;
     }
 
@@ -6228,25 +6875,65 @@ export class PersistentSegTree {
             return this._badRange(lo, hi);
         }
         if (lo > hi) return this._badRange(lo, hi);
-        return this._query(this._roots[version], 0, n - 1, lo, hi);
+        return this._query(this._roots[version], n - 1, lo, hi);
     }
 
     /**
-     * Read-only range descent (see query). Fully-covered node -> its cached fold; range entirely in
-     * one child -> tail-descend; range split -> fold both children via the inline `_k` switch. The two
-     * off-path children are shared with the parent version, so no copy, no allocation. O(log n).
+     * Read-only range fold (see query), ITERATIVE (F10): the recursive form had DOUBLE returns that
+     * box per level; this descends a manual (node, lo, hi) stack over `_qstk` and folds every
+     * fully-covered node into ONE per-kind accumulator -- a raw double (sum) / Smi (gcd), never a
+     * `let` tainted by segGcd's return (RESEARCH 12.2.1). Order-agnostic folds are correct because
+     * min / max / sum / gcd are commutative. Off-path children are shared with the parent version,
+     * so no copy, no allocation. O(log n).
      * @private
      */
-    _query(node, nodeLo, nodeHi, lo, hi) {
-        if (lo <= nodeLo && nodeHi <= hi) return this._val[node];
-        const mid = (nodeLo + nodeHi) >> 1;
-        if (hi <= mid) return this._query(this._left[node], nodeLo, mid, lo, hi);
-        if (lo > mid) return this._query(this._right[node], mid + 1, nodeHi, lo, hi);
-        const a = this._query(this._left[node], nodeLo, mid, lo, hi);
-        const b = this._query(this._right[node], mid + 1, nodeHi, lo, hi);
-        const k = this._k;
-        return k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
-            k === 2 ? a + b : segGcd(a, b);
+    _query(root, hiIdx, lo, hi) {
+        const L = this._left, R = this._right, V = this._val, k = this._k;
+        const stk = this._qstk;
+        let sp = 0;
+        stk[sp++] = root; stk[sp++] = 0; stk[sp++] = hiIdx;
+        if (k === 2) {                     // sum
+            let acc = 0;
+            while (sp > 0) {
+                const nhi = stk[--sp], nlo = stk[--sp], node = stk[--sp];
+                if (lo <= nlo && nhi <= hi) { acc += V[node]; continue; }
+                const mid = (nlo + nhi) >> 1;
+                if (lo <= mid) { stk[sp++] = L[node]; stk[sp++] = nlo; stk[sp++] = mid; }
+                if (hi > mid) { stk[sp++] = R[node]; stk[sp++] = mid + 1; stk[sp++] = nhi; }
+            }
+            return acc;
+        }
+        if (k === 0) {                     // min
+            let acc = Infinity;
+            while (sp > 0) {
+                const nhi = stk[--sp], nlo = stk[--sp], node = stk[--sp];
+                if (lo <= nlo && nhi <= hi) { const v = V[node]; if (v < acc) acc = v; continue; }
+                const mid = (nlo + nhi) >> 1;
+                if (lo <= mid) { stk[sp++] = L[node]; stk[sp++] = nlo; stk[sp++] = mid; }
+                if (hi > mid) { stk[sp++] = R[node]; stk[sp++] = mid + 1; stk[sp++] = nhi; }
+            }
+            return acc;
+        }
+        if (k === 1) {                     // max
+            let acc = -Infinity;
+            while (sp > 0) {
+                const nhi = stk[--sp], nlo = stk[--sp], node = stk[--sp];
+                if (lo <= nlo && nhi <= hi) { const v = V[node]; if (v > acc) acc = v; continue; }
+                const mid = (nlo + nhi) >> 1;
+                if (lo <= mid) { stk[sp++] = L[node]; stk[sp++] = nlo; stk[sp++] = mid; }
+                if (hi > mid) { stk[sp++] = R[node]; stk[sp++] = mid + 1; stk[sp++] = nhi; }
+            }
+            return acc;
+        }
+        let acc = 0;                       // gcd (identity 0)
+        while (sp > 0) {
+            const nhi = stk[--sp], nlo = stk[--sp], node = stk[--sp];
+            if (lo <= nlo && nhi <= hi) { acc = segGcd(acc, V[node]); continue; }
+            const mid = (nlo + nhi) >> 1;
+            if (lo <= mid) { stk[sp++] = L[node]; stk[sp++] = nlo; stk[sp++] = mid; }
+            if (hi > mid) { stk[sp++] = R[node]; stk[sp++] = mid + 1; stk[sp++] = nhi; }
+        }
+        return acc;
     }
 
     /**
@@ -6323,9 +7010,12 @@ export class PersistentSegTree {
         else r = this._copy(r, mid + 1, nodeHi, i, value);
         this._left[nn] = l;
         this._right[nn] = r;
-        const k = this._k, a = this._val[l], b = this._val[r];
-        this._val[nn] = k === 0 ? (a < b ? a : b) : k === 1 ? (a > b ? a : b) :
-            k === 2 ? a + b : segGcd(a, b);
+        const k = this._k, a = this._val[l], b = this._val[r], V = this._val;
+        // F4: per-kind store, no segGcd ternary phi.
+        if (k === 2) V[nn] = a + b;
+        else if (k === 0) V[nn] = a < b ? a : b;
+        else if (k === 1) V[nn] = a > b ? a : b;
+        else V[nn] = segGcd(a, b);
         return nn;
     }
 
@@ -6822,75 +7512,114 @@ export class WaveletTree {
             throw new RangeError(
                 '[lite-logn] WaveletTree length must be an integer in [1, 2^31-1], got ' + String(n));
         }
-        // Snapshot + validate finite (typeof-first; Symbol / BigInt / NaN / +-Infinity fail closed).
-        const src = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
+        // wpl (fixed stride) + the WORST-CASE level count Lmax = ceil(log2 n) (sigma = n, all distinct).
+        // The word budget is guarded against the WORST case here so a too-large instance fails at
+        // CONSTRUCTION -- but the worst-case buffers are NOT allocated now (see rebuildFrom): a
+        // never-rebuilt instance keeps the 1.3.0 footprint (actual levels only, no retained scratch).
+        let bl = 0;
+        while (2 ** bl < n) bl++;
+        const Lmax = bl === 0 ? 1 : bl;
+        const wpl = Math.ceil(n / 32);
+        const cells = Lmax * wpl;              // FLOAT product guard (never `| 0`): fails CLOSED
+        if (cells > WT_MAX_CELLS) {
+            throw new RangeError(
+                '[lite-logn] WaveletTree word budget ' + cells + ' (levels ' + Lmax +
+                ' x wordsPerLevel ' + wpl + ') exceeds ' + WT_MAX_CELLS);
+        }
+        this._cap = n;                         // max length this instance was constructed for
+        this._wpl = wpl;                       // 32-bit words per level (fixed stride)
+        this._blocks = Math.ceil(wpl / WT_BLOCK_WORDS);
+        this._blkStride = this._blocks + 1;    // +1 for the per-level total sentinel (= rank1(l, n))
+        this._Lmax = Lmax;                     // worst-case level rows (lazily allocated by rebuildFrom)
+        this._rebuildReady = false;            // rebuildFrom's worst-case buffers + scratch not yet made
+        // Declare the lazily-added rebuild scratch up front (all instances share ONE hidden class,
+        // whether or not rebuildFrom is ever called). Allocated on the first rebuildFrom.
+        this._srcScratch = null;
+        this._sortScratch = null;
+        this._codes = null;
+        this._nxt = null;
+        // CONSTRUCTION build: LOCAL scratch (GC'd) into ACTUAL-level buffers -- the 1.3.0 footprint.
+        this._fill(values, n, false);          // sets _words / _Z / _blk / _remap / _n / _sigma / _levels / _bits
+    }
+
+    /**
+     * @private Build the matrix from `values[0..m)`. `useInstance` false (construction) uses LOCAL
+     * scratch (GC'd) and allocates ACTUAL-level `_words` / `_Z` / `_blk` / `_remap` -- so a never-
+     * rebuilt instance keeps the 1.3.0 footprint. `useInstance` true (rebuildFrom, after the one-time
+     * worst-case allocation) reuses the instance scratch + worst-case buffers, so it is 0 B/op. Cold,
+     * O(m log sigma). S4: -0 is normalized to +0. Fails closed on any non-finite entry BEFORE the
+     * queryable buffers (`_words` / `_n` / ...) are touched, so a throw leaves the tree unchanged.
+     */
+    _fill(values, m, useInstance) {
+        const wpl = this._wpl, blocks = this._blocks, blkStride = this._blkStride;
+        let src, sort, codes, nxt;
+        if (useInstance) { src = this._srcScratch; sort = this._sortScratch; codes = this._codes; nxt = this._nxt; }
+        else { src = new Float64Array(m); sort = new Float64Array(m); codes = new Int32Array(m); nxt = new Int32Array(m); }
+        // Snapshot + validate finite (typeof-first). S4: normalize -0 to +0. Throws before ANY
+        // queryable buffer is written (only the scratch is touched here) -> the tree stays unchanged.
+        for (let i = 0; i < m; i++) {
             const v = values[i];
             if (typeof v !== 'number' || !Number.isFinite(v)) {
                 throw new TypeError(
                     '[lite-logn] WaveletTree value must be a finite number, got ' + String(v));
             }
-            src[i] = v;
+            const nv = v === 0 ? 0 : v;       // -0 -> +0 (v === 0 is true for both; assign +0)
+            src[i] = nv;
+            sort[i] = nv;
         }
-        // Coordinate-compress: sort a copy, dedupe in place -> the distinct remap table (sorted ascending).
-        const sorted = src.slice();
-        sorted.sort();                        // TypedArray.sort is NUMERIC (no comparator needed)
+        // Coordinate-compress in place: sort, dedupe into the FRONT of `sort`. For instance scratch
+        // with m < its length, fill the tail with +Infinity and sort the FULL buffer (0-alloc, the
+        // real values land at the front); NEVER a subarray view (that would allocate per call).
+        if (useInstance && m < sort.length) sort.fill(Infinity, m);
+        sort.sort();                          // TypedArray.sort is NUMERIC
         let sigma = 0;
-        for (let i = 0; i < n; i++) {
-            const v = sorted[i];
-            if (sigma === 0 || v !== sorted[sigma - 1]) sorted[sigma++] = v;
+        for (let i = 0; i < m; i++) {
+            const v = sort[i];
+            if (sigma === 0 || v !== sort[sigma - 1]) sort[sigma++] = v;
         }
-        const remap = sorted.slice(0, sigma); // the actual distinct values, ascending; code == index here
-        // levels = ceil(log2 sigma) via an EXACT float loop (never `1 << k`, which wraps at k >= 31, and
-        // never Math.log2, which can mis-round a power of two). At least ONE level so the layout is uniform.
         let bitlen = 0;
         while (2 ** bitlen < sigma) bitlen++;
-        const L = bitlen === 0 ? 1 : bitlen;
-        const wpl = Math.ceil(n / 32);        // 32-bit words per level's bitvector
-        // FLOAT product guard (never `| 0`): the exact word product fails CLOSED on overflow.
-        const cells = L * wpl;
-        if (cells > WT_MAX_CELLS) {
-            throw new RangeError(
-                '[lite-logn] WaveletTree word budget ' + cells + ' (levels ' + L +
-                ' x wordsPerLevel ' + wpl + ') exceeds ' + WT_MAX_CELLS);
+        const L = bitlen === 0 ? 1 : bitlen;  // <= Lmax by construction (sigma <= m <= _cap)
+        let remap, words, Z, blk;
+        if (useInstance) {
+            remap = this._remap; words = this._words; Z = this._Z; blk = this._blk;
+            for (let i = 0; i < sigma; i++) remap[i] = sort[i]; // copy distinct into the pre-alloc remap
+        } else {
+            remap = sort.slice(0, sigma);     // ACTUAL-sized distinct table
+            words = new Uint32Array(L * wpl); // ACTUAL-level buffers (1.3.0 footprint)
+            Z = new Int32Array(L);
+            blk = new Uint32Array(L * blkStride);
         }
-        const blocks = Math.ceil(wpl / WT_BLOCK_WORDS);
-        const blkStride = blocks + 1;         // +1 for the per-level total sentinel (= rank1(l, n))
-        const words = new Uint32Array(cells);
-        const Z = new Int32Array(L);
-        const blk = new Uint32Array(L * blkStride);
-        // Compress every source value to its code (its index in `remap`, an exact-match binary search).
-        const codes = new Int32Array(n);
-        for (let i = 0; i < n; i++) {
+        words.fill(0, 0, L * wpl);            // clear the used region (a rebuild reuses the buffer)
+        // Compress every source value to its code (exact-match binary search over remap[0, sigma)).
+        for (let i = 0; i < m; i++) {
             const v = src[i];
             let lo = 0, hi = sigma;
             while (lo < hi) { const mid = (lo + hi) >>> 1; if (remap[mid] < v) lo = mid + 1; else hi = mid; }
-            codes[i] = lo;                    // remap[lo] === v (v is present by construction)
+            codes[i] = lo;
         }
-        // Build the matrix level by level (MSB first): set each level's bits, count zeros, then STABLE-
-        // partition the codes (bit-0 elements first, bit-1 after, order-preserving) into the next level.
+        // Build the matrix level by level (MSB first): set bits, count zeros, STABLE-partition into nxt.
         let cur = codes;
-        let nxt = new Int32Array(n);
+        let nx = nxt;
         for (let l = 0; l < L; l++) {
-            const bit = L - 1 - l;            // bit position tested at this level (MSB at level 0)
+            const bit = L - 1 - l;
             const base = l * wpl;
             let zeros = 0;
-            for (let i = 0; i < n; i++) {
+            for (let i = 0; i < m; i++) {
                 const b = (cur[i] >>> bit) & 1;
                 if (b) words[base + (i >>> 5)] |= (1 << (i & 31));
                 else zeros++;
             }
             Z[l] = zeros;
-            let z = 0, o = zeros;             // stable partition destinations
-            for (let i = 0; i < n; i++) {
+            let z = 0, o = zeros;
+            for (let i = 0; i < m; i++) {
                 const c = cur[i];
-                if ((c >>> bit) & 1) nxt[o++] = c;
-                else nxt[z++] = c;
+                if ((c >>> bit) & 1) nx[o++] = c;
+                else nx[z++] = c;
             }
-            const t = cur; cur = nxt; nxt = t;
+            const t = cur; cur = nx; nx = t;
         }
-        // Build the cumulative block-popcount rank index: blk[l*stride + b] = ones in level l words
-        // [0, b*BLOCK_WORDS); blk[l*stride + blocks] = the level total (the rank1(l, n) sentinel).
+        // Build the cumulative block-popcount rank index over the USED words.
         for (let l = 0; l < L; l++) {
             const base = l * wpl;
             const bbase = l * blkStride;
@@ -6899,21 +7628,68 @@ export class WaveletTree {
                 blk[bbase + b] = acc;
                 const w0 = b * WT_BLOCK_WORDS;
                 const w1 = w0 + WT_BLOCK_WORDS < wpl ? w0 + WT_BLOCK_WORDS : wpl;
-                for (let w = w0; w < w1; w++) acc += wtPopcount32(words[base + w]);
+                for (let w = w0; w < w1; w++) acc += wtPopcount32(words[base + w] | 0); // F10: | 0 -> Smi
             }
             blk[bbase + blocks] = acc;
         }
-        this._n = n;                          // element count (fixed)
+        // Assign the queryable buffers LAST (after the finite scan cannot throw), then the counts.
+        this._words = words; this._Z = Z; this._blk = blk; this._remap = remap;
+        if (useInstance) { this._codes = cur; this._nxt = nx; } // keep the swapped scratch identities
+        this._n = m;                          // current element count
         this._sigma = sigma;                  // distinct value count
         this._levels = L;                     // ceil(log2 sigma), >= 1
-        this._wpl = wpl;                      // 32-bit words per level
-        this._blkStride = blkStride;          // blocks + 1
-        this._blocks = blocks;                // blocks per level
-        this._bits = n * L;                   // disclosed bit count (n per level x levels)
-        this._words = words;                  // the flat level-packed bitvectors
-        this._blk = blk;                      // the cumulative block-popcount rank index
-        this._Z = Z;                          // per-level zero count
-        this._remap = remap;                  // sorted distinct values (code -> value)
+        this._bits = m * L;                   // disclosed bit count (m per level x levels)
+    }
+
+    /**
+     * Rebuild this tree in place from `values` (F14 / S6), producing a structure IDENTICAL to
+     * `new WaveletTree(values)`. `values.length` must be an integer in `[1, constructed length]`,
+     * else a tagged throw; NaN / non-finite entries still throw `[lite-logn]` (filtering them is the
+     * caller's job -- lite-hud does it). O(m log sigma).
+     *
+     * MEMORY: the FIRST call allocates the worst-case rebuild buffers + build scratch ONCE --
+     * `Lmax*wpl + Lmax*blkStride` Uint32 words (`Lmax = ceil(log2 cap)`, `wpl = ceil(cap/32)`) plus
+     * `Lmax` Int32, `cap` Float64 (`_remap`), and `2*cap` Float64 + `2*cap` Int32 of scratch (~32 B
+     * per constructed element). EVERY LATER rebuildFrom is 0 B/op. A never-rebuilt instance never pays
+     * this and keeps the 1.3.0 footprint.
+     * @param {ArrayLike<number>} values  finite numbers (any order); length <= the constructed length
+     * @returns {this}
+     */
+    rebuildFrom(values) {
+        if (values == null || typeof values.length !== 'number') {
+            throw new TypeError('[lite-logn] WaveletTree.rebuildFrom needs an array-like of finite numbers');
+        }
+        const m = values.length;
+        if (!Number.isInteger(m) || m < 1 || m > this._cap) {
+            throw new RangeError(
+                '[lite-logn] WaveletTree.rebuildFrom length must be an integer in [1, ' + this._cap +
+                '] (the constructed length), got ' + String(m));
+        }
+        // VALIDATE (read-only) BEFORE allocating or swapping any buffer, so a rejected rebuild (a
+        // non-finite entry) leaves every query byte-identical -- the lazy swap below must not run on a
+        // build that will throw. (`_fill` re-scans, but by then it cannot throw.)
+        for (let j = 0; j < m; j++) {
+            const v = values[j];
+            if (typeof v !== 'number' || !Number.isFinite(v)) {
+                throw new TypeError(
+                    '[lite-logn] WaveletTree value must be a finite number, got ' + String(v));
+            }
+        }
+        if (!this._rebuildReady) {
+            // ONE-TIME worst-case allocation (disclosed above): later rebuilds reuse these -> 0 B/op.
+            const cap = this._cap, Lmax = this._Lmax, wpl = this._wpl, blkStride = this._blkStride;
+            this._words = new Uint32Array(Lmax * wpl);
+            this._Z = new Int32Array(Lmax);
+            this._blk = new Uint32Array(Lmax * blkStride);
+            this._remap = new Float64Array(cap);
+            this._srcScratch = new Float64Array(cap);
+            this._sortScratch = new Float64Array(cap);
+            this._codes = new Int32Array(cap);
+            this._nxt = new Int32Array(cap);
+            this._rebuildReady = true;
+        }
+        this._fill(values, m, true);
+        return this;
     }
 
     /** Element count (the source length). O(1). */
@@ -6947,9 +7723,9 @@ export class WaveletTree {
         const b = w >>> 2;                                // block index (WT_BLOCK_WORDS = 4 words)
         let r = this._blk[level * this._blkStride + b];
         const wend = base + w;
-        for (let k = base + (b << 2); k < wend; k++) r += wtPopcount32(words[k]);
+        for (let k = base + (b << 2); k < wend; k++) r += wtPopcount32(words[k] | 0); // F10: | 0 -> Smi arg
         const rem = pos & 31;
-        if (rem !== 0) r += wtPopcount32(words[base + w] & ((1 << rem) - 1));
+        if (rem !== 0) r += wtPopcount32((words[base + w] & ((1 << rem) - 1)) | 0);   // F10: | 0 -> Smi arg
         return r;
     }
 
@@ -7103,6 +7879,38 @@ export class WaveletTree {
             }
         }
         return this._remap[code];
+    }
+
+    /**
+     * `out[j] := quantile(lo, hi, k)` -- the ZERO-BOX sibling of `quantile` (F11 / S6). The k-th
+     * smallest value is written straight into a caller-owned `Float64Array` slot, so the computed
+     * double never crosses a return boundary and never boxes (lite-hud M5's render path). Same
+     * fail-closed doors as `quantile`, plus: `out` must be a Float64Array (TYPE) and `j` an integer
+     * in `[0, out.length)`. O(log sigma), 0 B/op.
+     * @param {Float64Array} out  destination buffer
+     * @param {number} j          destination index, integer in [0, out.length)
+     * @param {number} lo         index range start, integer in [0, length)
+     * @param {number} hi         index range end (inclusive), integer in [lo, length)
+     * @param {number} k          order statistic, integer in [0, hi - lo]
+     * @returns {void}
+     */
+    quantileInto(out, j, lo, hi, k) {
+        if (!(out instanceof Float64Array)) return this._badOut(out);
+        if (typeof j !== 'number' || !Number.isInteger(j) || j < 0 || j >= out.length) return this._badOutIndex(j);
+        if (typeof lo !== 'number' || !Number.isInteger(lo) ||
+            typeof hi !== 'number' || !Number.isInteger(hi) ||
+            typeof k !== 'number' || !Number.isInteger(k)) return this._badQuantile(lo, hi, k);
+        const n = this._n;
+        if (lo < 0 || hi >= n || lo > hi || k < 0 || k > hi - lo) return this._badQuantileRange(lo, hi, k);
+        const L = this._levels, Z = this._Z;
+        let a = lo, b = hi + 1, code = 0, kk = k;
+        for (let l = 0; l < L; l++) {
+            const a1 = this._rank1(l, a), b1 = this._rank1(l, b);
+            const zerosInRange = (b - a) - (b1 - a1);
+            if (kk < zerosInRange) { a = a - a1; b = b - b1; code = code << 1; }
+            else { kk -= zerosInRange; a = Z[l] + a1; b = Z[l] + b1; code = (code << 1) | 1; }
+        }
+        out[j] = this._remap[code];           // the only double, stored straight into the slot
     }
 
     /**
@@ -7267,6 +8075,20 @@ export class WaveletTree {
         throw new RangeError(
             '[lite-logn] WaveletTree rangeCount needs vlo <= vhi, got vlo=' + String(vlo) +
             ' vhi=' + String(vhi));
+    }
+
+    /** @private */
+    _badOut(out) {
+        throw new TypeError(
+            '[lite-logn] WaveletTree.quantileInto needs a Float64Array out, got ' +
+            (out === null ? 'null' : typeof out));
+    }
+
+    /** @private */
+    _badOutIndex(j) {
+        throw new RangeError(
+            '[lite-logn] WaveletTree.quantileInto out index must be an integer in [0, out.length), got ' +
+            String(j));
     }
 }
 
@@ -7875,12 +8697,14 @@ export class LinkCutTree {
     _pull(x) {
         const l = this._l[x], r = this._r[x], k = this._k;
         const al = this._agg[l], ar = this._agg[r], v = this._val[x];
-        let a;
-        if (k === 0) { a = al < v ? al : v; a = a < ar ? a : ar; }
-        else if (k === 1) { a = al > v ? al : v; a = a > ar ? a : ar; }
-        else if (k === 2) { a = al + v + ar; }
-        else { a = segGcd(segGcd(al, v), ar); }
-        this._agg[x] = a;
+        // F3: store into _agg[x] in EACH branch -- no shared `let a` phi that unifies the
+        // pure-double sum arm with segGcd's (non-inlined) return and taints every kind's
+        // accumulator into a HeapNumber box per level (RESEARCH 12.2.1).
+        const A = this._agg;
+        if (k === 0) { const m = al < v ? al : v; A[x] = m < ar ? m : ar; }
+        else if (k === 1) { const m = al > v ? al : v; A[x] = m > ar ? m : ar; }
+        else if (k === 2) { A[x] = al + v + ar; }
+        else { A[x] = segGcd(segGcd(al, v), ar); }
     }
 
     /**

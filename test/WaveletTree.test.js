@@ -264,3 +264,123 @@ test('WaveletTree: no mutators exist (STATIC / IMMUTABLE contract)', () => {
         assert.equal(typeof wt[m], 'undefined', 'WaveletTree must have no ' + m + ' (immutable)');
     }
 });
+
+// ============================================================================
+// v1.4.0 consumer stage: quantileInto (F11), rebuildFrom (F14), S4 -0 (F10 |0).
+// ============================================================================
+
+test('WaveletTree.quantileInto: out[j] := quantile(lo,hi,k), matches quantile', () => {
+    const src = [5, 1, 5, 3, 9, 1, 3, 7, 2, 8];
+    const w = new WaveletTree(src);
+    const out = new Float64Array(4);
+    for (let lo = 0; lo < src.length; lo++) {
+        for (let hi = lo; hi < src.length; hi++) {
+            for (let k = 0; k <= hi - lo; k++) {
+                w.quantileInto(out, 2, lo, hi, k);
+                assert.equal(out[2], w.quantile(lo, hi, k), 'q(' + lo + ',' + hi + ',' + k + ')');
+            }
+        }
+    }
+    // doors: bad out type / index / range
+    assert.throws(() => w.quantileInto([0], 0, 0, 1, 0), /\[lite-logn\]/);
+    assert.throws(() => w.quantileInto(out, 9, 0, 1, 0), /\[lite-logn\]/);
+    assert.throws(() => w.quantileInto(out, 0, 0, 100, 0), /\[lite-logn\]/);
+});
+
+test('WaveletTree.rebuildFrom: identical to a fresh build (fuzz)', () => {
+    const cap = 64;
+    const w = new WaveletTree(new Float64Array(cap).fill(0).map((_, i) => i));
+    let rng = 123456789 >>> 0;
+    const rand = () => (rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    for (let iter = 0; iter < 40; iter++) {
+        const m = 1 + Math.floor(rand() * cap);          // length in [1, cap]
+        const vals = [];
+        for (let i = 0; i < m; i++) vals.push(Math.floor(rand() * 20) - 5 + (rand() < 0.3 ? 0.5 : 0));
+        w.rebuildFrom(vals);
+        const fresh = new WaveletTree(vals);
+        assert.equal(w.length, fresh.length);
+        assert.equal(w.levels, fresh.levels);
+        assert.equal(w.distinct, fresh.distinct);
+        for (let lo = 0; lo < m; lo++) {
+            for (let hi = lo; hi < m; hi += Math.max(1, (hi - lo) >> 1) || 1) {
+                for (let k = 0; k <= hi - lo; k++) {
+                    assert.equal(w.quantile(lo, hi, k), fresh.quantile(lo, hi, k), 'iter ' + iter);
+                }
+                assert.equal(w.access(lo), fresh.access(lo));
+                assert.equal(w.rank(vals[lo] === 0 ? 0 : vals[lo], hi), fresh.rank(vals[lo] === 0 ? 0 : vals[lo], hi));
+            }
+        }
+    }
+});
+
+test('WaveletTree.rebuildFrom: length door + NaN fail closed', () => {
+    const w = new WaveletTree([1, 2, 3, 4]);
+    assert.throws(() => w.rebuildFrom([1, 2, 3, 4, 5]), /\[lite-logn\]/); // over constructed length
+    assert.throws(() => w.rebuildFrom([]), /\[lite-logn\]/);
+    assert.throws(() => w.rebuildFrom([1, NaN, 3]), /\[lite-logn\]/);     // NaN still throws (caller filters)
+    // shorter rebuild is fine
+    w.rebuildFrom([7, 7, 7]);
+    assert.equal(w.length, 3);
+    assert.equal(w.access(0), 7);
+});
+
+test('WaveletTree S4: -0 is normalized to +0 in build (no signed zero in the distinct table)', () => {
+    const w = new WaveletTree([-0, 0, -0, 5]);
+    // all three zeros collapse to a single distinct +0 (Object.is proves the sign)
+    assert.ok(Object.is(w.access(0), 0));
+    assert.ok(!Object.is(w.access(0), -0));
+    assert.equal(w.distinct, 2);                  // {0, 5}
+    assert.equal(w.rank(0, 3), 3);                // three zeros in [0,3)
+});
+
+test('WaveletTree: a never-rebuilt instance keeps the 1.3.0 footprint (lazy rebuild buffers)', () => {
+    const n = 4096;
+    const w = new Array(n);
+    for (let i = 0; i < n; i++) w[i] = i & 3;         // only 4 distinct -> actual levels = 2 << Lmax=12
+    const wt = new WaveletTree(w);
+    // Never rebuilt: no worst-case buffers, no retained scratch (the 1.3.0 shape). The lazy fields are
+    // declared `null` in the ctor (one shared hidden class), not absent -- so `in` is true but the
+    // value is null (nothing allocated).
+    assert.equal(wt._rebuildReady, false);
+    assert.equal(wt._srcScratch, null);
+    assert.equal(wt._sortScratch, null);
+    assert.equal(wt._codes, null);
+    assert.equal(wt._nxt, null);
+    assert.ok('_srcScratch' in wt && '_nxt' in wt, 'lazy fields declared for a stable hidden class');
+    // _words sized to the ACTUAL levels (2), NOT the worst case (Lmax = 12).
+    assert.equal(wt.levels, 2);
+    assert.equal(wt._words.length, wt.levels * wt._wpl, 'words sized to actual levels, not Lmax');
+    assert.ok(wt._words.length < wt._Lmax * wt._wpl, 'never-rebuilt words < worst-case words');
+    // First rebuildFrom lazily allocates; later rebuilds reuse.
+    wt.rebuildFrom(w);
+    assert.equal(wt._rebuildReady, true);
+    assert.ok(wt._srcScratch instanceof Float64Array && wt._srcScratch.length === n);
+    assert.equal(wt._words.length, wt._Lmax * wt._wpl, 'after first rebuild, words are worst-case sized');
+    // still correct
+    const fresh = new WaveletTree(w);
+    for (let k = 0; k < 4; k++) assert.equal(wt.quantile(0, n - 1, k * 1000), fresh.quantile(0, n - 1, k * 1000));
+});
+
+test('WaveletTree.rebuildFrom: a rejected FIRST and a rejected LATER rebuild leave every query byte-identical', () => {
+    const src = [3, 1, 2, 2, 5];
+    // rejected FIRST rebuild (before any lazy allocation): must NOT corrupt the tree
+    const w1 = new WaveletTree(src);
+    const snap1 = []; for (let i = 0; i < src.length; i++) snap1.push(w1.access(i));
+    assert.throws(() => w1.rebuildFrom([1, NaN]), /\[lite-logn\]/);
+    assert.equal(w1._rebuildReady, false, 'a rejected first rebuild must not flip _rebuildReady');
+    for (let i = 0; i < src.length; i++) assert.equal(w1.access(i), snap1[i], 'access(' + i + ') after rejected first rebuild');
+    assert.equal(w1.length, src.length);
+    // a good rebuild, then a rejected LATER rebuild: must leave the good state byte-identical
+    const good = [7, 7, 3, 9, 1];
+    w1.rebuildFrom(good);
+    assert.equal(w1._rebuildReady, true);
+    const snap2 = []; for (let i = 0; i < good.length; i++) snap2.push(w1.access(i));
+    assert.throws(() => w1.rebuildFrom([1, 2, Infinity, 4]), /\[lite-logn\]/);
+    assert.throws(() => w1.rebuildFrom([1, 2, 3, 4, 5, 6]), /\[lite-logn\]/);   // length door
+    for (let i = 0; i < good.length; i++) assert.equal(w1.access(i), snap2[i], 'access(' + i + ') after rejected later rebuild');
+    // and the quantile surface still matches a fresh build of `good`
+    const fresh = new WaveletTree(good);
+    for (let lo = 0; lo < good.length; lo++) for (let k = 0; k <= good.length - 1 - lo; k++) {
+        assert.equal(w1.quantile(lo, good.length - 1, k), fresh.quantile(lo, good.length - 1, k));
+    }
+});

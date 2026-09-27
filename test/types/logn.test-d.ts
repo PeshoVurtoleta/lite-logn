@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree, MergeSortTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -56,10 +56,22 @@ const el: number = fen.at(5);
 const flen: number = fen.length;
 fen.forEach((value, index, self) => { void value; void index; void self; });
 const fbuilt: Fenwick = Fenwick.build([1, 2, 3, 4]);
-void fenU; void fenS; void fenC; void p; void pBase; void rs; void el; void flen; void fbuilt;
+const fenSF: Fenwick = fen.setFrom(new Float64Array([1, 2, 3]), 0); // fluent -> this
+const fenSearch: number = fen.search(3.5);   // -> index
+const fenSearchFrom: number = fen.searchFrom(new Float64Array([1, 2, 3]), 1); // -> index (0-box)
+void fenU; void fenS; void fenC; void p; void pBase; void rs; void el; void flen; void fbuilt; void fenSF; void fenSearch; void fenSearchFrom;
 
 // @ts-expect-error -- update delta must be a number.
 fen.update(0, 'x');
+
+// @ts-expect-error -- setFrom needs a Float64Array source.
+fen.setFrom([1, 2, 3], 0);
+
+// @ts-expect-error -- search takes a single numeric target.
+fen.search('3');
+
+// @ts-expect-error -- searchFrom needs a Float64Array source.
+fen.searchFrom([1, 2, 3], 0);
 
 // @ts-expect-error -- Fenwick constructor takes a single length argument.
 new Fenwick(8, 'min');
@@ -74,6 +86,22 @@ const slen: number = seg.length;
 const sk: 'min' | 'max' | 'sum' | 'gcd' = seg.kind;
 seg.forEach((value, index, self) => { void value; void index; void self; });
 const sbuilt: SegmentTree = SegmentTree.build([1, 2, 3, 4], 'min');
+const segSF: SegmentTree = seg.setFrom(new Float64Array([1, 2, 3]), 0); // fluent -> this
+void segSF;
+
+// @ts-expect-error -- setFrom needs a Float64Array source.
+seg.setFrom([1, 2, 3], 0);
+
+// --- WaveletTree (v1.4.0 new APIs) -----------------------------------------
+const wt = new WaveletTree([5, 1, 5, 3, 9]);
+const wq: number = wt.quantile(0, 4, 2);
+const wOut = new Float64Array(4);
+wt.quantileInto(wOut, 0, 0, 4, 2);              // -> void, writes into the slot
+const wtRB: WaveletTree = wt.rebuildFrom([2, 2, 8, 1]); // fluent -> this
+void wq; void wtRB;
+
+// @ts-expect-error -- quantileInto needs a Float64Array out.
+wt.quantileInto([0], 0, 0, 4, 2);
 void segU; void segC; void q; void sat; void slen; void sk; void sbuilt;
 
 // @ts-expect-error -- kind must be 'min' | 'max' | 'sum' | 'gcd'.

@@ -105,8 +105,11 @@ export const BINARYHEAP_SLOPE_HI = 13.44;          // median 9.60 * 1.4
 // Bands calibrated from N=15 fit runs on this machine (medians recorded inline).
 export const FENWICK_UPDATE_SLOPE_LO = 1.84;       // median 3.07 * 0.6
 export const FENWICK_UPDATE_SLOPE_HI = 4.30;       // median 3.07 * 1.4
-export const FENWICK_PREFIX_SLOPE_LO = 1.76;       // median 2.93 * 0.6
-export const FENWICK_PREFIX_SLOPE_HI = 4.10;       // median 2.93 * 1.4
+// Re-centered 2026-09-28 (1.4.0, decisions/0004 amendment): the HIGH->LOW prefix rewrite (search's
+// exact lower_bound) made prefix ~3x cheaper per level (measured via `npm run witness`, default flags);
+// median-of-7 solo = 0.875 (0.814 0.831 0.834 0.875 0.876 0.877 0.896), R^2 0.983-0.993.
+export const FENWICK_PREFIX_SLOPE_LO = 0.53;       // median 0.875 * 0.6
+export const FENWICK_PREFIX_SLOPE_HI = 1.23;       // median 0.875 * 1.4
 
 // --- SegmentTree (v0.3.0): shared R^2 floor, OWN per-op slope bands (D-05) -----
 // Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-
@@ -121,8 +124,11 @@ export const FENWICK_PREFIX_SLOPE_HI = 4.10;       // median 2.93 * 1.4
 // witness sweep is pow2. query folds ~2 nodes/level (its slope is HIGHER than
 // update's single write/level) -- expected, which is why only the R^2 floor is
 // shared. Bands calibrated from N=15 fit runs (medians recorded inline).
-export const SEGTREE_UPDATE_SLOPE_LO = 2.29;       // median 3.83 * 0.6
-export const SEGTREE_UPDATE_SLOPE_HI = 5.35;       // median 3.83 * 1.4
+// RE-CENTERED 2026-09-27 (v1.4.0, F4): the per-kind store removed the segGcd ternary phi from the
+// update climb, so the pure-double sum climb is faster and the per-level slope FELL from 3.83 to a
+// median of 0.645 ns/level over 3 warm solo runs (0.645 / 0.627 / 0.692). See decisions/0004 note.
+export const SEGTREE_UPDATE_SLOPE_LO = 0.43;       // median-of-7 0.715 * 0.6
+export const SEGTREE_UPDATE_SLOPE_HI = 1.00;       // median-of-7 0.715 * 1.4
 export const SEGTREE_QUERY_SLOPE_LO = 4.30;        // median 7.17 * 0.6
 export const SEGTREE_QUERY_SLOPE_HI = 10.04;       // median 7.17 * 1.4
 
@@ -328,8 +334,11 @@ export const FIBONACCIHEAP_POPMIN_SLOPE_HI = 63.41; // median 45.296 * 1.4
 // update's single climb -- so its slope sits ABOVE update's; expected, which is why only the
 // R^2 floor is shared. Bands = median * [0.6, 1.4], centered on the MEDIAN (never a high sample)
 // so a legitimately faster future run is not false-failed; the R^2 floor rejects non-square shapes.
-export const F2D_UPDATE_SLOPE_LO = 2.13;      // median 3.542 * 0.6
-export const F2D_UPDATE_SLOPE_HI = 4.96;      // median 3.542 * 1.4
+// BIMODAL lane (decisions/0004 amendment 2026-09-28): 15 solo runs show two stable, clean modes
+// (R^2 > 0.99 in both) -- ~3.3 (high) and ~1.99 (low), a V8 compile-mode split on the S1 compare.
+// Band = [0.6 x low-mode median, 1.4 x high-mode median]; the R^2 floor and the O(n) foil are untouched.
+export const F2D_UPDATE_SLOPE_LO = 1.19;      // low-mode median ~1.99 * 0.6
+export const F2D_UPDATE_SLOPE_HI = 4.62;      // median-of-7 3.297 * 1.4
 export const F2D_RECTSUM_SLOPE_LO = 2.90;     // median 4.832 * 0.6
 export const F2D_RECTSUM_SLOPE_HI = 6.77;     // median 4.832 * 1.4
 
@@ -350,8 +359,11 @@ export const F2D_RECTSUM_SLOPE_HI = 6.77;     // median 4.832 * 1.4
 // the floor by a wide margin on EVERY run, so NEITHER needs the median-of-fits (fitRuns) hook the
 // noisier lanes use. Bands = median * [0.6, 1.4], centered on the MEDIAN (never a high sample) so a
 // legitimately faster future run is not false-failed; the R^2 floor rejects non-square shapes.
-export const S2D_UPDATE_SLOPE_LO = 3.38;      // median 5.638 * 0.6
-export const S2D_UPDATE_SLOPE_HI = 7.89;      // median 5.638 * 1.4
+// RE-CENTERED 2026-09-27 (v1.4.0, F4): the store-per-branch update dropped the segGcd ternary phi,
+// so the per-level slope FELL from 5.638 to a median of 2.456 ns/level^2 over 3 warm solo runs
+// (2.453 / 2.456 / 2.544). See decisions/0004 note.
+export const S2D_UPDATE_SLOPE_LO = 1.53;      // median-of-7 2.548 * 0.6
+export const S2D_UPDATE_SLOPE_HI = 3.57;      // median-of-7 2.548 * 1.4
 export const S2D_QUERY_SLOPE_LO = 3.06;       // median 5.105 * 0.6
 export const S2D_QUERY_SLOPE_HI = 7.15;       // median 5.105 * 1.4
 
@@ -393,8 +405,12 @@ export const SA_GET_SLOPE_HI = 1.38;          // median 0.984 * 1.4
 // 39.75 39.95 40.01 40.29); single-fit R^2 min 0.9533, median 0.9730, 1/15 below the 0.958 floor -- so
 // the lane opts into the median-of-fits (PST_FIT_RUNS) hook, exactly like SegmentTree.update /
 // PairingHeap / FibonacciHeap. Band = median 39.25 * [0.6, 1.4].
-export const PST_QUERY_SLOPE_LO = 23.55;      // median 39.25 * 0.6
-export const PST_QUERY_SLOPE_HI = 54.95;      // median 39.25 * 1.4
+// RE-CENTERED 2026-09-27 (v1.4.0, F4 + iterative _query): the per-kind double accumulator + the
+// stackless _query removed the recursive double-return box PER LEVEL, so the per-level slope FELL
+// from 39.25 to a median of 15.987 ns/level over 3 warm solo runs (16.174 / 15.450 / 15.987). See
+// decisions/0004 note.
+export const PST_QUERY_SLOPE_LO = 9.53;       // median-of-7 15.879 * 0.6
+export const PST_QUERY_SLOPE_HI = 22.23;      // median-of-7 15.879 * 1.4
 
 // --- MergeSortTree (v0.16.0): shared R^2 floor, OWN countLE band on the SQUARED-log axis (0018) --
 // The family's THIRD squared-log witness member (Fenwick2D / SegmentTree2D were the first two). A
@@ -735,7 +751,7 @@ const F2D_FIT_RUNS = 5;
 // so the median fit clears it reliably. Odd so the median is a real sample. Measurement-quality
 // only (the frozen 0.958 floor and the slope band are untouched; a genuine O(n) shape fails every
 // fit). SegmentTree.query is rock-steady (R^2 ~0.99 every run) so it stays single-fit.
-const SEG_FIT_RUNS = 7;
+const SEG_FIT_RUNS = 9;
 
 // --- deterministic measurement helpers (offline; alloc off the timed body) --
 function nowNs() { return Number(process.hrtime.bigint()); }
@@ -804,7 +820,8 @@ function measureFoil(n) {
 // leaves the number of LEVELS (= log2(n)) as the only variable. Both ops walk the
 // HIGH, spread cells near the top of the tree (~[n/2, n]) so each added level is a
 // genuine access -- the log line is the level count, not a cache artifact.
-const FEN_ITERS = 500000;  // hammered ops per timed batch
+const FEN_ITERS = 1000000;  // raised for the fast high-to-low prefix (noise-limited)
+const FEN_FIT_RUNS = 9;     // median-of-fits for Fenwick.prefix (fast, noise-limited near the floor)  // hammered ops per timed batch
 const FEN_BATCH = 20;      // min-over-batches: the MIN filters interference (only
                            // ambient noise ADDS time, so the min is the cleanest
                            // per-op signal -- the same asymmetry measureAllocs uses).
@@ -915,7 +932,7 @@ function measurePrefixFoil(n) {
 // batch count so min-over-batches rejects ambient interference on the shallow,
 // sub-4ns update line -- measurement QUALITY only, the frozen R^2 floor and the
 // per-op slope bands are untouched. The two fast members measure identically.
-const SEG_ITERS = 500000;
+const SEG_ITERS = 1000000;
 const SEG_BATCH = 20;
 
 // update: hammer an ABSOLUTE set at leaf n-1 -- the leaf write plus a full climb
@@ -2057,8 +2074,9 @@ function measureFibonacciHeapFoil(n) {
 // (log n)^2 level PAIRS is the only variable. A 2D op is ~log^2 heavier per call than a 1D one,
 // so a smaller iter budget keeps the min-over-batches fit reliable -- measurement QUALITY only,
 // the frozen R^2 floor and per-op slope bands are untouched.
-const F2D_ITERS = 100000;  // hammered ops per timed batch
+const F2D_ITERS = 250000;  // hammered ops per timed batch (raised: force the top JIT tier every run)
 const F2D_BATCH = 20;      // min-over-batches (rejects ambient interference)
+const F2D_WARM_PASSES = 4; // multiple warm passes so the run always measures in the same (top) tier
 
 // update: climb BOTH dims from a full-height (idx, idx) start (idx = 2^(m-1), an ODD internal
 // coord), touching the high spread cells -- ~(m-1)^2 `_t` touches, one per level pair, all hot.
@@ -2068,7 +2086,11 @@ function measureF2DUpdate(n) {
     const rnd = mulberry32(0x5151 ^ n);
     for (let i = 0; i < n; i++) f.update(i, (n - 1 - i), rnd() & 0xff); // seed the anti-diagonal
     const idx = 2 ** (Math.floor(Math.log2(n)) - 1);                    // full-height climb start
-    for (let w = 0; w < F2D_ITERS; w++) f.update(idx, idx, (w & 1) ? 1 : -1); // warm
+    // Multi-pass warm-up: enough invocations that V8 reaches its TOP tier BEFORE the first timed
+    // batch on every run, so the slope is unimodal (the bimodality was a run landing in a lower tier).
+    for (let p = 0; p < F2D_WARM_PASSES; p++) {
+        for (let w = 0; w < F2D_ITERS; w++) f.update(idx, idx, (w & 1) ? 1 : -1);
+    }
     let best = Infinity;
     for (let b = 0; b < F2D_BATCH; b++) {
         const t0 = nowNs();
@@ -2293,6 +2315,7 @@ export const MEMBERS = [
         run: measurePrefix,
         foil: measurePrefixFoil,
         foilName: 'naive re-sum (O(n) per query)',
+        fitRuns: FEN_FIT_RUNS,   // fast high-to-low prefix is noise-limited near the floor -> median-of-fits
     },
     {
         name: 'SegmentTree',
@@ -2620,7 +2643,7 @@ export const MEMBERS = [
 ];
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.3.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.4.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

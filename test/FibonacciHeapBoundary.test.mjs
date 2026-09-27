@@ -497,3 +497,157 @@ test('push / decreaseKey check the KEY before the id: with BOTH args invalid, th
     assert.throws(() => h.decreaseKey(4, NaN), /FibonacciHeap key must be a finite number/,
         'decreaseKey must report the KEY error even though the id (4, out of range) is ALSO invalid');
 });
+
+// --- F2: the forest walkers must be STACKLESS (no recursion on child depth) ----------
+// Red on 1.3.0: _freeForest / _forEach / _iterNode recursed on child depth. A long
+// push / popMin / decreaseKey chain grows deep parent-child spines, so after ~20000
+// rounds forEach, the iterator and clear() all threw an untagged RangeError -- the heap
+// could not be walked or emptied. The visited-id SET must equal the live set; forest
+// ORDER is unspecified.
+
+// The reproducer: per round push 3 ids (keys k+1, k+2, k, k decreasing), popMin, then
+// decreaseKey the middle id far below and popMin again. Consolidation + cascading cuts
+// build the deep trees that overflowed the recursive walkers.
+function buildDeepFib(rounds) {
+    const cap = rounds * 3 + 8;
+    const h = new FibonacciHeap(cap, 'min');
+    let k = 1e9;
+    let id = 0;
+    for (let r = 0; r < rounds; r++) {
+        const a = id++;
+        const b = id++;
+        const c = id++;
+        h.push(a, k + 1);
+        h.push(b, k + 2);
+        h.push(c, k);
+        k -= 3;
+        h.popMin();
+        if (h.has(b)) h.decreaseKey(b, k - 1e6);
+        h.popMin();
+    }
+    return h;
+}
+
+test('F2: FibonacciHeap 20000-round chain -- forEach, iterator and clear are stackless', () => {
+    const h = buildDeepFib(20000);
+    const live = h.size;
+    assert.ok(live > 0, 'chain leaves live entries to walk');
+    let count = 0;
+    const seen = new Set();
+    h.forEach((id) => { count++; seen.add(id); });
+    assert.equal(count, live, 'forEach visits every live id (no stack overflow)');
+    assert.equal(seen.size, live, 'forEach set has no duplicates');
+    let iter = 0;
+    const iterSet = new Set();
+    for (const id of h) { iter++; iterSet.add(id); }
+    assert.equal(iter, live, 'iterator yields every live id');
+    assert.equal(iterSet.size, live);
+    // forEach set and iterator set are identical.
+    for (const id of seen) assert.ok(iterSet.has(id), 'iterator set == forEach set');
+    h.clear(); // must not overflow the stack
+    assert.equal(h.size, 0);
+    h.push(0, 1);
+    assert.equal(h.peekMin(), 0, 'push works after a deep clear()');
+});
+
+test('F2: FibonacciHeap walkers are re-entrant (no shared scratch stack)', () => {
+    const h = buildDeepFib(2000);
+    const live = h.size;
+    let outer = 0;
+    h.forEach(() => {
+        outer++;
+        let inner = 0;
+        h.forEach(() => inner++);
+        assert.equal(inner, live, 'inner forEach sees the full set from the outer callback');
+    });
+    assert.equal(outer, live, 'outer forEach completes');
+    const it1 = h[Symbol.iterator]();
+    const it2 = h[Symbol.iterator]();
+    const s1 = new Set();
+    const s2 = new Set();
+    let d1 = false;
+    let d2 = false;
+    while (!d1 || !d2) {
+        if (!d1) { const n = it1.next(); if (n.done) d1 = true; else s1.add(n.value); }
+        if (!d2) { const n = it2.next(); if (n.done) d2 = true; else s2.add(n.value); }
+    }
+    assert.equal(s1.size, live, 'iterator 1 saw the full set');
+    assert.equal(s2.size, live, 'iterator 2 saw the full set');
+});
+
+test('F2: clear() on one arena heap leaves a sibling exactly intact', () => {
+    const [a, b] = FibonacciHeap.arena(200, 'min', 2);
+    for (let i = 0; i < 50; i++) a.push(i, 50 - i);
+    for (let i = 50; i < 100; i++) b.push(i, 100 - i);
+    // force some consolidation depth in the sibling before clearing the other.
+    b.popMin();
+    a.clear();
+    assert.equal(a.size, 0);
+    let count = 0;
+    const seen = new Set();
+    b.forEach((id) => { count++; seen.add(id); });
+    assert.equal(count, b.size, 'sibling still holds all its nodes');
+    assert.equal(seen.size, b.size);
+});
+
+// --- F2 (stage-C review): the walkers must GUARD mid-walk mutation ------------------
+// Red on the pre-guard stackless build: a callback doing remove(cur) / popMin() / clear()
+// self-links the freed current node so the ring walk loops forever handing fn a freed id
+// (the reviewer's 400-seed probe hung 385/400), and decreaseKey(cur) relinks it into the
+// root ring. The guard -- a per-visit budget seeded at _n plus a per-visit ownership test
+// -- makes the walk ALWAYS terminate within a cap counted in the callback, end normally or
+// with a tagged [lite-logn] throw, and NEVER hand fn / yield an id that is not a live
+// member of this heap.
+
+function buildFibForGuard(n) {
+    const h = new FibonacciHeap(n + 4, 'min');
+    for (let i = 0; i < n; i++) h.push(i, n - i);
+    for (let i = 0; i < (n >> 2); i++) h.popMin(); // consolidate -> multi-level trees
+    return h;
+}
+
+for (const mut of ['removeCur', 'popMin', 'clear', 'decCur']) {
+    // Free-ops fire ONCE mid-walk (after the walk has descended into children -- removing
+    // the entry node first would just end the walk and hide the pre-guard self-link loop);
+    // decreaseKey fires every visit (that is the pre-guard ping-pong).
+    const apply = (h, id, visits) => {
+        if (mut === 'removeCur') { if (visits === 3 && h.has(id)) h.remove(id); }
+        else if (mut === 'popMin') { if (visits === 3) h.popMin(); }
+        else if (mut === 'clear') { if (visits === 3) h.clear(); }
+        else if (mut === 'decCur') { if (h.has(id)) h.decreaseKey(id, h.keyOf(id) - 0.001); }
+    };
+
+    test('F2 guard: FibonacciHeap.forEach with ' + mut + ' terminates, no freed id, no hang', () => {
+        const h = buildFibForGuard(200);
+        const cap = 8 * (h.size + 4);
+        let visits = 0;
+        let err = null;
+        try {
+            h.forEach((id) => {
+                assert.ok(h.has(id), mut + ': fn was handed a live member id, never a freed slot');
+                if (++visits > cap) throw new Error('RUNAWAY');
+                apply(h, id, visits);
+            });
+        } catch (e) { err = e; }
+        assert.ok(visits <= cap, mut + ': forEach terminated within the cap (no hang / runaway)');
+        if (err) assert.match(err.message, /\[lite-logn\] FibonacciHeap mutated during forEach/,
+            mut + ': ended with the tagged mutation throw, not RUNAWAY');
+    });
+
+    test('F2 guard: FibonacciHeap iterator with ' + mut + ' terminates, no freed id, no hang', () => {
+        const h = buildFibForGuard(200);
+        const cap = 8 * (h.size + 4);
+        let visits = 0;
+        let err = null;
+        try {
+            for (const id of h) {
+                assert.ok(h.has(id), mut + ': iterator yielded a live member id, never a freed slot');
+                if (++visits > cap) throw new Error('RUNAWAY');
+                apply(h, id, visits);
+            }
+        } catch (e) { err = e; }
+        assert.ok(visits <= cap, mut + ': iterator terminated within the cap (no hang / runaway)');
+        if (err) assert.match(err.message, /\[lite-logn\] FibonacciHeap mutated during iteration/,
+            mut + ': ended with the tagged mutation throw, not RUNAWAY');
+    });
+}

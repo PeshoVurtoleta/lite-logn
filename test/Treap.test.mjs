@@ -293,6 +293,83 @@ test('clear empties the treap, keeps capacity, and is reusable', () => {
     assert.equal(tr.size, 1);
 });
 
+// --- F1: clear() on a split VIEW must free ONLY its own reachable nodes ------
+// Red on 1.3.0: Treap.clear called this._pool.clear(), returning EVERY slot to the
+// shared free-list -- including the sibling view's live nodes. After split(3) on
+// keys 0..5, l.clear() then 6 adds made r.size read 6 and r walk 100..105 (r.get(4)
+// undefined): the sibling was corrupted by a shared-pool wipe.
+
+// count nodes reachable from a view's root (white-box conservation oracle).
+function reachable(tr, root) {
+    let n = 0;
+    const stack = [root];
+    while (stack.length) {
+        const t = stack.pop();
+        if (t === 0) continue;
+        n++;
+        stack.push(tr._left[t]);
+        stack.push(tr._right[t]);
+    }
+    return n;
+}
+
+test('F1: clear() on a split view frees only its own nodes; the sibling is untouched', () => {
+    const tr = new Treap(128, 7);
+    for (let k = 0; k <= 5; k++) tr.set(k, k * 10);
+    const [l, r] = tr.split(3); // l: {0,1,2}, r: {3,4,5}
+    assert.equal(l.size, 3);
+    assert.equal(r.size, 3);
+    // conservation: pool live count == sum of reachable nodes across the two views.
+    assert.equal(l._pool.activeSlots, reachable(l, l._root) + reachable(r, r._root),
+        'pool live == l reachable + r reachable');
+    l.clear();
+    // l is empty; only r's three nodes remain live in the shared pool.
+    assert.equal(l.size, 0);
+    assert.equal(l._pool.activeSlots, reachable(r, r._root), 'clear freed only l');
+    for (let k = 100; k < 106; k++) l.set(k, k); // 6 reallocs from the free-list
+    // r MUST be exactly {3:30, 4:40, 5:50}, size 3 -- not corrupted.
+    assert.equal(r.size, 3, 'sibling size intact after l.clear() + reuse');
+    assert.equal(r.get(3), 30);
+    assert.equal(r.get(4), 40);
+    assert.equal(r.get(5), 50);
+    assert.deepEqual([...r.rangeIter(-Infinity, Infinity)], [3, 4, 5], 'sibling walks 3,4,5');
+    checkInvariants(r, r._root, -Infinity, Infinity);
+    checkInvariants(l, l._root, -Infinity, Infinity);
+});
+
+test('F1: clearing a CONSUMED original frees nothing; then split + merge stays clean', () => {
+    const tr = new Treap(128, 11);
+    for (let k = 0; k < 32; k++) tr.set(k, k);
+    const [l, r] = tr.split(16);
+    const liveAfterSplit = tr._pool.activeSlots;
+    tr.clear(); // the consumed original: root is NIL, so this frees NOTHING
+    assert.equal(tr._pool.activeSlots, liveAfterSplit, 'consumed-original clear frees nothing');
+    // both views still intact and independently correct
+    assert.equal(l.size, 16);
+    assert.equal(r.size, 16);
+    const merged = Treap.merge(l, r);
+    assert.equal(merged.size, 32);
+    assert.deepEqual([...merged.rangeIter(-Infinity, Infinity)],
+        Array.from({ length: 32 }, (_, i) => i), 'merge after consumed-original clear is clean');
+    checkInvariants(merged, merged._root, -Infinity, Infinity);
+    assert.ok(conserved(merged));
+});
+
+test('F1: standalone clear() empties, frees only reachable nodes, refills to full capacity', () => {
+    const CAP = 64;
+    const tr = new Treap(CAP, 5);
+    for (let k = 0; k < CAP; k++) tr.set(k, k);
+    assert.equal(tr._pool.activeSlots, CAP);
+    tr.clear();
+    assert.equal(tr.size, 0);
+    assert.equal(tr._pool.activeSlots, 0, 'all own nodes freed');
+    assert.equal(tr._pool.freeListLength, CAP, 'pool fully reusable');
+    assert.ok(conserved(tr));
+    for (let k = 0; k < CAP; k++) tr.set(k + 1000, k); // capacity fills again
+    assert.equal(tr.size, CAP, 'refills to full capacity after clear');
+    checkInvariants(tr, tr._root, -Infinity, Infinity);
+});
+
 // --- re-entrancy: mutate inside iterator -> throws --------------------------
 
 test('mutating the treap inside rangeIter throws [lite-logn] (structural AND value)', () => {

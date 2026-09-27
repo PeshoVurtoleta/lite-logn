@@ -380,3 +380,84 @@ test('differential fuzz: >= 40k mixed ops on n=1024 match the array oracle per f
         assert.equal(divergences, 0, kind + ' fuzz produced ' + divergences + ' divergences');
     }
 });
+
+// ============================================================================
+// v1.4.0 consumer stage: setFrom (F11), S1 sum bound, F4 fold correctness.
+// ============================================================================
+
+test('SegmentTree.setFrom: leaf i := src[i], same doors as update, for every fold', () => {
+    for (const kind of ['min', 'max', 'sum', 'gcd']) {
+        const st = new SegmentTree(4, kind);
+        const src = kind === 'gcd' ? new Float64Array([6, 9, 12, 8]) : new Float64Array([1.5, 2.5, 3.5, 4.5]);
+        st.setFrom(src, 0).setFrom(src, 1).setFrom(src, 2).setFrom(src, 3);
+        assert.equal(st.at(0), src[0]);
+        assert.equal(st.at(3), src[3]);
+        // matches a fresh build
+        const ref = SegmentTree.build(Array.from(src), kind);
+        assert.equal(st.query(0, 3), ref.query(0, 3));
+    }
+    // type door + fail-closed value doors
+    const s = new SegmentTree(4, 'sum');
+    assert.throws(() => s.setFrom([1, 2, 3, 4], 0), /\[lite-logn\]/);
+    assert.throws(() => s.setFrom(new Float64Array([NaN]), 0), /\[lite-logn\]/);
+    assert.throws(() => s.setFrom(new Float64Array([Infinity]), 0), /\[lite-logn\]/);
+    assert.throws(() => s.setFrom(new Float64Array([1]), 4), /\[lite-logn\]/);
+    const g = new SegmentTree(4, 'gcd');
+    assert.throws(() => g.setFrom(new Float64Array([1.5]), 0), /\[lite-logn\]/); // gcd needs nonneg int
+});
+
+test('SegmentTree S1: sum-kind |value| <= MAX_VALUE/(2*length) at update / build / setFrom', () => {
+    const n = 4;
+    const st = new SegmentTree(n, 'sum');
+    const bound = st._sumBound;                   // = MAX_VALUE / (2 * length)
+    assert.equal(bound, Number.MAX_VALUE / (2 * n));
+    st.update(0, bound);                          // exactly the bound is allowed
+    assert.equal(st.at(0), bound);
+    assert.throws(() => st.update(1, bound * 1.01), /\[lite-logn\]/);
+    assert.equal(st.at(1), 0);                    // state unchanged
+    assert.throws(() => st.setFrom(new Float64Array([bound * 2]), 1), /\[lite-logn\]/);
+    assert.throws(() => SegmentTree.build([bound * 2, 0, 0, 0], 'sum'), /\[lite-logn\]/);
+    // min / max / gcd kinds have NO sum bound
+    const mn = new SegmentTree(2, 'min');
+    mn.update(0, 1e308);                          // fine for min
+    assert.equal(mn.at(0), 1e308);
+});
+
+test('SegmentTree F4: query matches a naive fold over a fuzz corpus, every kind', () => {
+    const gcd = (a, b) => { while (b) { const r = a % b; a = b; b = r; } return a; };
+    for (const kind of ['min', 'max', 'sum', 'gcd']) {
+        const n = 37;
+        const vals = new Array(n);
+        for (let i = 0; i < n; i++) vals[i] = kind === 'gcd' ? ((i * 7 + 3) % 50) + 1 : ((i * 2654435761 >>> 0) & 0xffff) + (kind === 'sum' ? 0.25 : 0);
+        const st = SegmentTree.build(vals, kind);
+        const naive = (lo, hi) => {
+            let r = kind === 'min' ? Infinity : kind === 'max' ? -Infinity : 0;
+            for (let i = lo; i <= hi; i++) r = kind === 'min' ? Math.min(r, vals[i]) : kind === 'max' ? Math.max(r, vals[i]) : kind === 'sum' ? r + vals[i] : gcd(r, vals[i]);
+            return r;
+        };
+        for (let lo = 0; lo < n; lo++) for (let hi = lo; hi < n; hi++) {
+            assert.equal(st.query(lo, hi), naive(lo, hi), kind + ' [' + lo + ',' + hi + ']');
+        }
+    }
+});
+
+test('SegmentTree S1: MAX_VALUE/(2*length) fails CLOSED where MAX_VALUE/length would round up (n=3 + sweep)', () => {
+    // n=3: MAX_VALUE / 3 rounds UP, so 3 leaves at MAX_VALUE/length would sum to Infinity. The
+    // /(2*length) bound must keep a full-range fold finite.
+    const st = new SegmentTree(3, 'sum');
+    const b = st._sumBound;
+    st.update(0, b); st.update(1, b); st.update(2, b);
+    assert.ok(Number.isFinite(st.query(0, 2)), 'n=3 full-range fold must be finite, got ' + st.query(0, 2));
+    // sweep 1..3000: every length, all leaves at the bound, full-range fold stays finite (0 overflows).
+    let overflows = 0;
+    for (let L = 1; L <= 3000; L++) {
+        const s = new SegmentTree(L, 'sum');
+        const bb = s._sumBound;
+        for (let i = 0; i < L; i++) s.update(i, bb);
+        if (!Number.isFinite(s.query(0, L - 1))) overflows++;
+    }
+    assert.equal(overflows, 0, 'S1 sum bound overflowed for ' + overflows + ' lengths in 1..3000');
+    // build + setFrom honor the same bound.
+    assert.throws(() => SegmentTree.build([b * 2.1, 0, 0], 'sum'), /\[lite-logn\]/);
+    assert.throws(() => st.setFrom(new Float64Array([b * 2.1]), 0), /\[lite-logn\]/);
+});

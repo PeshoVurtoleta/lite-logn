@@ -1,7 +1,7 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v1.3.0 nineteen members have
+avoid, and how to measure the logarithm yourself. At v1.4.0 nineteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
 SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree,
@@ -34,7 +34,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v1.3.0 all nineteen members have
+`(am)` = amortized, `(exp)` = expected. At v1.4.0 all nineteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -221,7 +221,7 @@ The default log2(n)-axis ops, cheapest per level first:
 | Op | slope ns/level | `R^2` | memory (B/live) | pick it when |
 | --- | --- | --- | --- | --- |
 | `SortedArray.get` | 1.0 | 0.98 | 16 (exact) | a read-mostly ordered map: the shallowest per-level cost, but insert is an O(n) shift |
-| `Fenwick.update` / `.prefix` | 2.6 - 2.8 | 0.97 - 0.98 | 8 (exact) | the cheapest per-level cost + the tightest memory; sum-only prefix/range |
+| `Fenwick.update` / `.prefix` | 2.8 / 0.9 | 0.97 - 0.98 | 8 (exact) | the cheapest per-level cost + the tightest memory; sum-only prefix/range |
 | `CartesianTree.rangeMinIndex` | 2.9 | 0.99 | 8 (source) + n log n lift | offline range MIN / MAX (RMQ) over a fixed sequence + a walkable tree (RMQ = LCA); build-once immutable |
 | `SegmentTree.update` | 3.1 | 0.99 | 16 (exact) | any associative fold (min/max/sum/gcd), point update |
 | `Scapegoat.get` | 3.8 | 0.99 | 40 | worst-case (not expected) O(log n) reads + rank / select; rebuilds amortize inserts |
@@ -294,7 +294,7 @@ the same walk for free.
 **Measure it yourself:** `npm run witness` fits `update` and `prefix` against
 `nsPerOp = intercept + slope*log2(n)`. Both must clear the shared R^2 floor
 (0.958) and sit inside their own slope bands (`update [1.84, 4.30]`,
-`prefix [1.76, 4.10]` ns/level -- lower than BinaryHeap's pop because a single
+`prefix [0.53, 1.23]` ns/level (re-centered 1.4.0) -- lower than BinaryHeap's pop because a single
 `i & -i` touch per level is cheaper than a sift; see
 [`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). Both O(n)
 foils -- a prefix-array rebuild per update, a naive re-sum per query -- must MISS

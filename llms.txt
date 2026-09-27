@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.3.0
+Version: 1.4.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -429,11 +429,35 @@ The roster (one member per session, each landing append-only):
   - `at(i)` -> number. The single element = prefix(i) - prefix(i-1).
   - `set(i, value)` -> this. Set element i to value (absolute), via
     update(i, value - at(i)); value must be finite.
-  - `length` getter; `clear()` -> this (zero-fill, keep capacity);
-    `forEach(fn)` visits (value, index, fenwick) in ascending index order.
+  - `setFrom(src, i)` -> this. Element i := src[i] (src a `Float64Array`; the value
+    is read INSIDE so no double crosses -- the 0-box sibling of `set`, F11 / S6).
+    Same finite + S1 magnitude-budget doors as set; a non-`Float64Array` src throws.
+  - `search(target)` -> index. The smallest i with prefix(i) >= target, an EXACT
+    lower_bound over the library's own prefix() (the descent sums cells HIGH->LOW,
+    bit-for-bit as prefix() does). O(log n) ALWAYS -- a zero-run is spanned by O(log n)
+    tree cells, never O(zero-run)/O(n). Returns `length` iff target > total or target
+    === +Infinity; target <= 0 -> 0. For exactly-representable sums (integers <= 2^53)
+    it matches a BigInt oracle and never returns a zero-weight index for target > 0; for
+    fractional weights the returned index's prefix is within one ULP of target (the
+    sampling float bound). Precondition (documented, NOT enforced): every element >= 0.
+    NaN / non-number throws. Sampling: with u uniform in (0, total], search(u) picks i
+    with prob w_i/total up to the rounding of the stored prefix sums (crossing within one
+    ULP). Boxes its one target arg when not inlined -- use searchFrom for 0 B/op.
+  - `searchFrom(src, i)` -> index. target := src[i], read INSIDE -> 0 B/op (the slot
+    sibling of search; lite-pick calls it per pick from a non-inlined site). Identical
+    semantics + doors, sharing the same body. Non-Float64Array src / out-of-range i /
+    NaN src[i] throw [lite-logn]; byte-identical state on a rejection.
+  - `length` getter; `clear()` -> this (zero-fill, keep capacity; resets the S1
+    magnitude bound); `forEach(fn)` visits (value, index, fenwick) ascending.
   - `Fenwick.build(values)` -> Fenwick. O(n) LINEAR bulk build (each cell adds
     itself to its parent in one pass -- NOT n incremental updates); fails closed
-    on a non-array-like or any non-finite value.
+    on a non-array-like, any non-finite value, or an over-budget sum |value| (S1).
+  - S1 OVERFLOW BUDGET: a scalar upper bound on sum |element| (update adds |delta|,
+    set / setFrom add |new-old|, build sets sum|v|, clear resets), budget MAX_VALUE/2.
+    Hot path: one add + one compare. Over budget -> an O(n) cold exact recompute that
+    resets the bound and either accepts or throws with the state unchanged, so a finite
+    input can never produce a sticky NaN. Near a true magnitude ~1e308 the cold path
+    can repeat under churn (disclosed).
 
 - `SegmentTree` -- class. An associative range-query AND a point-update, BOTH
   O(log n), over a SINGLE flat `Float64Array(2n)` (leaves at n..2n-1, `_t[0]`
@@ -452,7 +476,11 @@ The roster (one member per session, each landing append-only):
     on out-of-range or lo > hi (matching Fenwick.rangeSum). lo == hi returns that
     single leaf. A fresh / cleared tree queries to the identity.
   - `update(i, value)` -> this. Set leaf i to value (ABSOLUTE), then fix ancestors;
-    value finite (nonnegative integer for the gcd kind), out-of-range i throws.
+    value finite (nonnegative integer for the gcd kind), out-of-range i throws. Sum
+    kind bounds |value| <= MAX_VALUE / (2 * length) at the door (S1; the factor 2 because
+    MAX_VALUE / length rounds up for many lengths), so a full-range fold never overflows.
+  - `setFrom(src, i)` -> this. Leaf i := src[i] (src a `Float64Array`, read INSIDE --
+    the 0-box sibling of `update`, F11 / S6); same finite / gcd-domain / S1 doors.
   - `at(i)` -> number. The single leaf value. O(1). Out-of-range i throws.
   - `length` / `kind` getters; `clear()` -> this (reset to identity, keep
     capacity); `forEach(fn)` visits (value, index, tree) in ascending leaf order.
@@ -837,9 +865,19 @@ The roster (one member per session, each landing append-only):
   - `quantile(lo, hi, k)` -> number. The ACTUAL k-th smallest VALUE (0-based) in the INDEX range [lo, hi]
     INCLUSIVE -- the order statistic MergeSortTree deferred. Worst-case O(log sigma), 0 B/op. A
     non-integer / out-of-range lo or hi, lo > hi, or k outside [0, hi - lo] throws.
+  - `quantileInto(out, j, lo, hi, k)` -> void. out[j] := quantile(lo, hi, k) -- the value is written
+    straight into a caller-owned `Float64Array` slot, so the 0-box sibling of `quantile` (F11 / S6). Same
+    lo / hi / k doors; a non-`Float64Array` out or an out-of-range j throws. O(log sigma), 0 B/op.
   - `rangeCount(lo, hi, vlo, vhi)` -> number. Count of stored values in the VALUE-window [vlo, vhi]
     INCLUSIVE within the INDEX range [lo, hi] INCLUSIVE -- O(log n), improving MergeSortTree's O(log^2 n).
     Worst-case O(log sigma), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws.
+  - `rebuildFrom(values)` -> this. Rebuild in place INTO the constructed buffers (F14 / S6): 0 B/op when
+    the length equals the constructed length (the ring-snapshot case), producing a structure IDENTICAL to
+    `new WaveletTree(values)`. `values.length` must be an integer in [1, constructed length], else a tagged
+    throw; NaN / non-finite entries still throw (filtering them is the caller's job). Build's sort / dedupe /
+    compress temporaries and worst-case level buffers are allocated LAZILY on the FIRST rebuildFrom
+    (~32 B / constructed element, one-time); every LATER rebuild is 0 B/op, and a never-rebuilt instance
+    keeps the 1.3.0 footprint. S4: build normalizes -0 to +0 (cold). O(m log sigma).
   - `length` / `size` getters -> the element count (the source length); `levels` getter ->
     `ceil(log2 distinct)` (>= 1, the descent depth); `distinct` getter -> the compressed alphabet size
     (sigma); `bits` getter -> the total bitvector bit count (`n * levels`, the disclosed O(n log sigma)

@@ -619,6 +619,122 @@ coder -> reviewer -> qa + the torture, witness, and perf gates. A+ bar per membe
 - **What does further user research add or reorder?** (This roster folds in the user's candidate list;
   treat any additional notes as authoritative input at planning time.)
 
+
+---
+
+## 12. Final-sweep audit of 1.3.0 (2026-09-25) -- the record behind ROADMAP section 8
+
+Two parallel read-only audits of 1a38599. The allocation method: count minor GCs (scavenges) at
+N=200k and 8N under `--max-semi-space-size=4` (Node 26.8.2), one lane per process, inputs from a
+Float64Array. Input kinds were int / frac / p30 / p31 / n31 / p53. Each lane ran fresh and after a
+warm-up of every class at every kind. Calibration: one 16 B box per op reads 24 fresh / 12 warmed.
+
+### 12.1 Why the gates passed
+
+Every perf and torture input is `& 0xffff`, a Smi, so no double ever crossed a call. The teeth
+were a fresh `[]`, far above the one-box signal. The driver tiering was also unstable: one long
+`hot(n)` call ran in Maglev code that boxes double arguments, and runs flipped between 0 and 24.
+The fix is many ~2k-op calls after a long warm-up.
+
+### 12.2 Lessons (new for the suite)
+
+1. **A tagged phi is a box per iteration.** `let a;` assigned in an if/else chain where ONE branch
+   calls a generic helper (`segGcd`) keeps `a` tagged in every kind's code path. The sum kind then
+   boxes at every tree level (LCT `_pull`, SegmentTree, 2D, PST): hundreds of B/op from one line.
+   Store per branch, or give each kind its own loop.
+2. **"Clean when inlined" is not clean.** SegmentTree 1D reads 0 in a monomorphic probe and 244
+   B/op with inlining off. A cross-module consumer (lite-hud's `write()`, a large function) is the
+   non-inlined case, so gate it with `--max-inlined-bytecode-size=0` (N3).
+3. **`number | undefined` returns always box**, even inlined. An API that a consumer calls per frame
+   needs an integer-slot or `Into` form.
+4. **A Uint32 word >= 2^31 is not a Smi**, even with integer INPUTS: WaveletTree's popcount helper
+   boxes its argument. `| 0` fixes it.
+5. **Recursion is a capacity bug.** A recursive walker over a pooled structure is bounded by the
+   stack, not by `capacity`. Pairing/Fibonacci heaps reach stack depth with ordinary descending
+   pushes, and the recovery path (`clear()`) is itself recursive.
+6. **Views that share an arena share `clear()`.** Any split / view API must scope destructive
+   operations to its own reachable set.
+7. **Finite in, NaN out.** Door checks for finiteness are not enough for sum folds: 1e308 + 1e308
+   overflows to Infinity, and a later subtraction gives NaN that sticks. Bound the magnitude, or
+   accept and disclose it.
+
+### 12.3 For the lite-hud M5 consumer
+
+- Fenwick: 0 B/op on the ring pattern (set + wrapped two-query window). No accumulating drift
+  (1.1e-12 over 1e7 overwrites). Transient cancellation after a huge value is healed within one lap.
+- SegmentTree min/max: one box per call for the HUD-passed value (entry) unless inlined, so it
+  needs `setFrom(buf, i)` (F11). Sum is F4.
+- WaveletTree: exact (0 mismatches / 216k). It throws tagged on NaN, so filter NaN slots before
+  building. `quantile` is 16 B/call and a build is ~12 KB; a 0 B/op render needs `quantileInto` +
+  `rebuildFrom` (F11, F14).
+- CartesianTree: clean.
+
+### 12.4 Independent reproduction (same day, fresh probes)
+
+F1-F11 and F13 reproduce (ROADMAP 8.1 has the per-finding numbers). Two results differ from the audit,
+and one finding was missed:
+
+- **The polarity is driver-dependent.** LCT `pathAggregate(u, v)` on fractional sums read 1749 fresh
+  and 25 after a gcd warm-up. The audit read 24 fresh and 897 warmed. Either way, the tagged phi boxes
+  in SOME feedback state, so a gate has to run both states.
+- **F12 does not reproduce.** The perf gate passed 71/71 in 4 runs: plain, 6 burners (twice), and 12
+  burners on 12 cores.
+- **A closure-captured accumulator is its own box.** A first probe wrote `acc += q()` into a `let` that
+  a closure captured. That boxed on every op and hid the real signal (st2 query int read 24 instead
+  of 1). A probe's sink must be a function local, written once per chunk to a typed array. The N1
+  driver has to follow the same rule, or the gate measures itself.
+- **The fixes work.** On a scratch copy, the store-per-branch `_pull` took 363 -> 12 and 1749 -> 13
+  (the residue is the argument or return box). `| 0` at all three `wtPopcount32` call sites took
+  373 -> 1.
+- **New doc drift:** README's Constants table still says `VERSION` is `'1.1.1'`.
+
+---
+
+## 13. EulerTourTree -- design notes for v1.5.0 (ROADMAP section 9)
+
+**The niche.** LinkCutTree folds PATHS in a ROOTED forest and defers subtree folds (0021 D-LCT6).
+An Euler-tour tree folds SUBTREES and whole COMPONENTS in an UNROOTED forest under link / cut. It also
+answers `connected` without restructuring anything. It is also the substrate of general-graph dynamic
+connectivity (Holm-de Lichtenberg-Thorup keeps one ETT forest per level), which is a possible later
+member and out of scope here.
+
+**The tour (Henzinger-King).** Each vertex gets one node, which holds its value. Each edge gets two arc
+nodes, u->v and v->u, which hold the fold identity. A tree's tour is the CYCLIC sequence of its arcs.
+Each vertex node is placed right after one of its entering arcs (an isolated vertex is a one-node
+tour). Rotations do not change the cyclic order, so any linearization is a valid representation, and
+"reroot at u" is just a rotation that starts at u's node.
+
+- **link(u, v):** `rot_u(T_u) ++ [u->v] ++ rot_v(T_v) ++ [v->u]`, where `rot_x` starts at x's node.
+  Both ends of `rot_x` are "at x", so the spliced sequence is a valid cyclic tour. u's node ends up
+  cyclically right after the arc v->u, so the invariant holds.
+- **cut(u, v):** write the tour as `A (u->v) B (v->u) C`. The two trees are `B` and `C ++ A`. Free the
+  two arc slots.
+- **Subtree fold of v's side of edge (v, p):** this is the cyclic segment strictly between p->v and
+  v->p. Proof sketch: every vertex x on v's side has all of its incident arcs inside that segment, and
+  x's node sits after one of them. v's own node sits after p->v, or after the arc from v's old parent,
+  and both of those are inside the segment. When p->v comes before v->p in the linearization, the
+  segment is one open range. Otherwise it is the complement, which is two ranges. Every admitted fold
+  is associative and commutative, so no inverse is needed and min / max / gcd work.
+
+**Treap over splay (the D-ETT1 lean).** A splay would give amortized bounds, but the amortized
+argument only covers accesses that splay. An unsplayed parent climb from a vertex to its root is
+unbounded, so every read would have to splay, and every read would mutate. That is the LCT F9 / S3
+class of problem again. A treap with parent pointers keeps expected O(log n) depth no matter the
+access pattern. Then `connected` is two parent climbs, a rank is a climb that sums left-subtree sizes,
+and a range fold is a top-down read, all non-mutating. The priorities come from the family's seeded
+LCG, the same one Treap uses. Split and merge must be ITERATIVE (lesson 12.2.5). One approach is the
+top-down two-hand method that SplayTree already uses, with slot 0 as the header and the touched spine
+recorded in `_stk` and pulled bottom-up. The other is a bottom-up split from the node along its parent
+chain. The planner picks one.
+
+**Footprint.** 3V-1 slots x (l, r, p, prio, size, vcount as Uint32 + val, agg as Float64 = 40 B) plus a
+>= 4V-entry arc table at 12 B/entry, about 170 B per vertex. That is the co-headline for D3. LCT is about
+41 B per vertex, and ETT pays the difference for subtree folds and read-only connectivity.
+
+**Lessons applied from birth:** no tagged phi in `_pull` (12.2.1); `<= 1 box/op` for double returns
+from non-inlined calls, disclosed (12.2.2-3); iterative everywhere, with clear() tested on a 2^20
+path (12.2.5); no views, so no shared-clear hazard (12.2.6); the sum bound from S1 (12.2.7).
+
 ---
 
 *This document consolidates the design identity, the logarithmic-growth-witness anchor, the full

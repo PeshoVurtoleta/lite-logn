@@ -335,3 +335,133 @@ for (const kind of ['min', 'max']) {
         assert.deepEqual(drainedSorted, expectedMultiset, 'drained multiset matches the model');
     });
 }
+
+// --- F2: the forest walkers must be STACKLESS (no recursion on child depth) ----------
+// Red on 1.3.0: _freeForest / _forEach / _iterNode recursed on child depth. Descending
+// pushes (each push links under the running min) build a single deep chain, so forEach
+// threw an untagged RangeError from ~n=6346, the iterator from ~n=4443 and clear() from
+// ~n=6836 -- and a heap that big could not even be emptied. The set of visited ids must
+// stay exactly the live set; forest ORDER is unspecified.
+
+test('F2: PairingHeap(1e6) descending pushes -- forEach, iterator and clear are stackless', () => {
+    const N = 1e6;
+    const h = new PairingHeap(N, 'min');
+    for (let i = 0; i < N; i++) h.push(i, N - i); // descending keys -> a deep child chain
+    let count = 0;
+    const seen = new Uint8Array(N);
+    h.forEach((id) => { count++; seen[id] = 1; });
+    assert.equal(count, N, 'forEach visits every id (no stack overflow)');
+    let distinct = 0;
+    for (let i = 0; i < N; i++) distinct += seen[i];
+    assert.equal(distinct, N, 'forEach set == the full live id set');
+    let iter = 0;
+    for (const _id of h) iter++; // eslint-disable-line no-unused-vars
+    assert.equal(iter, N, 'iterator yields every id');
+    h.clear(); // must not overflow the stack, and must recover the heap
+    assert.equal(h.size, 0);
+    h.push(0, 1);
+    assert.equal(h.peekMin(), 0, 'push works after a deep clear()');
+});
+
+test('F2: PairingHeap walkers are re-entrant (no shared scratch stack)', () => {
+    const h = new PairingHeap(64, 'min');
+    for (let i = 0; i < 64; i++) h.push(i, 64 - i);
+    // forEach re-entered from its own callback: a shared scratch stack would be clobbered.
+    let outer = 0;
+    h.forEach(() => {
+        outer++;
+        let inner = 0;
+        h.forEach(() => inner++);
+        assert.equal(inner, 64, 'inner forEach sees the full set from within the outer callback');
+    });
+    assert.equal(outer, 64, 'outer forEach completes');
+    // two interleaved live iterators, each must see the full set.
+    const it1 = h[Symbol.iterator]();
+    const it2 = h[Symbol.iterator]();
+    const s1 = new Set();
+    const s2 = new Set();
+    let d1 = false;
+    let d2 = false;
+    while (!d1 || !d2) {
+        if (!d1) { const n = it1.next(); if (n.done) d1 = true; else s1.add(n.value); }
+        if (!d2) { const n = it2.next(); if (n.done) d2 = true; else s2.add(n.value); }
+    }
+    assert.equal(s1.size, 64, 'iterator 1 saw the full set');
+    assert.equal(s2.size, 64, 'iterator 2 saw the full set');
+});
+
+test('F2: clear() on one arena heap leaves a sibling exactly intact', () => {
+    const [a, b] = PairingHeap.arena(200, 'min', 2);
+    for (let i = 0; i < 50; i++) a.push(i, 50 - i);
+    for (let i = 50; i < 100; i++) b.push(i, 100 - i);
+    a.clear();
+    assert.equal(a.size, 0);
+    let count = 0;
+    const seen = new Set();
+    b.forEach((id) => { count++; seen.add(id); });
+    assert.equal(count, 50, 'sibling still holds all its nodes');
+    assert.equal(seen.size, 50);
+    for (let i = 50; i < 100; i++) assert.ok(seen.has(i), 'sibling id ' + i + ' survived');
+});
+
+// --- F2 (stage-C review): the walkers must GUARD mid-walk mutation ------------------
+// Red on the pre-guard stackless build: a callback doing remove(cur) / popMin() / clear()
+// self-links the freed current node (L=R=x, P=0) so the walk loops forever handing fn a
+// freed id, and decreaseKey(cur) relinks the current node as the root's leftmost child so
+// S[x] points back at a visited sibling and the walk ping-pongs without end. The guard --
+// a per-visit budget seeded at _n plus a per-visit ownership test -- makes the walk ALWAYS
+// terminate within a cap counted in the callback, end either normally or with a tagged
+// [lite-logn] throw, and NEVER hand fn / yield an id that is not a live member of this heap.
+
+function buildPairingForGuard(n) {
+    const h = new PairingHeap(n + 4, 'min');
+    for (let i = 0; i < n; i++) h.push(i, n - i); // descending -> a deep child chain
+    for (let i = 0; i < (n >> 2); i++) h.popMin(); // two-pass combine -> real structure
+    return h;
+}
+
+for (const mut of ['removeCur', 'popMin', 'clear', 'decCur']) {
+    // Free-ops fire ONCE mid-walk (after the walk has descended into children -- removing
+    // the entry node first would just end the walk and hide the pre-guard self-link loop);
+    // decreaseKey fires every visit (that is the pre-guard ping-pong).
+    const apply = (h, id, visits) => {
+        if (mut === 'removeCur') { if (visits === 3 && h.has(id)) h.remove(id); }
+        else if (mut === 'popMin') { if (visits === 3) h.popMin(); }
+        else if (mut === 'clear') { if (visits === 3) h.clear(); }
+        else if (mut === 'decCur') { if (h.has(id)) h.decreaseKey(id, h.keyOf(id) - 0.001); }
+    };
+
+    test('F2 guard: PairingHeap.forEach with ' + mut + ' terminates, no freed id, no hang', () => {
+        const h = buildPairingForGuard(200);
+        const cap = 8 * (h.size + 4);
+        let visits = 0;
+        let err = null;
+        try {
+            h.forEach((id) => {
+                assert.ok(h.has(id), mut + ': fn was handed a live member id, never a freed slot');
+                if (++visits > cap) throw new Error('RUNAWAY');
+                apply(h, id, visits);
+            });
+        } catch (e) { err = e; }
+        assert.ok(visits <= cap, mut + ': forEach terminated within the cap (no hang / runaway)');
+        if (err) assert.match(err.message, /\[lite-logn\] PairingHeap mutated during forEach/,
+            mut + ': ended with the tagged mutation throw, not RUNAWAY');
+    });
+
+    test('F2 guard: PairingHeap iterator with ' + mut + ' terminates, no freed id, no hang', () => {
+        const h = buildPairingForGuard(200);
+        const cap = 8 * (h.size + 4);
+        let visits = 0;
+        let err = null;
+        try {
+            for (const id of h) {
+                assert.ok(h.has(id), mut + ': iterator yielded a live member id, never a freed slot');
+                if (++visits > cap) throw new Error('RUNAWAY');
+                apply(h, id, visits);
+            }
+        } catch (e) { err = e; }
+        assert.ok(visits <= cap, mut + ': iterator terminated within the cap (no hang / runaway)');
+        if (err) assert.match(err.message, /\[lite-logn\] PairingHeap mutated during iteration/,
+            mut + ': ended with the tagged mutation throw, not RUNAWAY');
+    });
+}

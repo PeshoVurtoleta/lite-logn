@@ -25,6 +25,22 @@ import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
 
+// F12 (G8): every hot-loop key / priority is read from a precomputed int-kind
+// Float64Array, NOT recomputed per op as `(t * K) & 0xffff`. A long single hot(n)
+// call tiers into Maglev code that boxes recomputed double arguments and flips the
+// reading between 0 and 24 (RESEARCH 12.4); an integral Float64 read canonicalizes
+// to a Smi, so every scenario below stays int-kind and 0-scavenge on 1.3.0. The
+// non-Smi (frac / p31 / n31 / p53 / p30) lanes live in test/perf/Kinds.mjs.
+const IN_MASK = 4095;
+const IN_A = new Float64Array(4096);   // primary key stream
+const IN_B = new Float64Array(4096);   // secondary (changeKey / meld donor)
+const IN_C = new Float64Array(4096);   // tertiary (remove + re-push)
+for (let _i = 0; _i < 4096; _i++) {
+    IN_A[_i] = (_i * 2654435761 >>> 0) & 0xffff;
+    IN_B[_i] = (_i * 40503 >>> 0) & 0xffff;
+    IN_C[_i] = (_i * 2246822519 >>> 0) & 0xffff;
+}
+
 /** The zero-alloc counter: the three backing buffers' byte lengths. Fixed at
  *  construction, so the delta across the window must be 0. */
 function grows(s) {
@@ -53,7 +69,7 @@ const pushPopChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.pop();
-            h.push(id, (t * 2654435761) & 0xffff);
+            h.push(id, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -72,7 +88,7 @@ const changeKeyChurn = {
         const h = s.heap;
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
-            h.changeKey(t & MASK, (t * 40503) & 0xffff);
+            h.changeKey(t & MASK, IN_B[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -576,7 +592,7 @@ const mmhPopMinChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.popMin();
-            h.push(id, (t * 2654435761) & 0xffff);
+            h.push(id, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -596,7 +612,7 @@ const mmhPopMaxChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.popMax();
-            h.push(id, (t * 40503) & 0xffff);
+            h.push(id, IN_B[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -617,8 +633,8 @@ const mmhMixedChurn = {
         for (let i = 0; i < n; i++) {
             const lo = h.popMin();
             const hi = h.popMax();
-            h.push(lo, (t * 2246822519) & 0xffff);
-            h.push(hi, (t * 2654435761) & 0xffff);
+            h.push(lo, IN_C[t & IN_MASK]);
+            h.push(hi, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -767,7 +783,7 @@ const binhPopMinChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.popMin();
-            h.push(id, (t * 2654435761) & 0xffff);
+            h.push(id, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -809,7 +825,7 @@ const binhMeldChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             donor._consumed = false; donor._head = 0; donor._min = 0; donor._n = 0; // alloc-free refresh
-            for (let k = 0; k < 8; k++) donor.push((t + k) & 0xffff, ((t + k) * 40503) & 0xffff);
+            for (let k = 0; k < 8; k++) donor.push((t + k) & 0xffff, IN_B[(t + k) & IN_MASK]);
             acc.meld(donor);                       // consumes donor; 0-alloc carry
             for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc
             t = (t + 8) | 0;
@@ -854,7 +870,7 @@ const phPopMinChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.popMin();
-            h.push(id, (t * 2654435761) & 0xffff);
+            h.push(id, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -903,7 +919,7 @@ const phRemoveChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = t & PHMASK;
-            if (h.remove(id)) h.push(id, (t * 2246822519) & 0xffff);
+            if (h.remove(id)) h.push(id, IN_C[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -950,7 +966,7 @@ const phMeldChurn = {
         for (let i = 0; i < n; i++) {
             // alloc-free refresh of the (consumed) donor: reset scalars AND its alias entry to a root.
             donor._consumed = false; donor._root = 0; donor._n = 0; donor._alias[donor._hid] = donor._hid;
-            for (let k = 0; k < 8; k++) donor.push(((t + k) & PHMASK), ((t + k) * 40503) & 0xffff);
+            for (let k = 0; k < 8; k++) donor.push(((t + k) & PHMASK), IN_B[(t + k) & IN_MASK]);
             acc.meld(donor);                          // consumes donor; O(1) root-link + alias write
             for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc, slots released
             t = (t + 8) | 0;
@@ -997,7 +1013,7 @@ const fhPopMinChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = h.popMin();
-            h.push(id, (t * 2654435761) & 0xffff);
+            h.push(id, IN_A[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -1042,7 +1058,7 @@ const fhRemoveChurn = {
         let t = s.tick | 0;
         for (let i = 0; i < n; i++) {
             const id = t & FHMASK;
-            if (h.remove(id)) h.push(id, (t * 2246822519) & 0xffff);
+            if (h.remove(id)) h.push(id, IN_C[t & IN_MASK]);
             t = (t + 1) | 0;
         }
         s.tick = t | 0;
@@ -1089,7 +1105,7 @@ const fhMeldChurn = {
         for (let i = 0; i < n; i++) {
             // alloc-free refresh of the (consumed) donor: reset scalars AND its alias entry to a root.
             donor._consumed = false; donor._min = 0; donor._n = 0; donor._alias[donor._hid] = donor._hid;
-            for (let k = 0; k < 8; k++) donor.push(((t + k) & FHMASK), ((t + k) * 40503) & 0xffff);
+            for (let k = 0; k < 8; k++) donor.push(((t + k) & FHMASK), IN_B[(t + k) & IN_MASK]);
             acc.meld(donor);                          // consumes donor; O(1) circular-list concat + alias
             for (let k = 0; k < 8; k++) acc.popMin(); // drain back -> steady empty acc, slots released
             t = (t + 8) | 0;
@@ -1725,25 +1741,53 @@ const lctEvertChurn = {
 };
 
 /**
- * The teeth: a per-op push into a FRESH [] each op -- the array MUST trip the
- * gate (scavenges scale with n), proving the instrument has teeth before any
- * member depends on it. statsOf returns a constant so the failure is the
- * allocation lanes, not a missing-counter artifact.
+ * The teeth (G8 / N4): exactly ONE HeapNumber box per op -- a non-Smi double stored
+ * into a PACKED_ELEMENTS (tagged) array slot. This is the 16 B/op signal the audit
+ * calibrated (~24 scavenges at 8N fresh, ~12 warmed), and it MUST trip the gate,
+ * proving the instrument can see a single box -- not just the far-above-signal fresh
+ * `[]` it replaces (RESEARCH 12.4: the old teeth were a fresh array, well above the
+ * one-box floor, so they could not prove the gate saw a box). statsOf returns a
+ * constant so the failure is the scavenge lane, not a missing-counter artifact.
  */
-const teethMustFailAlloc = {
-    name: 'scaffold teeth: fresh array per op (MUST allocate)',
-    setup() { return { v: VERSION.length | 0, sink: 0 }; },
+const teethOneBoxAlloc = {
+    name: 'scaffold teeth: one HeapNumber box per op (MUST allocate)',
+    setup() { return { box: [{}], sink: 0 }; }, // [{}] keeps the array PACKED_ELEMENTS (tagged)
     hot(s, n) {
+        const box = s.box;
         let sink = s.sink | 0;
         for (let i = 0; i < n; i++) {
-            const arr = []; // fresh array per op -> heap churn
-            arr.push(i & 0xffff);
-            sink = (sink + arr.length) | 0;
+            box[0] = IN_A[i & IN_MASK] + 0.5; // a non-Smi double -> one HeapNumber box
+            sink = (sink + (box[0] | 0)) | 0;
         }
         s.sink = sink | 0;
     },
     statsOf() { return { grows: 0 }; },
 };
+
+// F12 (G8): the G2 chunked driver. Instead of one long hot(state, n) call (which
+// tiers into Maglev code that boxes recomputed double arguments and flips the
+// reading), the wrapper runs a 200-chunk warm-up in setup(), then serves each
+// zgcSuite measurement window as a sequence of 2048-op scn.hot() calls. Every
+// scenario already threads its counter through state, so slicing n into 2048-op
+// calls is transparent -- but each call is now a short, stably-optimized function.
+const G2_CHUNK = 2048;
+const G2_WARM = 200;
+function chunked(scn) {
+    return {
+        name: scn.name,
+        setup() {
+            const s = scn.setup();
+            for (let w = 0; w < G2_WARM; w++) scn.hot(s, G2_CHUNK); // 200 x 2048 warm-up
+            return s;
+        },
+        hot(s, n) {
+            let done = 0;
+            while (done < n) { const c = (n - done) < G2_CHUNK ? (n - done) : G2_CHUNK; scn.hot(s, c); done += c; }
+        },
+        statsOf: scn.statsOf ? (s) => scn.statsOf(s) : undefined,
+        teardown: scn.teardown ? (s) => scn.teardown(s) : undefined,
+    };
+}
 
 zgcSuite({
     N: 200000,
@@ -1771,6 +1815,6 @@ zgcSuite({
         mstCountLEChurn, mstRangeCountChurn,
         wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn,
         ctRangeMinIndexChurn, ctRangeMinChurn, ctTopologyChurn,
-        lctPathAggChurn, lctLinkCutChurn, lctEvertChurn],
-    mustFail: [teethMustFailAlloc],
+        lctPathAggChurn, lctLinkCutChurn, lctEvertChurn].map(chunked),
+    mustFail: [chunked(teethOneBoxAlloc)],
 });

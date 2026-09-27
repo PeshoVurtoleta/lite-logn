@@ -4,7 +4,94 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-09-28
+
+H1 hardening, consumer release (ROADMAP 8.4). The byte-identical-prior-members invariant is SUSPENDED
+for the members listed below in this release.
+
+### Added
+
+- **`Fenwick.setFrom(src: Float64Array, i)`** and **`SegmentTree.setFrom(src, i)`** -- zero-box
+  siblings of `set` / `update` that read the value from a caller-owned `Float64Array` INSIDE the
+  method, so a fractional / large value never boxes across a non-inlined call (F11 / S6, the lite-hud
+  M5 write path). The plain `set` / `update` remain the documented one-box controls.
+- **`Fenwick.search(target) -> index`** and **`Fenwick.searchFrom(src: Float64Array, i) -> index`** --
+  the smallest index `i` with `prefix(i) >= target`, an EXACT lower_bound over the library's own
+  `prefix()` (the binary-lifting descent sums cells HIGH->LOW, bit-for-bit as `prefix()` does).
+  O(log n) ALWAYS -- a zero-run is spanned by O(log n) tree cells, never O(zero-run)/O(n). Returns
+  `length` iff `target > total` or `target === +Infinity`; `target <= 0` returns `0`. For exactly-
+  representable sums (integers <= 2^53) it matches a BigInt oracle and never returns a zero-weight
+  index for `target > 0`; for fractional weights the returned index's prefix is within one ULP of
+  `target`. Precondition (documented, not enforced): every element `>= 0`; NaN / non-number throws.
+  lite-pick's dynamic-weight sampling op (`search(u)`, `u` uniform in `(0, total]`, picks `i` with
+  probability `w_i / total`, up to the rounding of the stored prefix sums). `searchFrom` reads the
+  target from a caller-owned `Float64Array` INSIDE (0 B/op, sharing `search`'s body), for lite-pick's
+  per-pick call from a non-inlined site where `search`'s one arg box would be 16 B/pick.
+- **`WaveletTree.quantileInto(out: Float64Array, j, lo, hi, k)`** -- zero-box sibling of `quantile`
+  (writes the k-th value straight into a slot; F11 / S6).
+- **`WaveletTree.rebuildFrom(values) -> this`** -- rebuild in place (worst-case buffers allocated once,
+  lazily, on the first call; every later rebuild is 0 B/op for any length up to the constructed
+  length), producing a structure identical to a fresh
+  `new WaveletTree(values)` (F14 / S6). `values.length` must be in `[1, constructed length]` else a
+  tagged throw; NaN entries still throw (filtering them is the caller's job).
+- **`BinaryHeap` iterator version stamp** (S5) -- the `Symbol.iterator` walk captures a `_version`
+  Smi (bumped `(v + 1) | 0` on every mutation) and throws `[lite-logn]` if the heap is mutated
+  mid-iteration. `forEach` documents "no mutation from the callback".
+
+### Fixed
+
+- **F1 (Treap `clear()` on a `split()` / `merge()` view)** -- `clear()` reset the SHARED node pool,
+  corrupting every sibling view. It now frees only the nodes reachable from its own root (a stackless
+  rotate-to-vine teardown), so clearing a view -- or a consumed original -- leaves its siblings intact.
+  `clear()` is now O(own nodes) instead of O(capacity). Split views still start from the same
+  `_seed`, so their priority streams are identical (disclosed, not changed).
+- **F2 (PairingHeap / FibonacciHeap recursion)** -- `clear()`, `forEach` and the iterator recursed on
+  child depth and threw an untagged stack RangeError from a few thousand nodes (so `clear()` could
+  never recover the heap). All six walkers are now STACKLESS, over the existing links. Mutating the
+  heap from a `forEach` callback or mid-iteration is UNSUPPORTED: the walk always terminates and never
+  yields a freed or sibling-owned id, but it may throw `[lite-logn]`, or end early / skip / revisit ids.
+- **F3 (LinkCutTree `_pull`)** and **F4 (SegmentTree / SegmentTree2D / PersistentSegTree)** -- the
+  tagged-phi-into-`segGcd` box per tree level is removed: one loop (or one store) per fold kind, so
+  the pure-double sum accumulator is never tainted by `segGcd`'s non-inlined return. A fractional /
+  `2^31+` value no longer boxes ~15 HeapNumbers per op. `PersistentSegTree._query` is now ITERATIVE
+  (a manual stack + per-kind double accumulator), closing the recursive double-return box (F10).
+- **F10 (WaveletTree popcount)** -- `wtPopcount32(word | 0)` at all three call sites keeps a `>= 2^31`
+  Uint32 word a Smi argument, so `rank` / `quantile` no longer box on integer input when not inlined.
+- **F15 (BinaryHeap `pop` / `remove`)** -- the sift helper is passed the SLOT (the moving key/id are
+  read inside), so no key double crosses the non-inlined helper boundary.
+
+### Changed
+
+- **S1 sum overflow, bounded at the door.** `Fenwick` / `Fenwick2D` carry a magnitude budget: a scalar
+  upper bound on `sum |element|` (`update` adds `|delta|`, `set` / `setFrom` add `|new - old|`, `build`
+  sets `sum |v|`, `clear` resets), budget `MAX_VALUE / 2` (1D) / `MAX_VALUE / 4` (2D). A would-be
+  overflow takes an O(n) cold exact recompute that resets the drifted bound and either accepts or
+  throws `[lite-logn]` with the state unchanged. Near a true magnitude of ~1e308 the cold path can
+  repeat under churn (disclosed). `SegmentTree` sum kind bounds `|value| <= MAX_VALUE / (2 * length)` at
+  `update` / `build` / `setFrom`. So a finite input can no longer produce a sticky NaN.
+- **S4** -- `WaveletTree` build normalizes `-0` to `+0` (cold), so the distinct table never carries a
+  signed zero.
+- **`WaveletTree` is now rebuildable in place** via `rebuildFrom`; the worst-case rebuild buffers +
+  build scratch (~32 B per constructed element) are allocated LAZILY on the FIRST `rebuildFrom` (a
+  one-time cost, disclosed with the byte formula), and every later rebuild is 0 B/op. A never-rebuilt
+  instance keeps the 1.3.0 footprint.
+
+### Testing
+
+- New repo-only gates (not in the tarball): `test:perf:kinds` / `test:perf:noinline` (scavenge-count
+  lanes over int / fractional / 2^31+ / 2^53 inputs, normal and `--max-inlined-bytecode-size=0`,
+  with the S7k boundary-box budget and one-box teeth), `test:perf:harness` (self-tests of that gate),
+  `test:perf:reddiff`, and a G9 scavenge gate in `torture`. The perf gate's teeth are now exactly one
+  HeapNumber per op. Three witness bands were re-centered after the box fixes made their ops cheaper
+  (decisions/0004).
+
+### Deferred to 1.4.1
+
+Tracked in the gate's shrink-only DEFERRED list (ROADMAP 8.4): F6 (PersistentSegTree ctor seed), F7
+(LinkCutTree / SegmentTree2D / PersistentSegTree sum bounds), F8 (`arena` count cap), F9 (LinkCutTree
+unset-vertex identity + `pathAggregate(u, v)` re-root docs), F10 (Treap / Scapegoat successor /
+predecessor boxes), F15 (MinMaxHeap sift), F16 (Treap / Scapegoat delete), S5 stamps on the other
+four heaps, and the full README doc sweep (F13).
 
 ## [1.3.0] - 2026-09-24
 
