@@ -564,6 +564,13 @@ const FEN_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // cache band and the fit flakes. Its O(n) foils (scan-fold / whole-tree rebuild)
 // stay on the small O(n^2) sweep.
 const SEG_SWEEP = [10, 11, 12, 13, 14, 15, 16].map((k) => 2 ** k);
+// update ONLY (post-1.4.1): the WIDER 2^4 .. 2^16. After the 1.4.0 F4 per-kind store the update
+// climb costs ~0.7 ns/level, so 2^10..2^16 spans only ~4 ns of signal against ~1 ns per-point
+// steps -- even the median-of-9 fit dipped to R^2 0.944-0.949 in a post-torture verify. The
+// extra six cache-resident points double the log2(n) span (measured single-fit R^2 0.974-0.995
+// vs 0.890-0.990 on the old window, slope 0.62-0.74 -- inside the UNCHANGED [0.43, 1.00] band).
+// The top stays 2^16; exact powers keep the climb an integer level count. query keeps SEG_SWEEP.
+const SEG_UPDATE_SWEEP = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].map((k) => 2 ** k);
 const SEG_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // SkipList's gated sweeps: EXACT powers of two, but a DIFFERENT window per op (each
 // op measured where its logarithm is visible). get needs the larger 2^11..2^17 for
@@ -772,7 +779,7 @@ const F2D_FIT_RUNS = 5;
 // `fitRuns` hook), same mechanism as PairingHeap / FibonacciHeap / Fenwick2D. Its single-fit R^2
 // sits right at the 0.958 floor: over independent quiescent runs it flipped OFF-LINE in a sizeable
 // minority (measured R^2 down to ~0.85-0.93 in ~3/5 runs) while the slope stayed solidly in its
-// [2.29, 5.35] band and the MEDIAN R^2 cleared the floor. This is measurement noise on a fast,
+// band (then [2.29, 5.35]; now [0.43, 1.00]) and the MEDIAN R^2 cleared the floor. This is measurement noise on a fast,
 // cache-resident point-update lane -- not a code regression (the SegmentTree class is unchanged) --
 // so the median fit clears it reliably. Odd so the median is a real sample. Measurement-quality
 // only (the frozen 0.958 floor and the slope band are untouched; a genuine O(n) shape fails every
@@ -2350,7 +2357,7 @@ export const MEMBERS = [
     {
         name: 'SegmentTree',
         op: 'update',
-        sweep: SEG_SWEEP,
+        sweep: SEG_UPDATE_SWEEP,               // wider window: see SEG_UPDATE_SWEEP
         foilSweep: SEG_FOIL_SWEEP,
         r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (D-05 inherits D-08)
         slopeLo: SEGTREE_UPDATE_SLOPE_LO,      // own band

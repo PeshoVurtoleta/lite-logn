@@ -158,3 +158,19 @@ once in 7 at R^2 0.9577, and the whole-witness R^2 flake W1 names), WITHOUT loos
   per-point timing noise so the R^2 clears the floor; it adds measurement work only. The slope band
   ([1.69, 3.93]) and the 0.958 floor are UNCHANGED. The sweep width is unchanged (widening it could
   move the slope; this change must not).
+
+## Post-1.4.1 -- SegmentTree.update gets a wider sweep
+
+The 1.4.1 release gate failed once on SegmentTree.update: the median-of-9 fit gave R^2 0.949, the W1
+retry gave 0.944 (floor 0.958), and the slope was 0.739, inside its band. Cause: after the 1.4.0 F4
+per-kind store the climb costs ~0.7 ns/level, so the 2^10..2^16 window holds only ~4 ns of signal
+against ~1 ns per-point steps. More iterations do not help, because the steps are per-point
+plateaus and not timer noise.
+
+- **Change:** update only, the sweep goes from 2^10..2^16 to 2^4..2^16 (`SEG_UPDATE_SWEEP`). Every
+  added point is cache-resident and an exact power, so the climb stays an integer level count.
+  Four solo runs: the single-fit R^2 rose from 0.890-0.990 (old window) to 0.974-0.995, with slope
+  0.62-0.74. query keeps 2^10..2^16.
+- **Unchanged:** the 0.958 floor, the [0.43, 1.00] slope band, SEG_FIT_RUNS (9), the foil sweep
+  and its check. This widening moves the slope inside its band. The T10 note warned that a
+  widening could move the slope out of the band, and the measured runs show it did not.

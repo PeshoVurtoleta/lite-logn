@@ -4,6 +4,16 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Witness: SegmentTree.update R^2 flake (median-of-9 fit 0.949, retry 0.944 < 0.958 in the 1.4.1
+  release gate; slope 0.739 in band). The update lane's sweep is widened from 2^10..2^16 to
+  2^4..2^16, which doubles the log2(n) span on a ~0.7 ns/level line. Measured single-fit R^2 rose
+  from 0.890-0.990 to 0.974-0.995, slope 0.62-0.74. The floor, the [0.43, 1.00] band and the foil
+  are unchanged. Test-only, so no module change.
+- GUIDE: the SegmentTree.update band read `[2.29, 5.35]` (pre-1.4.0); it now reads `[0.43, 1.00]`.
+
 ## [1.4.1] - 2026-10-03
 
 H1 close (ROADMAP 8.5). Empties the 1.4.0 DEFERRED list and closes every remaining H1 finding. The

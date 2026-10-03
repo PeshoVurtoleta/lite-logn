@@ -333,11 +333,14 @@ a min/max query. The fold is fixed at construction, so pick the kind up front.
 
 **Measure it yourself:** `npm run witness` fits `update` and `query` against
 `nsPerOp = intercept + slope*log2(n)`. Both must clear the shared R^2 floor
-(0.958) and sit inside their own slope bands (`update [2.29, 5.35]`,
+(0.958) and sit inside their own slope bands (`update [0.43, 1.00]`,
 `query [4.30, 10.04]` ns/level -- query is steeper because it folds ~2 nodes per
 level where update writes one; see
-[`decisions/0005-segtree.md`](./decisions/0005-segtree.md)). The gated sweep is
-EXACT powers of two in `[2^10, 2^16]`: a segment-tree op touches a node per level
+[`decisions/0005-segtree.md`](./decisions/0005-segtree.md) and the re-centers in
+[`decisions/0004-witness-band.md`](./decisions/0004-witness-band.md)). The gated
+sweep is EXACT powers of two in `[2^10, 2^16]` for query and the wider
+`[2^4, 2^16]` for update (its ~0.7 ns/level climb needs the extra span to clear
+the floor): a segment-tree op touches a node per level
 spread across the `2n` array, so above ~2^16 the tree leaves the steady cache
 band, and exact powers keep the range decomposition a regular node count. Both
 O(n) foils -- a whole-tree rebuild per update, a scan-fold per query -- must MISS
