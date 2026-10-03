@@ -64,6 +64,31 @@ export function fitLogLinear(xs, ys) {
     return { slope, intercept, r2 };
 }
 
+// --- W1: the per-lane verdict, as a PURE function (decisions/0004) -----------
+// Factored out so it can be unit-tested WITHOUT running real sweeps. Given the
+// main `fit` { r2, slope }, the `foil` fit { r2 }, the slope `band` { lo, hi },
+// the shared R^2 `floor`, and an OPTIONAL single re-measure `retryFit` { r2 }, it
+// decides ON-LINE / OFF-LINE and whether an R^2-only flake earns the one retry.
+//
+// The retry is earned ONLY when the LONE failure is the R^2 floor -- slope IN band
+// AND foil OFF. A slope-band miss or a foil failure is NEVER retried (a retry is a
+// noise filter for a quiescent-run R^2 dip, not a second chance to pass a real
+// shape / slope / foil violation). Slope and foil are ALWAYS judged on the ORIGINAL
+// fit; only the R^2 check consults `retryFit` when a retry was earned and supplied.
+export function witnessVerdict(fit, foil, band, floor, retryFit) {
+    const slopeIn = fit.slope >= band.lo && fit.slope <= band.hi;
+    const foilOff = foil.r2 < floor;
+    const r2OkFirst = fit.r2 >= floor;
+    // A retry is earned ONLY for a lone R^2 miss (slope in band, foil off).
+    const retryEligible = !r2OkFirst && slopeIn && foilOff;
+    const hasRetry = retryFit !== undefined && retryFit !== null;
+    const retried = retryEligible && hasRetry;
+    const r2Ok = r2OkFirst || (retried && retryFit.r2 >= floor);
+    const onLine = r2Ok && slopeIn;
+    const ok = onLine && foilOff;
+    return { ok, onLine, foilOff, slopeIn, r2OkFirst, retryEligible, retried, r2Ok };
+}
+
 // --- the geometric n-sweep the family gates over ---------------------------
 // Shown but not gated at the tiny pure-L1 sizes; gated over the steady window
 // (lite-o1 ADR-0004 discipline). BinaryHeap records the exact policy in D-02.
@@ -657,7 +682,8 @@ const CT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // torture (2M+ ops across 18 members), whose scheduler / thermal residue tilts the occasional sweep; the
 // median-of-fits rejects it. Odd so the median is a real sample. Measurement-quality only: the frozen
 // 0.958 floor and the slope band are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
-const CT_FIT_RUNS = 7;
+// T10 (1.4.1): raised 7 -> 9 (matching SegmentTree.update's SEG_FIT_RUNS) alongside the CT_ITERS / CT_BATCH bump.
+const CT_FIT_RUNS = 9;
 // LinkCutTree's gated pathAggregate sweep: EXACT powers of two 2^12..2^18. Over a balanced (each node linked
 // to its halved index) forest the preferred-path splay tree height tracks log2 n, so the access climbs
 // ~log2 n levels -- exact powers keep the staircase mapping cleanly onto the continuous log2(n) axis. The
@@ -1651,8 +1677,12 @@ function measureWaveletQuantileFoil(n) {
 // pairs cycled so many ancestor paths are averaged. Same min-over-batches discipline as SortedArray /
 // WaveletTree. CartesianTree has NO RNG on the hot path, so its rangeMinIndex line is a pure DETERMINISTIC
 // worst-case O(log n) ancestor climb (each jump is an O(1) `_up` read on the DEFAULT single-log axis).
-const CT_ITERS = 200000;   // hammered ops per timed batch
-const CT_BATCH = 10;       // min-over-batches
+// T10 (1.4.1): raised the work per sample -- CT_ITERS 200k -> 1M and CT_BATCH 10 -> 20 (the
+// SegmentTree.update hardening of 1.4.0) -- to pull the near-floor R^2 flake (0.9577 once in 9
+// pre-1.4.1) off the floor by cutting per-point timing noise. The slope band is UNCHANGED (this
+// adds measurement work only; it does not move the line). Paired with CT_FIT_RUNS 7 -> 9.
+const CT_ITERS = 1000000;  // hammered ops per timed batch
+const CT_BATCH = 20;       // min-over-batches
 const CT_TARGETS = 1024;   // distinct random (lo, hi) pairs cycled per batch (pow2 mask)
 
 // rangeMinIndex: fold the widest gated window [1, n-2] for random sub-ranges. Return the MIN per-op.
@@ -2642,8 +2672,31 @@ export const MEMBERS = [
     },
 ];
 
+// Measure one lane's main-sweep fit (honoring its median-of-fits `fitRuns` opt-in).
+// Factored out so W1's single retry can re-measure with the IDENTICAL discipline.
+function laneFit(m, xOf) {
+    const runs = m.fitRuns || 1;
+    if (runs > 1) {
+        // MEDIAN-OF-FITS (measurement-quality, scoped to lanes that opt in via fitRuns): fit
+        // the sweep `runs` times independently, then gate on the fit whose R^2 is the MEDIAN --
+        // rejecting the occasional tilted sweep on both ends. Raises RELIABILITY only; the
+        // frozen R^2 floor + slope band are unchanged, and a genuine O(n) shape fails all fits.
+        const fits = [];
+        for (let k = 0; k < runs; k++) {
+            const rxs = [], rys = [];
+            for (const n of m.sweep) { rxs.push(xOf(n)); rys.push(m.run(n)); }
+            fits.push(fitLogLinear(rxs, rys));
+        }
+        fits.sort((a, b) => a.r2 - b.r2);
+        return fits[runs >> 1];
+    }
+    const xs = [], ys = [];
+    for (const n of m.sweep) { xs.push(xOf(n)); ys.push(m.run(n)); }
+    return fitLogLinear(xs, ys);
+}
+
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.4.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.4.1\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -2659,33 +2712,26 @@ async function main() {
         // (the `xOf` hook). Default = Math.log2, so every prior lane is byte-identical in behavior.
         const xOf = m.xOf || Math.log2;
         const unit = m.unit || 'ns/level';
-        let fit;
-        const runs = m.fitRuns || 1;
-        if (runs > 1) {
-            // MEDIAN-OF-FITS (measurement-quality, scoped to lanes that opt in via fitRuns): fit
-            // the sweep `runs` times independently, then gate on the fit whose R^2 is the MEDIAN --
-            // rejecting the occasional tilted sweep on both ends. Raises RELIABILITY only; the
-            // frozen R^2 floor + slope band are unchanged, and a genuine O(n) shape fails all fits.
-            const fits = [];
-            for (let k = 0; k < runs; k++) {
-                const rxs = [], rys = [];
-                for (const n of m.sweep) { rxs.push(xOf(n)); rys.push(m.run(n)); }
-                fits.push(fitLogLinear(rxs, rys));
-            }
-            fits.sort((a, b) => a.r2 - b.r2);
-            fit = fits[runs >> 1];
-        } else {
-            const xs = [], ys = [];
-            for (const n of m.sweep) { xs.push(xOf(n)); ys.push(m.run(n)); }
-            fit = fitLogLinear(xs, ys);
-        }
+        let fit = laneFit(m, xOf);
         const fxs = [], fys = [];
         for (const n of m.foilSweep) { fxs.push(xOf(n)); fys.push(m.foil(n)); }
         const ffit = fitLogLinear(fxs, fys);
 
-        const onLine = fit.r2 >= m.r2Floor && fit.slope >= m.slopeLo && fit.slope <= m.slopeHi;
-        const foilOff = ffit.r2 < m.r2Floor;
-        const memberOk = onLine && foilOff;
+        const band = { lo: m.slopeLo, hi: m.slopeHi };
+        let v = witnessVerdict(fit, ffit, band, m.r2Floor, null);
+        // W1 (decisions/0004): a lane that misses ONLY the R^2 floor (slope IN band, foil OFF) is
+        // re-measured ONCE. A slope-band miss or a foil failure is NEVER retried. The retry is printed.
+        if (v.retryEligible) {
+            process.stdout.write(
+                'RETRY ' + m.name + '.' + m.op + ' (R^2 ' + fit.r2.toFixed(3) +
+                ' < floor ' + m.r2Floor.toFixed(3) + ')\n');
+            const retryFit = laneFit(m, xOf);
+            v = witnessVerdict(fit, ffit, band, m.r2Floor, retryFit);
+            if (v.retried) fit = retryFit;   // report the re-measured fit
+        }
+        const onLine = v.onLine;
+        const foilOff = v.foilOff;
+        const memberOk = v.ok;
         ok = ok && memberOk;
 
         process.stdout.write(

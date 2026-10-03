@@ -392,3 +392,25 @@ test('MinMaxHeap.build fails closed on bad input', () => {
     assert.throws(() => MinMaxHeap.build(new Array(9).fill(0), new Array(9).fill(0), 8),
         /\[lite-logn\]/); // count > capacity
 });
+
+// --- S5: version-stamped iterator (T4) --------------------------------------
+
+test('S5 iterator: a clean walk yields every id; a mutation mid-iteration throws tagged', () => {
+    const h = new MinMaxHeap(16);
+    for (let i = 0; i < 8; i++) h.push(i, i * 1.5);
+    // clean walk: no mutation -> visits every id, no throw.
+    const seen = [];
+    for (const id of h) seen.push(id);
+    assert.equal(seen.length, 8);
+    assert.deepEqual([...seen].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7]);
+    // mutation mid-iteration (push) -> tagged throw, fail closed.
+    assert.throws(() => {
+        for (const _id of h) h.push(99, 0.5);
+    }, /\[lite-logn\] MinMaxHeap mutated during iteration/);
+    // popMin / popMax / clear also bump the stamp.
+    for (const mut of [(x) => x.popMin(), (x) => x.popMax(), (x) => x.clear()]) {
+        const g = new MinMaxHeap(16);
+        for (let i = 0; i < 6; i++) g.push(i, i);
+        assert.throws(() => { for (const _id of g) mut(g); }, /\[lite-logn\] MinMaxHeap mutated/);
+    }
+});

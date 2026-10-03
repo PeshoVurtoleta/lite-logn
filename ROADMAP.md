@@ -11,7 +11,7 @@
 > lite-hud M5 (Fenwick / SegmentTree / WaveletTree) pins the hardened release.
 > Reproduced independently the same day (section 8.1). F1-F11 and F13 hold. F12 (the perf-gate
 > flake) did not reproduce. Next-session run order: section 8.2. The accepted 1.4.0 brief is section 8.3, RE-PRIORITIZED in 8.4 (consumers first).
-> **THEN: EulerTourTree -- v1.5.0** (section 9; research in RESEARCH.md section 13). It depends on
+> **1.4.0 SHIPPED (c25188b). NEXT: 1.4.1 (section 8.5) -- close H1.** THEN: **EulerTourTree -- v1.5.0** (section 9; research in RESEARCH.md section 13). It depends on
 > 1.4.0's gates.
 
 Seven full BRIEF sessions plus a queued Tier 2/3/4 reserve, all for one package:
@@ -1422,6 +1422,49 @@ list. 1.4.1 must empty it.
   back-to-back gate sequence. Make its injection deterministic.
 
 **Demo:** its own later session, not part of H1.
+
+### 8.5 1.4.1 -- close H1 (PLANNED 2026-09-28; 1.4.0 shipped at c25188b)
+
+Goal: empty the DEFERRED list and close every remaining H1 finding. There is no new API except where a
+finding requires one. Line numbers below are from c25188b; locate each site by grep.
+
+**Process rules (cost control; learned from 1.4.0):**
+- ONE coder run does all tasks, in the order below. Each task gets its red-first test.
+- ONE reviewer pass, which also does the qa checks.
+- A second coder round happens ONLY for a finding that is wrong behaviour, a crash / hang, an
+  allocation on a hot path, or a false doc claim. Nits go to a list for later, not into another round.
+- Witness: re-center a band only if a lane leaves it on 3 of 3 solo runs, by the decisions/0004 rule.
+  One-off R^2 dips are handled by W1, not by re-centering.
+- The main session runs the final gates and /release. No subagent runs witness loops.
+
+**Tasks**
+
+| id | finding | change | test / exit |
+| --- | --- | --- | --- |
+| T1 | F10 Treap / Scapegoat `successor` / `predecessor` / `_ceil` (Treap ~2341, Scapegoat ~2868) | integer slot `bs = 0`; `return bs === 0 ? undefined : K[bs]` (the SplayTree pattern) | their DEFERRED cells go GREEN, and are removed from DEFERRED |
+| T2 | F16 Treap / Scapegoat `delete` (key phi / return) | find the phi (delete path, `_delete` / `_deleteMin` recursion); hold the key in a slot or restructure; no double flows through a tagged phi | the `delete` DEFERRED cells go GREEN, and are removed |
+| T3 | F15 MinMaxHeap `popMin` / `popMax` / `build` pass `this._key[last]` into `_siftDownMin` / `_siftDownMax` (~3022, 3044, 3140; also `_siftUp` ~3008) | pass SLOTS and read keys inside, exactly as BinaryHeap does since 1.4.0 | the `ni-minmax` DEFERRED cells go GREEN; DEFERRED is EMPTY |
+| T4 | S5 version stamps on MinMaxHeap / BinomialHeap / PairingHeap / FibonacciHeap iterators | `_version` Smi bumped on every mutation; the iterator throws tagged on a mismatch; forEach documents "no mutation" | a mutation mid-iteration throws, and a clean walk does not; the popMin witness lanes stay in band |
+| T5 | F6 PersistentSegTree ctor `_seed` (4th param, ~6744) | remove it from the public ctor; `build` validates, then seeds via a module-private function | `new P(3,1,'gcd',[NaN,3,6])` in a subprocess with a 1 s timeout does NOT hang; `PersistentSegTree.length === 3` |
+| T6 | F7 sum bounds on SegmentTree2D / PersistentSegTree / LinkCutTree | `\|v\| <= MAX_VALUE / (2 * cells)`: SegmentTree2D cells = rows*cols; PST cells = length; LCT cells = capacity (a path has <= capacity vertices). Apply at update / build / setValue | the 1e308 4-value repros throw tagged with the state unchanged; a sweep at the bound gives no Infinity |
+| T7 | F8 `arena(capacity, kind, count)` (~3852, 4308, 4941) | `count` an integer in [1, capacity], else a tagged RangeError BEFORE any allocation | `arena(8,'min',1e8)` and `2**32` throw tagged in < 10 ms, in a subprocess, with no abort |
+| T8 | F9 LinkCutTree unset vertices + re-root | vertices start (and `clear()` returns them) at the fold identity (min +Inf, max -Inf, sum / gcd 0); document that `pathAggregate(u, v)` leaves the tree rooted at u | min: `pathAggregate(2) === 5`, `at(1) === Infinity`; test `findRoot(v) === u` after `pathAggregate(u, v)` |
+| T9 | F13 doc sweep | README zero-GC table 13 -> 19 rows; D3 memory table 16 -> 19; D1 SVG (redraw to 24 bars, or drop it); "What this is not" through LinkCutTree; LogN.js header rewritten for the 19-member roster; the disclosures (Fenwick cancellation, -0/+0 in the maps, worst single-op times); llms.txt: LCT "start at the fold identity" (true after T8), rebuildFrom "0 B/op for any length <= constructed" | grep checks: no stale counts; no claim the code does not meet |
+| T10 | CartesianTree witness near-floor (R^2 0.9577 once in 9 runs) | more work per sample (iterations / sweep / fits), as SegmentTree.update got in 1.4.0; never lower the floor | 3 solo runs ON |
+| W1 | settle call [lean: YES] -- whole-witness R^2 flake | a lane that misses ONLY the R^2 floor is re-measured ONCE; a slope-band miss or a foil failure is never retried; the retry is printed | a deliberately noisy scratch lane passes on the retry; a slope-band miss still fails |
+
+**Exit:**
+- `npm run verify` green twice in a row.
+- DEFERRED is empty in Kinds.mjs AND in torture's G9_DEFERRED.
+- RedDiff vs G-EXIT: every 1.3.0 red cell is GREEN.
+- The CHANGELOG 1.4.1 entry lists each F-id closed.
+- `/release 1.4.1`, then `/sync-card lite-logn`.
+
+**Consumers:** lite-hud and lite-pick need nothing from 1.4.1. Everything they use is in 1.4.0. 1.4.1
+changes behaviour only where a CHANGELOG "Changed" entry says so: LCT unset-vertex values (T8), the
+PST ctor arity (T5), and new tagged throws (T6, T7).
+
+**After 1.4.1:** EulerTourTree (section 9), then the demo session.
 
 ---
 

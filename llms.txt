@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.4.0
+Version: 1.4.1
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -871,13 +871,14 @@ The roster (one member per session, each landing append-only):
   - `rangeCount(lo, hi, vlo, vhi)` -> number. Count of stored values in the VALUE-window [vlo, vhi]
     INCLUSIVE within the INDEX range [lo, hi] INCLUSIVE -- O(log n), improving MergeSortTree's O(log^2 n).
     Worst-case O(log sigma), 0 B/op. Bad indices, NaN bounds, or vlo > vhi throws.
-  - `rebuildFrom(values)` -> this. Rebuild in place INTO the constructed buffers (F14 / S6): 0 B/op when
-    the length equals the constructed length (the ring-snapshot case), producing a structure IDENTICAL to
-    `new WaveletTree(values)`. `values.length` must be an integer in [1, constructed length], else a tagged
-    throw; NaN / non-finite entries still throw (filtering them is the caller's job). Build's sort / dedupe /
-    compress temporaries and worst-case level buffers are allocated LAZILY on the FIRST rebuildFrom
-    (~32 B / constructed element, one-time); every LATER rebuild is 0 B/op, and a never-rebuilt instance
-    keeps the 1.3.0 footprint. S4: build normalizes -0 to +0 (cold). O(m log sigma).
+  - `rebuildFrom(values)` -> this. Rebuild in place INTO the constructed buffers (F14 / S6): 0 B/op for
+    ANY length <= the constructed length (the buffers are sized for the worst case and allocated once),
+    producing a structure IDENTICAL to `new WaveletTree(values)`. `values.length` must be an integer in
+    [1, constructed length], else a tagged throw; NaN / non-finite entries still throw (filtering them is
+    the caller's job). Build's sort / dedupe / compress temporaries and worst-case level buffers are
+    allocated LAZILY on the FIRST rebuildFrom (~32 B / constructed element, one-time); every LATER rebuild
+    is 0 B/op, and a never-rebuilt instance keeps the 1.3.0 footprint. S4: build normalizes -0 to +0
+    (cold). O(m log sigma).
   - `length` / `size` getters -> the element count (the source length); `levels` getter ->
     `ceil(log2 distinct)` (>= 1, the descent depth); `distinct` getter -> the compressed alphabet size
     (sigma); `bits` getter -> the total bitvector bit count (`n * levels`, the disclosed O(n log sigma)
@@ -933,12 +934,14 @@ The roster (one member per session, each landing append-only):
   - `connected(u, v)` -> boolean. True iff u and v are in the SAME tree (findRoot(u) === findRoot(v)).
     Amortized O(log n) MUTATING read. A bad id throws BEFORE any splay.
   - `pathAggregate(u, v)` -> number. One argument (v omitted): the fold over the ROOT -> u path. Two
-    arguments: the fold over the u..v path INCLUSIVE of both endpoints. The gated witness op. Amortized
-    O(log n) MUTATING read, 0 B/op. A bad id throws BEFORE any splay; a two-argument call with u, v in
-    DIFFERENT trees throws.
+    arguments: the fold over the u..v path INCLUSIVE of both endpoints. The two-argument form EVERTS u,
+    so it LEAVES the tree ROOTED AT u (findRoot(v) === u afterwards) -- by design, not restored. An
+    unset vertex folds as the identity. The gated witness op. Amortized O(log n) MUTATING read, 0 B/op.
+    A bad id throws BEFORE any splay; a two-argument call with u, v in DIFFERENT trees throws.
   - `setValue(id, value)` -> this. Set vertex id's value to value (ABSOLUTE), then fix the aggregate.
-    Amortized O(log n), 0 B/op. Throws (no-op) on a bad id, a non-finite value, or (gcd kind) a negative /
-    non-integer value.
+    Amortized O(log n), 0 B/op. Throws (no-op) on a bad id, a non-finite value, (gcd kind) a negative /
+    non-integer value, or (sum kind) a magnitude over MAX_VALUE / (2 * capacity) (so no path fold can
+    overflow to Infinity / NaN).
   - `at(id)` -> number. Vertex id's stored value. O(1), NON-mutating (no splay), 0 B/op. A bad id throws.
   - `clear()` -> this. Reset the forest to isolated singleton vertices (edges dropped, values + aggregates
     back to the fold identity, edge count 0). O(n), buffers reset in place (zero-alloc), instance reusable.

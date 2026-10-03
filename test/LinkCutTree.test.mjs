@@ -272,3 +272,51 @@ test('#10 oracle bites: a deliberately wrong fold diverges (non-vacuous check)',
     assert.equal(mn.pathAggregate(0, 3), 1, 'min over 5,2,8,1');
     assert.equal(mn.pathAggregate(0, 1), 2, 'min over 5,2');
 });
+
+// --- F9 (T8): unset vertices fold as the identity; pathAggregate(u,v) re-roots at u --------
+
+test('F9 (T8): min tree 5 / unset / 7 on path 0-1-2 -> pathAggregate(2) === 5, at(1) === Infinity', () => {
+    const t = new LinkCutTree(3, 'min');
+    t.link(1, 0);
+    t.link(2, 1);              // path 0-1-2
+    t.setValue(0, 5);
+    t.setValue(2, 7);          // vertex 1 is UNSET
+    assert.equal(t.at(1), Infinity, 'an unset min vertex reads the fold identity +Infinity, not 0');
+    assert.equal(t.pathAggregate(2), 5, 'min over {5, +Inf, 7} = 5 (null is not zero)');
+});
+
+test('F9 (T8): fresh + cleared vertices read the fold identity per kind', () => {
+    for (const [kind, idv] of [['min', Infinity], ['max', -Infinity], ['sum', 0], ['gcd', 0]]) {
+        const t = new LinkCutTree(4, kind);
+        assert.equal(t.at(2), idv, kind + ' fresh unset');
+        t.setValue(2, 3);
+        t.clear();
+        assert.equal(t.at(2), idv, kind + ' after clear');
+    }
+});
+
+test('F9/S3 (T8): pathAggregate(u, v) leaves the tree rooted at u (findRoot(v) === u)', () => {
+    const t = new LinkCutTree(5, 'sum');
+    t.link(1, 0); t.link(2, 1); t.link(3, 2); // chain 0-1-2-3
+    t.pathAggregate(3, 1);                    // everts u=3
+    assert.equal(t.findRoot(1), 3, 'the tree is re-rooted at u=3');
+    assert.equal(t.findRoot(0), 3);
+});
+
+// --- F7 (T6): sum-kind magnitude bound at setValue ------------------------------------------
+
+test('F7 (T6): LinkCutTree sum setValue rejects a value over MAX_VALUE / (2*capacity), no-op', () => {
+    const t = new LinkCutTree(4, 'sum');
+    t.link(1, 0); t.link(2, 1); t.link(3, 2);
+    t.setValue(0, 1); t.setValue(1, 2); t.setValue(2, 3); t.setValue(3, 4);
+    const before = t.pathAggregate(0, 3);
+    assert.throws(() => t.setValue(0, 1e308), /\[lite-logn\]/);
+    // state unchanged: the rejected write is a byte-identical no-op.
+    assert.equal(t.at(0), 1);
+    assert.equal(t.pathAggregate(0, 3), before);
+    // a sweep AT the bound never yields Infinity or NaN.
+    const bound = Number.MAX_VALUE / (2 * 4);
+    for (const id of [0, 1, 2, 3]) t.setValue(id, bound);
+    const agg = t.pathAggregate(0, 3);
+    assert.ok(Number.isFinite(agg), 'full-path sum at the bound stays finite, got ' + agg);
+});

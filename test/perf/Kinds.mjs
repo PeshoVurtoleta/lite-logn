@@ -617,21 +617,10 @@ function def(fid, shard, ...ids) {
     for (const id of ids) for (const k of DEFERRED_KINDS) out.push([id + '|' + k + '|' + shard, fid]);
     return out;
 }
-export const DEFERRED = new Map([
-    // F10: Treap / Scapegoat successor / predecessor keep a `best = undefined` phi that boxes the
-    // returned key (RED in the normal AND ni- shards). Fixed in 1.4.1 (integer slot + K[bs] return).
-    ...def('F10', 'treap', 'Treap.successor', 'Treap.predecessor'),
-    ...def('F10', 'scapegoat', 'Scapegoat.successor', 'Scapegoat.predecessor'),
-    ...def('F10', 'ni-treap', 'Treap.successor', 'Treap.predecessor'),
-    ...def('F10', 'ni-scapegoat', 'Scapegoat.successor', 'Scapegoat.predecessor'),
-    // F16: Treap / Scapegoat delete's key phi / return boxes in the normal shard (green when not
-    // inlined). Fixed in 1.4.1 (delete-path key slot).
-    ...def('F16', 'treap', 'Treap.delete'),
-    ...def('F16', 'scapegoat', 'Scapegoat.delete'),
-    // F15: MinMaxHeap popMin / popMax pass the key double into their non-inlined sift helper (RED
-    // only under ni-). Fixed in 1.4.1 (pass the slot, as BinaryHeap now does).
-    ...def('F15', 'ni-minmax', 'MinMaxHeap.push/popMin', 'MinMaxHeap.popMax'),
-]);
+// 1.4.1 emptied this map: F10 (Treap / Scapegoat successor / predecessor / _ceil -> integer slot
+// + `K[bs]` return), F16 (Treap / Scapegoat delete -> `_dkey` slot) and F15 (MinMaxHeap popMin /
+// popMax / build -> slot-form sifts) are all closed, so every former deferral is now a hard GREEN.
+export const DEFERRED = new Map([]);
 
 // The F-id a (lane, kind, shard) cell is deferred under, or undefined if not deferred.
 export function deferralFor(id, kind, shard) {

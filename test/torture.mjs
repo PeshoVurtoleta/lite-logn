@@ -1334,9 +1334,9 @@ async function main() {
     // same way. torture is a normal-tier process, so only the F10 Treap.successor lanes are still
     // RED here (F3 / F4 closed LCT / 2D / PST). A deferred-RED lane PASSES and is printed as DEFER;
     // a deferred lane that turns GREEN FAILS ("remove from DEFERRED"), so the list only shrinks.
-    const G9_DEFERRED = new Map([
-        ['Treap.successor[frac]', 'F10'], ['Treap.successor[p31]', 'F10'],
-    ]);
+    // 1.4.1 emptied this list: F10 (Treap.successor integer slot + `K[bs]` return) is closed, so
+    // the former Treap.successor deferrals are now hard GREEN lanes under the normal-tier budget.
+    const G9_DEFERRED = new Map([]);
     const g9Report = [];
     let g9Red = 0;
     let g9Undefer = 0;                            // deferred lanes that went GREEN (must be removed)

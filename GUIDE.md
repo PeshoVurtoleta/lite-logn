@@ -1,7 +1,7 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v1.4.0 nineteen members have
+avoid, and how to measure the logarithm yourself. At v1.4.1 nineteen members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
 SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree,
@@ -34,7 +34,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v1.4.0 all nineteen members have
+`(am)` = amortized, `(exp)` = expected. At v1.4.1 all nineteen members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```

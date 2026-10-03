@@ -210,3 +210,56 @@ for (const kind of ['min', 'max', 'sum', 'gcd']) {
         assert.ok(checks >= 13000, 'expected >=13k checks, got ' + checks);
     });
 }
+
+// --- F6 (T5): the public ctor has no 4th (seed) parameter; build seeds via a module-private path ---
+
+test('F6 (T5): PersistentSegTree arity is 3 -- the private _seed param is gone', () => {
+    assert.equal(PersistentSegTree.length, 3,
+        'the public constructor must declare exactly (length, versionCapacity, kind)');
+});
+
+test('F6 (T5): a 4th ctor argument is IGNORED, not seeded (no hang on a gcd NaN would-be seed)', () => {
+    // Pre-fix this hung inside the ctor (segGcd over a NaN leaf never reaches 0). The 4th arg is
+    // now ignored: v0 is the fold identity (gcd identity 0), length is 3, and nothing hangs.
+    const t = new PersistentSegTree(3, 1, 'gcd', new Float64Array([NaN, 3, 6]));
+    assert.equal(t.length, 3);
+    assert.equal(t.query(0, 0, 2), 0, 'unseeded gcd v0 folds to the identity 0');
+    // build, by contrast, validates first and rejects a NaN value with a tagged throw.
+    assert.throws(() => PersistentSegTree.build([NaN, 3, 6], 1, 'gcd'), /\[lite-logn\]/);
+    // a valid build seeds correctly through the private path.
+    const g = PersistentSegTree.build([4, 6, 8], 1, 'gcd');
+    assert.equal(g.query(0, 0, 2), 2); // gcd(4,6,8) = 2
+    assert.equal(g.query(0, 1, 2), 2); // gcd(6,8) = 2
+});
+
+test('F6 (T5): the gcd-NaN-ctor repro returns fast in a subprocess (no hang)', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const src =
+        "import {PersistentSegTree as P} from " + JSON.stringify(new URL('../LogN.js', import.meta.url).href) + ";" +
+        "const t=new P(3,1,'gcd',[NaN,3,6]);" +
+        "if(t.length!==3)throw new Error('length');" +
+        "if(P.length!==3)throw new Error('arity');" +
+        "process.stdout.write('OK');";
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', src],
+        { timeout: 1000, encoding: 'utf8' });
+    assert.equal(out, 'OK');
+});
+
+// --- F7 (T6): sum-kind magnitude bound at update / build ------------------------------------
+
+test('F7 (T6): PersistentSegTree sum update/build reject > MAX_VALUE/(2*length); no Infinity at bound', () => {
+    const t = new PersistentSegTree(4, 8, 'sum');
+    const v1 = t.update(0, 0, 10);
+    const before = t.query(v1, 0, 3);
+    assert.throws(() => t.update(v1, 1, 1e308), /\[lite-logn\]/);
+    assert.equal(t.versions, 2, 'rejected update creates no version');
+    assert.equal(t.query(v1, 0, 3), before, 'rejected update is a byte-identical no-op');
+    // the 4-value 1e308 build repro throws tagged.
+    assert.throws(() => PersistentSegTree.build([1e308, 1e308, -1e308, -1e308], 2, 'sum'), /\[lite-logn\]/);
+    // a sweep at the bound stays finite across a version chain.
+    const bound = Number.MAX_VALUE / (2 * 4);
+    let v = 0;
+    for (let i = 0; i < 4; i++) v = t.update(v, i, bound);
+    const agg = t.query(v, 0, 3);
+    assert.ok(Number.isFinite(agg), 'full-range sum at the bound stays finite, got ' + agg);
+});

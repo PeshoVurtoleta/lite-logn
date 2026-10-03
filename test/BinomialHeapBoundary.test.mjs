@@ -420,3 +420,25 @@ test('adversarial: re-entrant push from inside forEach does not corrupt pool con
     assert.equal(h._pool.activeSlots + h._pool.freeListLength, h._pool.capacity,
         'a re-entrant push mid-forEach must not corrupt the shared pool conservation invariant');
 });
+
+// --- F8 (T7): arena count is bounded to [1, capacity] BEFORE allocating --------------------
+
+test('F8 (T7): BinomialHeap.arena rejects count > capacity as a tagged RangeError (no allocation)', () => {
+    assert.throws(() => BinomialHeap.arena(8, 'min', 9), /\[lite-logn\].*\[1, capacity\]/);
+    assert.throws(() => BinomialHeap.arena(8, 'min', 1e8), /\[lite-logn\]/);
+    assert.throws(() => BinomialHeap.arena(8, 'min', 2 ** 32), /\[lite-logn\]/);
+    // count === capacity is the boundary and is ALLOWED.
+    const heaps = BinomialHeap.arena(8, 'min', 8);
+    assert.equal(heaps.length, 8);
+});
+
+test('F8 (T7): the arena(8,min,1e8) and 2**32 repros return fast in a subprocess (no OOM abort)', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const src =
+        "import {BinomialHeap as H} from " + JSON.stringify(new URL('../LogN.js', import.meta.url).href) + ";" +
+        "for(const c of [1e8, 2**32]){let threw=false;try{H.arena(8,'min',c);}catch(e){threw=/\\[lite-logn\\]/.test(e.message);}if(!threw)throw new Error('no tagged throw for '+c);}" +
+        "process.stdout.write('OK');";
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', src],
+        { timeout: 2000, encoding: 'utf8' });
+    assert.equal(out, 'OK');
+});

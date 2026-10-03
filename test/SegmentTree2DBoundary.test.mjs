@@ -89,3 +89,23 @@ test('-0 value: stored and read back, folds like 0', () => {
     mn.update(0, 1, 5);
     assert.equal(mn.query(0, 0, 0, 1), -0 < 5 ? -0 : 5); // -> 0
 });
+
+// --- F7 (T6): sum-kind magnitude bound at update / build ------------------------------------
+
+test('F7 (T6): SegmentTree2D sum update/build reject > MAX_VALUE/(2*rows*cols); no Infinity at bound', () => {
+    const t = new SegmentTree2D(2, 2, 'sum');
+    t.update(0, 0, 1); t.update(0, 1, 2); t.update(1, 0, 3); t.update(1, 1, 4);
+    const before = t.query(0, 0, 1, 1);
+    assert.throws(() => t.update(0, 0, 1e308), /\[lite-logn\]/);
+    assert.equal(t.query(0, 0, 1, 1), before, 'rejected update is a byte-identical no-op');
+    // the 4-value 1e308 build repro throws tagged.
+    assert.throws(() => SegmentTree2D.build([[1e308, 1e308], [-1e308, -1e308]], 'sum'), /\[lite-logn\]/);
+    // a sweep at the bound stays finite.
+    const bound = Number.MAX_VALUE / (2 * 2 * 2);
+    for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) t.update(r, c, bound);
+    const agg = t.query(0, 0, 1, 1);
+    assert.ok(Number.isFinite(agg), 'full-grid sum at the bound stays finite, got ' + agg);
+    // non-sum kinds are unbounded (1e308 is a legal min/max value).
+    const mx = new SegmentTree2D(2, 2, 'max');
+    assert.doesNotThrow(() => mx.update(0, 0, 1e308));
+});

@@ -4,27 +4,40 @@
  * problem AND proves its logarithm is real (the O(log n) Witness -- see
  * test/witness.mjs).
  *
- * v0.1.0 shipped the FIRST member: BinaryHeap, an INDEXED binary heap -- an
- * addressable priority queue (a min|max binary heap over three parallel typed
- * arrays plus a reverse-index map that makes changeKey / remove O(log n) by
- * caller-supplied entity id). v0.2.0 adds the SECOND member: Fenwick (BIT), a
- * flat-array structure whose point-update AND prefix-sum are BOTH O(log n) via
- * the lowest-set-bit walk (`i & -i`). v0.3.0 adds the THIRD member: SegmentTree,
- * a flat `Float64Array(2n)` (leaves at n..2n-1) whose range-query AND point-update
- * are BOTH O(log n) via iterative bottom-up walks, with the associative fold
- * (min / max / sum / gcd) chosen ONCE at construction. v0.4.0 adds the FOURTH
- * member: SkipList, a pointer-free ordered map (get / set / delete / successor /
- * predecessor / rangeIter) whose links are slot INDICES in flat `Uint32Array`
- * columns over a private free-list (NodePool), giving EXPECTED O(log n) with zero
- * per-op allocation and a deterministic instance-local PRNG. Members land
+ * The roster is 19 independent members (no shared mutable module state), so a
+ * bundler that imports one drops the others (`sideEffects: false`). Members land
  * append-only, leaving this header and the `VERSION` const the only prior lines
- * that ever change. Roster: BinaryHeap (v0.1.0, array-embedded O(log n) push / pop
- * min|max heap), Fenwick / BIT (v0.2.0, O(log n) point-update AND prefix-sum via
- * the `i & -i` walk), SegmentTree (v0.3.0, O(log n) associative range-query +
- * point-update over a flat 2n array, fold chosen at construction), and SkipList
- * (v0.4.0, pointer-free expected-O(log n) ordered map over a private free-list
- * node pool). Members are independent (no shared mutable module state), so a
- * bundler that imports one drops the others (`sideEffects: false`).
+ * that ever change:
+ *   1.  BinaryHeap     -- array-embedded O(log n) push / pop min|max heap + a
+ *                         reverse-index map for O(log n) changeKey / remove by id.
+ *   2.  Fenwick / BIT  -- O(log n) point-update AND prefix-sum via the `i & -i` walk.
+ *   3.  SegmentTree    -- O(log n) associative range-query + point-update over a
+ *                         flat 2n array, fold (min / max / sum / gcd) frozen at build.
+ *   4.  SkipList       -- pointer-free expected-O(log n) ordered map over a private
+ *                         free-list node pool, deterministic instance-local PRNG.
+ *   5.  Treap          -- randomized-balanced augmented ordered map (rank / select /
+ *                         split / merge), expected O(log n).
+ *   6.  Scapegoat      -- DETERMINISTIC weight-balanced augmented ordered map,
+ *                         worst-case-O(log n) get, amortized set / delete, zero-GC rebuild.
+ *   7.  MinMaxHeap     -- array-embedded double-ended PQ: O(1) peekMin / peekMax,
+ *                         O(log n) push / popMin / popMax.
+ *   8.  SplayTree      -- self-adjusting ordered map, amortized O(log n) via top-down splay.
+ *   9.  BinomialHeap   -- mergeable PQ: O(log n) meld over a shared arena, zero-GC.
+ *   10. PairingHeap    -- ADDRESSABLE mergeable PQ: O(1) push / meld, amortized
+ *                         O(log n) popMin / decreaseKey / remove by arena-unique id.
+ *   11. FibonacciHeap  -- textbook-optimal ADDRESSABLE mergeable PQ: O(1)-amortized
+ *                         push / meld / decreaseKey (cascading cuts), O(log n) popMin.
+ *   12. Fenwick2D      -- 2D BIT: O(log^2 n) point-update AND rectangle-sum.
+ *   13. SegmentTree2D  -- 2D segment tree of segment trees: O(log^2 n) rectangle
+ *                         min / max / sum / gcd, zero-GC.
+ *   14. SortedArray    -- read-optimized ordered map over parallel sorted typed arrays.
+ *   15. PersistentSegTree -- fully-persistent / branching segment tree via path-copying.
+ *   16. MergeSortTree  -- STATIC offline range-rank tree (countLE / rangeCount).
+ *   17. WaveletTree    -- STATIC wavelet matrix: O(log sigma) access / rank / select +
+ *                         range quantile (k-th smallest) + rangeCount.
+ *   18. CartesianTree  -- STATIC range-minimum tree via binary-lifting LCA (RMQ = LCA).
+ *   19. LinkCutTree    -- dynamic-topology Sleator-Tarjan link-cut tree: a FOREST under
+ *                         link / cut / evert with amortized-O(log n) PATH folds, zero-GC.
  *
  * The family delta: lite-o1 proves a FLAT ops/ms line on a log-x axis (the
  * constant, slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one
@@ -39,13 +52,28 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.4.0';
+export const VERSION = '1.4.1';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
-// BinaryHeap  (v0.1.0 session) -- indexed O(log n) min|max heap  (BELOW)
-// Fenwick     (v0.2.0 session) -- O(log n) point-update + prefix-sum  (BELOW)
-// SegmentTree (v0.3.0 session) -- O(log n) associative range-query + point-update  (BELOW)
-// SkipList    (v0.4.0 session) -- pointer-free expected-O(log n) ordered map  (BELOW)
+// BinaryHeap        -- indexed O(log n) min|max heap  (BELOW)
+// Fenwick           -- O(log n) point-update + prefix-sum  (BELOW)
+// SegmentTree       -- O(log n) associative range-query + point-update  (BELOW)
+// SkipList          -- pointer-free expected-O(log n) ordered map  (BELOW)
+// Treap             -- randomized-balanced augmented ordered map  (BELOW)
+// Scapegoat         -- deterministic weight-balanced ordered map  (BELOW)
+// MinMaxHeap        -- array-embedded double-ended priority queue  (BELOW)
+// SplayTree         -- self-adjusting amortized-O(log n) ordered map  (BELOW)
+// BinomialHeap      -- mergeable PQ, O(log n) meld over a shared arena  (BELOW)
+// PairingHeap       -- addressable mergeable PQ, O(1) push / meld  (BELOW)
+// FibonacciHeap     -- addressable mergeable PQ, O(1)-amortized decreaseKey  (BELOW)
+// Fenwick2D         -- 2D BIT, O(log^2 n) point-update + rectangle-sum  (BELOW)
+// SegmentTree2D     -- 2D segment tree, O(log^2 n) rectangle fold  (BELOW)
+// SortedArray       -- read-optimized ordered map over sorted typed arrays  (BELOW)
+// PersistentSegTree -- fully-persistent branching segment tree  (BELOW)
+// MergeSortTree     -- static offline range-rank tree  (BELOW)
+// WaveletTree       -- static wavelet matrix, quantile + rangeCount  (BELOW)
+// CartesianTree     -- static range-minimum tree via binary-lifting LCA  (BELOW)
+// LinkCutTree       -- dynamic-topology link-cut tree, amortized-O(log n) path folds  (BELOW)
 
 /** Max heap capacity: slot indices 0..cap-1 must fit the Int32Array _pos map. */
 const BH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
@@ -1915,6 +1943,7 @@ export class Treap {
         this._seed = s;                               // live LCG state
         this._version = 0;                            // iterator invalidation stamp
         this._sr = 0;                                 // split scratch (the "right" root)
+        this._dkey = new Float64Array(1);             // F16: delete-path key slot (no tagged phi)
     }
 
     /** Live entry count. O(1) (the root subtree count). */
@@ -2011,7 +2040,8 @@ export class Treap {
             else { found = true; break; }
         }
         if (!found) return false; // absent (no throw)
-        this._root = this._delete(this._root, key);
+        this._dkey[0] = key;      // F16: route the key through a slot, not a tagged phi
+        this._root = this._delete(this._root);
         this._version = (this._version + 1) | 0;
         return true;
     }
@@ -2066,12 +2096,12 @@ export class Treap {
     successor(key) {
         if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] > key) { best = K[t]; t = L[t]; }
+            if (K[t] > key) { bs = t; t = L[t]; }
             else t = R[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     /**
@@ -2083,12 +2113,12 @@ export class Treap {
     predecessor(key) {
         if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] < key) { best = K[t]; t = R[t]; }
+            if (K[t] < key) { bs = t; t = R[t]; }
             else t = L[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     /**
@@ -2283,16 +2313,18 @@ export class Treap {
         return t;
     }
 
-    /** @private recursive delete of `key` from subtree `t`; frees the removed slot. */
-    _delete(t, key) {
+    /** @private recursive delete of the slotted key from subtree `t`; frees the removed
+     *  slot. The key lives in `_dkey[0]` (F16: no double crosses the recursion boundary). */
+    _delete(t) {
         const L = this._left, R = this._right, S = this._size, K = this._key;
+        const key = this._dkey[0];
         if (key < K[t]) {
-            L[t] = this._delete(L[t], key);
+            L[t] = this._delete(L[t]);
             S[t] = S[L[t]] + S[R[t]] + 1;
             return t;
         }
         if (key > K[t]) {
-            R[t] = this._delete(R[t], key);
+            R[t] = this._delete(R[t]);
             S[t] = S[L[t]] + S[R[t]] + 1;
             return t;
         }
@@ -2340,12 +2372,12 @@ export class Treap {
     /** @private smallest key >= `lo`, or undefined (the range-iter start). */
     _ceil(lo) {
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] >= lo) { best = K[t]; t = L[t]; }
+            if (K[t] >= lo) { bs = t; t = L[t]; }
             else t = R[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     /** @private build a Treap VIEW sharing `src`'s arena with a given root (split/merge). */
@@ -2359,6 +2391,7 @@ export class Treap {
         t._root = root;
         t._seed0 = src._seed0; t._seed = src._seed;
         t._version = 0; t._sr = 0;
+        t._dkey = src._dkey;   // F16: share the delete-path key slot (synchronous, non-re-entrant)
         return t;
     }
 
@@ -2509,6 +2542,7 @@ export class Scapegoat {
         this._version = 0;                             // iterator invalidation stamp
         this._alpha = alpha;                           // ctor-frozen weight-balance factor
         this._invAlpha = 1 / alpha;                    // ctor-cached: no per-op Math.log
+        this._dkey = new Float64Array(1);              // F16: delete-path key slot (no tagged phi)
     }
 
     /** Live entry count. O(1) (the root subtree count). */
@@ -2632,7 +2666,8 @@ export class Scapegoat {
             else { found = true; break; }
         }
         if (!found) return false; // absent (no throw)
-        this._root = this._delete(this._root, key);
+        this._dkey[0] = key;      // F16: route the key through a slot, not a tagged phi
+        this._root = this._delete(this._root);
         this._version = (this._version + 1) | 0;
         const newSize = this._root === 0 ? 0 : this._size[this._root];
         if (newSize < this._alpha * this._maxCount) {
@@ -2690,12 +2725,12 @@ export class Scapegoat {
     successor(key) {
         if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] > key) { best = K[t]; t = L[t]; }
+            if (K[t] > key) { bs = t; t = L[t]; }
             else t = R[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     /**
@@ -2707,12 +2742,12 @@ export class Scapegoat {
     predecessor(key) {
         if (typeof key !== 'number' || !Number.isFinite(key)) return this._badKey(key);
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] < key) { best = K[t]; t = R[t]; }
+            if (K[t] < key) { bs = t; t = R[t]; }
             else t = L[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     /**
@@ -2828,17 +2863,19 @@ export class Scapegoat {
         else this._right[parent] = nr;
     }
 
-    /** @private recursive BST delete of `key` from subtree `t`; frees the removed slot,
-     *  fixing `_size` on the unwind. Depth = tree height = O(log n). */
-    _delete(t, key) {
+    /** @private recursive BST delete of the slotted key from subtree `t`; frees the removed
+     *  slot, fixing `_size` on the unwind. Depth = tree height = O(log n). The key lives in
+     *  `_dkey[0]` (F16: no double crosses the recursion boundary). */
+    _delete(t) {
         const L = this._left, R = this._right, S = this._size, K = this._key;
+        const key = this._dkey[0];
         if (key < K[t]) {
-            L[t] = this._delete(L[t], key);
+            L[t] = this._delete(L[t]);
             S[t] = S[L[t]] + S[R[t]] + 1;
             return t;
         }
         if (key > K[t]) {
-            R[t] = this._delete(R[t], key);
+            R[t] = this._delete(R[t]);
             S[t] = S[L[t]] + S[R[t]] + 1;
             return t;
         }
@@ -2867,12 +2904,12 @@ export class Scapegoat {
     /** @private smallest key >= `lo`, or undefined (the range-iter start). */
     _ceil(lo) {
         const L = this._left, R = this._right, K = this._key;
-        let t = this._root, best;
+        let t = this._root, bs = 0;
         while (t !== 0) {
-            if (K[t] >= lo) { best = K[t]; t = L[t]; }
+            if (K[t] >= lo) { bs = t; t = L[t]; }
             else t = R[t];
         }
-        return best;
+        return bs === 0 ? undefined : K[bs];
     }
 
     // ---- cold path only: throw builders (string concat off the hot body) ----
@@ -2982,6 +3019,7 @@ export class MinMaxHeap {
         this._id = new Uint32Array(capacity);   // opaque payload id at each heap slot
         this._cap = capacity;                    // exact fixed capacity
         this._n = 0;                             // live entries (heap size)
+        this._version = 0;                       // S5: bumped on every mutation; iterator stamps it
     }
 
     /** Live entry count. O(1). */
@@ -3005,6 +3043,7 @@ export class MinMaxHeap {
         const n = this._n;
         if (n === this._cap) return this._full();
         this._n = n + 1;
+        this._version = (this._version + 1) | 0;  // S5
         this._siftUp(n, key, id);
     }
 
@@ -3019,7 +3058,10 @@ export class MinMaxHeap {
         const top = this._id[0];
         const last = n - 1;
         this._n = last;
-        if (last > 0) this._siftDownMin(0, this._key[last], this._id[last]);
+        this._version = (this._version + 1) | 0;  // S5
+        // F15: pass the SLOT `last`; the sift reads the key double INSIDE, so no double crosses
+        // the (non-inlined) helper boundary and boxes on a p31 / fractional key.
+        if (last > 0) this._siftDownMinAt(0, last);
         return top;
     }
 
@@ -3032,7 +3074,7 @@ export class MinMaxHeap {
     popMax() {
         const n = this._n;
         if (n === 0) return undefined;
-        if (n === 1) { this._n = 0; return this._id[0]; }
+        if (n === 1) { this._n = 0; this._version = (this._version + 1) | 0; return this._id[0]; }
         const K = this._key;
         // Max is at slot 1, unless slot 2 exists (n > 2) and holds a larger key.
         let mi = 1;
@@ -3040,8 +3082,10 @@ export class MinMaxHeap {
         const top = this._id[mi];
         const last = n - 1;
         this._n = last;
+        this._version = (this._version + 1) | 0;  // S5
         // If the max WAS the last element, dropping the tail already removed it.
-        if (mi !== last) this._siftDownMax(mi, K[last], this._id[last]);
+        // F15: pass the SLOT `last`; the sift reads the key double INSIDE (no boundary box).
+        if (mi !== last) this._siftDownMaxAt(mi, last);
         return top;
     }
 
@@ -3070,11 +3114,13 @@ export class MinMaxHeap {
     }
 
     /** Empty the heap. O(1) (resets size; the columns are kept). */
-    clear() { this._n = 0; }
+    clear() { this._n = 0; this._version = (this._version + 1) | 0; }
 
     /**
      * Visit every live (id, key) pair in UNSPECIFIED (heap-array) order -- NOT sorted /
-     * not pop order. O(n) cold scan, allocation-free (pass a hoisted callback).
+     * not pop order. O(n) cold scan, allocation-free (pass a hoisted callback). The callback
+     * must NOT mutate the heap (push / popMin / popMax / clear); doing so is unsupported
+     * (unlike the iterator, forEach does not version-check).
      * @param {(id:number, key:number, heap:MinMaxHeap)=>void} fn
      */
     forEach(fn) {
@@ -3085,11 +3131,17 @@ export class MinMaxHeap {
     /**
      * Iterate live entity ids in UNSPECIFIED (heap-array) order -- NOT sorted. The one
      * documented per-protocol allocator (a {value, done} per step); use forEach for the
-     * alloc-free scan.
+     * alloc-free scan. S5: captures the `_version` stamp and throws `[lite-logn]` if the heap
+     * is mutated mid-iteration (fail closed -- never a silently corrupt walk).
      */
     *[Symbol.iterator]() {
-        const id = this._id, n = this._n;
-        for (let i = 0; i < n; i++) yield id[i];
+        const id = this._id, n = this._n, v = this._version;
+        for (let i = 0; i < n; i++) {
+            if (this._version !== v) {
+                throw new Error('[lite-logn] MinMaxHeap mutated during iteration');
+            }
+            yield id[i];
+        }
     }
 
     /**
@@ -3137,8 +3189,9 @@ export class MinMaxHeap {
         heap._n = count;
         // Floyd: sift down every internal node, deepest-first, level-aware. O(n).
         for (let i = (count >> 1) - 1; i >= 0; i--) {
-            if (((31 - Math.clz32(i + 1)) & 1) === 0) heap._siftDownMin(i, K[i], I[i]);
-            else heap._siftDownMax(i, K[i], I[i]);
+            // F15: pass the SLOT `i`; the sift reads key/id INSIDE (no double at the boundary).
+            if (((31 - Math.clz32(i + 1)) & 1) === 0) heap._siftDownMinAt(i, i);
+            else heap._siftDownMaxAt(i, i);
         }
         return heap;
     }
@@ -3197,34 +3250,36 @@ export class MinMaxHeap {
 
     /**
      * Trickle a MIN-level hole DOWN toward the SMALLEST of its up-to-six descendants
-     * (children `2h+1`/`2h+2`, grandchildren `4h+3..4h+6`). A grandchild move does the
-     * extra max-parent re-check that keeps the alternating order. Every grandchild index
-     * is bound-checked against the live size. One write per level; zero temporaries.
-     * @private
+     * (children `2h+1`/`2h+2`, grandchildren `4h+3..4h+6`). A grandchild move does the extra
+     * max-parent re-check that keeps the alternating order. Every grandchild index is
+     * bound-checked against the live size. One write per level; zero temporaries.
+     *
+     * @private F15: the moving (key, id) is read from slot `src` INSIDE the loop, so a p31 /
+     * fractional key never boxes across this non-inlined helper. Used by `popMin` and `build`.
      */
-    _siftDownMin(hole, key, id) {
+    _siftDownMinAt(hole, src) {
         const K = this._key, I = this._id, n = this._n;
+        let key = K[src], id = I[src];            // read INSIDE -- no double at the call boundary
         for (;;) {
             const c1 = (hole << 1) + 1;
-            if (c1 >= n) break;                       // leaf: no children -> settle here
+            if (c1 >= n) break;
             const c2 = c1 + 1;
-            let m = c1, mGrand = false;               // smallest descendant so far
+            let m = c1, mGrand = false;
             if (c2 < n && K[c2] < K[m]) m = c2;
-            const gEnd = (c2 << 1) + 2;               // 4h+6, the last grandchild index
-            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) { // grandchildren 4h+3..4h+6
+            const gEnd = (c2 << 1) + 2;
+            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) {
                 if (K[g] < K[m]) { m = g; mGrand = true; }
             }
-            if (K[m] >= key) break;                   // element is <= every descendant -> settle
-            if (!mGrand) {                            // smallest is a direct child (a leaf) -> place, done
+            if (K[m] >= key) break;
+            if (!mGrand) {
                 K[hole] = K[m]; I[hole] = I[m];
                 hole = m;
                 break;
             }
-            // smallest is a grandchild: pull it up, then reconcile with its MAX-level parent.
             K[hole] = K[m]; I[hole] = I[m];
             const p = (m - 1) >> 1;
-            if (key > K[p]) {                         // element too big under max parent p: settle it at p,
-                const pk = K[p], pid = I[p];          // carry p's (smaller) value on down from m.
+            if (key > K[p]) {
+                const pk = K[p], pid = I[p];
                 K[p] = key; I[p] = id;
                 key = pk; id = pid;
             }
@@ -3234,34 +3289,36 @@ export class MinMaxHeap {
     }
 
     /**
-     * Trickle a MAX-level hole DOWN toward the LARGEST of its up-to-six descendants. Mirror
-     * of `_siftDownMin`: a grandchild move re-checks the MIN-level parent. Every grandchild
-     * index is bound-checked. One write per level; zero temporaries.
-     * @private
+     * Trickle a MAX-level hole DOWN toward the LARGEST of its up-to-six descendants. Mirror of
+     * `_siftDownMinAt`: a grandchild move re-checks the MIN-level parent. Every grandchild index
+     * is bound-checked. One write per level; zero temporaries.
+     *
+     * @private F15: the moving (key, id) is read from slot `src` INSIDE the loop (no boundary
+     * box). Used by `popMax` and `build`.
      */
-    _siftDownMax(hole, key, id) {
+    _siftDownMaxAt(hole, src) {
         const K = this._key, I = this._id, n = this._n;
+        let key = K[src], id = I[src];            // read INSIDE -- no double at the call boundary
         for (;;) {
             const c1 = (hole << 1) + 1;
-            if (c1 >= n) break;                       // leaf: no children -> settle here
+            if (c1 >= n) break;
             const c2 = c1 + 1;
-            let m = c1, mGrand = false;               // largest descendant so far
+            let m = c1, mGrand = false;
             if (c2 < n && K[c2] > K[m]) m = c2;
-            const gEnd = (c2 << 1) + 2;               // 4h+6, the last grandchild index
-            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) { // grandchildren 4h+3..4h+6
+            const gEnd = (c2 << 1) + 2;
+            for (let g = (c1 << 1) + 1; g < n && g <= gEnd; g++) {
                 if (K[g] > K[m]) { m = g; mGrand = true; }
             }
-            if (K[m] <= key) break;                   // element is >= every descendant -> settle
-            if (!mGrand) {                            // largest is a direct child (a leaf) -> place, done
+            if (K[m] <= key) break;
+            if (!mGrand) {
                 K[hole] = K[m]; I[hole] = I[m];
                 hole = m;
                 break;
             }
-            // largest is a grandchild: pull it up, then reconcile with its MIN-level parent.
             K[hole] = K[m]; I[hole] = I[m];
             const p = (m - 1) >> 1;
-            if (key < K[p]) {                         // element too small under min parent p: settle it at p,
-                const pk = K[p], pid = I[p];          // carry p's (larger) value on down from m.
+            if (key < K[p]) {
+                const pk = K[p], pid = I[p];
                 K[p] = key; I[p] = id;
                 key = pk; id = pid;
             }
@@ -3836,6 +3893,7 @@ export class BinomialHeap {
         this._min = 0;                                 // cached extreme root, NIL = 0 (empty)
         this._n = 0;                                   // live entry count
         this._consumed = false;                        // dead-after-meld: reuse fails closed
+        this._version = 0;                             // S5: bumped on every mutation; iterator stamps it
     }
 
     /**
@@ -3850,9 +3908,13 @@ export class BinomialHeap {
      * @returns {BinomialHeap[]}
      */
     static arena(capacity, kind, count) {
-        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+        // F8: count must be an integer in [1, capacity] -- checked BEFORE any allocation so a huge
+        // count (1e8, 2**32) is a tagged RangeError, never a V8 FATAL OOM / "Invalid array length".
+        // A bad `capacity` makes `count > capacity` NaN-false, so the ctor below throws the capacity
+        // error instead (correct attribution).
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > capacity) {
             throw new RangeError(
-                '[lite-logn] BinomialHeap.arena count must be an integer >= 1, got ' + String(count));
+                '[lite-logn] BinomialHeap.arena count must be an integer in [1, capacity], got ' + String(count));
         }
         const first = new BinomialHeap(capacity, kind); // validates capacity + kind, allocates the arena
         const heaps = new Array(count);
@@ -3871,6 +3933,7 @@ export class BinomialHeap {
         h._pool = src._pool;
         h._isMin = src._isMin; h._kind = src._kind;
         h._head = 0; h._min = 0; h._n = 0; h._consumed = false;
+        h._version = 0;   // S5
         return h;
     }
 
@@ -3906,6 +3969,7 @@ export class BinomialHeap {
             this._min = slot;
         }
         this._n++;
+        this._version = (this._version + 1) | 0; // S5
         this._unionInto(slot); // single-node union (binary carry); _min preserved inline
     }
 
@@ -3941,6 +4005,7 @@ export class BinomialHeap {
         C[min] = 0; S[min] = 0; P[min] = 0; this._order[min] = 0;
         this._pool.free(min);
         this._n--;
+        this._version = (this._version + 1) | 0; // S5
         this._unionInto(childHead);
         // 4. rescan the O(log n) roots for the new extreme (popMin is O(log n) anyway).
         this._min = this._scanMin();
@@ -3996,6 +4061,8 @@ export class BinomialHeap {
         // Consume `other` FIRST (dead + empty) so the union can never alias its state.
         const oh = other._head;
         other._head = 0; other._min = 0; other._n = 0; other._consumed = true;
+        this._version = (this._version + 1) | 0;   // S5: this heap changed
+        other._version = (other._version + 1) | 0; // S5: other was consumed
         this._unionInto(oh);
         return this;
     }
@@ -4009,6 +4076,7 @@ export class BinomialHeap {
         if (this._consumed) return this._badConsumed();
         this._freeForest(this._head);
         this._head = 0; this._min = 0; this._n = 0;
+        this._version = (this._version + 1) | 0; // S5
         return this;
     }
 
@@ -4030,7 +4098,7 @@ export class BinomialHeap {
      */
     [Symbol.iterator]() {
         if (this._consumed) return this._badConsumed();
-        return this._iterNode(this._head);
+        return this._iterNode(this._head, this._version);
     }
 
     // ---- private hot bodies (link / carry / scan) --------------------------
@@ -4147,13 +4215,23 @@ export class BinomialHeap {
         }
     }
 
-    /** @private recursive forest id generator (the cold [Symbol.iterator] body). */
-    *_iterNode(node) {
+    /** @private recursive forest id generator (the cold [Symbol.iterator] body). S5: `v` is the
+     *  `_version` captured at iterator creation; any mutation mid-walk throws rather than yield a
+     *  freed or re-linked id. Binomial depth <= log2(capacity), so the recursion stays bounded. */
+    *_iterNode(node, v) {
         const S = this._sibling, C = this._child, I = this._id;
         while (node !== 0) {
+            if (this._version !== v) {
+                throw new Error('[lite-logn] BinomialHeap mutated during iteration');
+            }
+            const next = S[node], child = C[node];
             yield I[node];
-            yield* this._iterNode(C[node]);
-            node = S[node];
+            // S5: re-check on resume, before the next slot is derived from now-stale links.
+            if (this._version !== v) {
+                throw new Error('[lite-logn] BinomialHeap mutated during iteration');
+            }
+            yield* this._iterNode(child, v);
+            node = next;
         }
     }
 
@@ -4291,6 +4369,7 @@ export class PairingHeap {
         this._root = 0;                                // tree root slot, NIL = 0 (empty)
         this._n = 0;                                   // live entry count
         this._consumed = false;                        // dead-after-meld: reuse fails closed
+        this._version = 0;                             // S5: bumped on every mutation; iterator stamps it
     }
 
     /**
@@ -4306,9 +4385,11 @@ export class PairingHeap {
      * @returns {PairingHeap[]}
      */
     static arena(capacity, kind, count) {
-        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+        // F8: count must be an integer in [1, capacity] -- checked BEFORE any allocation so a huge
+        // count (1e8, 2**32) is a tagged RangeError, never a V8 FATAL OOM / "Invalid array length".
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > capacity) {
             throw new RangeError(
-                '[lite-logn] PairingHeap.arena count must be an integer >= 1, got ' + String(count));
+                '[lite-logn] PairingHeap.arena count must be an integer in [1, capacity], got ' + String(count));
         }
         const first = new PairingHeap(capacity, kind); // validates capacity + kind, allocates the arena
         const alias = new Int32Array(count + 1);       // union-find over heap ids 1..count
@@ -4331,6 +4412,7 @@ export class PairingHeap {
         h._isMin = src._isMin; h._kind = src._kind;
         h._hid = hid;
         h._root = 0; h._n = 0; h._consumed = false;
+        h._version = 0;   // S5
         return h;
     }
 
@@ -4364,6 +4446,7 @@ export class PairingHeap {
         this._child[slot] = 0; this._sibling[slot] = 0; this._parent[slot] = 0;
         this._pos[id] = slot; this._owner[slot] = this._hid;
         this._n++;
+        this._version = (this._version + 1) | 0; // S5
         this._root = this._root === 0 ? slot : this._linkPair(this._root, slot);
     }
 
@@ -4384,6 +4467,7 @@ export class PairingHeap {
         this._child[r] = 0; this._sibling[r] = 0; this._parent[r] = 0;
         this._pool.free(r);
         this._n--;
+        this._version = (this._version + 1) | 0; // S5
         this._root = this._twoPass(first);
         return outId;
     }
@@ -4423,6 +4507,7 @@ export class PairingHeap {
         // Toward-extreme only: a move away cannot be served by a cut-and-link -- fail closed.
         if (this._isMin ? newKey > cur : newKey < cur) return this._badDir(id);
         this._key[slot] = newKey;
+        this._version = (this._version + 1) | 0;     // S5
         if (slot === this._root) return;             // already the extreme: nothing to cut
         this._cut(slot);                             // detach the subtree (O(1) prev-pointer)
         this._root = this._linkPair(this._root, slot);
@@ -4452,6 +4537,7 @@ export class PairingHeap {
         this._child[slot] = 0; this._sibling[slot] = 0; this._parent[slot] = 0;
         this._pool.free(slot);
         this._n--;
+        this._version = (this._version + 1) | 0; // S5
         const sub = this._twoPass(first);
         if (sub !== 0) this._root = this._root === 0 ? sub : this._linkPair(this._root, sub);
         return true;
@@ -4520,6 +4606,8 @@ export class PairingHeap {
         // (owner = other._hid) resolve to this in O(1) -- NO per-node re-tag (that would be O(|b|)).
         this._alias[other._hid] = this._resolve(this._hid);
         other._root = 0; other._n = 0; other._consumed = true;
+        this._version = (this._version + 1) | 0;   // S5: this heap changed
+        other._version = (other._version + 1) | 0; // S5: other was consumed
         if (or !== 0) this._root = this._root === 0 ? or : this._linkPair(this._root, or);
         return this;
     }
@@ -4533,6 +4621,7 @@ export class PairingHeap {
         if (this._consumed) return this._badConsumed();
         this._freeForest(this._root);
         this._root = 0; this._n = 0;
+        this._version = (this._version + 1) | 0; // S5
         return this;
     }
 
@@ -4560,7 +4649,7 @@ export class PairingHeap {
      */
     [Symbol.iterator]() {
         if (this._consumed) return this._badConsumed();
-        return this._iterNode(this._root);
+        return this._iterNode(this._root, this._version);
     }
 
     // ---- private hot bodies (link / cut / two-pass / resolve) --------------
@@ -4718,14 +4807,20 @@ export class PairingHeap {
         }
     }
 
-    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). */
-    *_iterNode(node) {
+    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). S5:
+     *  `v` is the `_version` captured at iterator creation; a mismatch throws DETERMINISTICALLY,
+     *  layered over the F2 budget + ownership guard that (even without the stamp) keeps the walk
+     *  terminating and never yielding a freed / sibling-owned id. */
+    *_iterNode(node, v) {
         const S = this._sibling, C = this._child, I = this._id, O = this._owner;
         let x = node, left = this._n;
         const mine = this._resolve(this._hid);
         while (x !== 0) {
             if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('iteration');
             yield I[x];
+            // S5: a mutation during the consumer's step bumps `_version` -> throw DETERMINISTICALLY
+            // (checked on resume, before the next x is derived from now-stale links).
+            if (this._version !== v) this._badMutation('iteration');
             if (C[x] !== 0) { x = C[x]; continue; }
             while (x !== 0 && S[x] === 0) x = this._parentOf(x);
             if (x === 0) break;
@@ -4924,6 +5019,7 @@ export class FibonacciHeap {
         this._min = 0;                                 // cached extreme root, NIL = 0 (empty)
         this._n = 0;                                   // live entry count
         this._consumed = false;                        // dead-after-meld: reuse fails closed
+        this._version = 0;                             // S5: bumped on every mutation; iterator stamps it
     }
 
     /**
@@ -4939,9 +5035,11 @@ export class FibonacciHeap {
      * @returns {FibonacciHeap[]}
      */
     static arena(capacity, kind, count) {
-        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1) {
+        // F8: count must be an integer in [1, capacity] -- checked BEFORE any allocation so a huge
+        // count (1e8, 2**32) is a tagged RangeError, never a V8 FATAL OOM / "Invalid array length".
+        if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > capacity) {
             throw new RangeError(
-                '[lite-logn] FibonacciHeap.arena count must be an integer >= 1, got ' + String(count));
+                '[lite-logn] FibonacciHeap.arena count must be an integer in [1, capacity], got ' + String(count));
         }
         const first = new FibonacciHeap(capacity, kind); // validates capacity + kind, allocates arena
         const alias = new Int32Array(count + 1);         // union-find over heap ids 1..count
@@ -4965,6 +5063,7 @@ export class FibonacciHeap {
         h._isMin = src._isMin; h._kind = src._kind;
         h._hid = hid;
         h._min = 0; h._n = 0; h._consumed = false;
+        h._version = 0;   // S5
         return h;
     }
 
@@ -4999,6 +5098,7 @@ export class FibonacciHeap {
         this._left[slot] = slot; this._right[slot] = slot; // singleton circular list
         this._pos[id] = slot; this._owner[slot] = this._hid;
         this._n++;
+        this._version = (this._version + 1) | 0; // S5
         this._addRoot(slot);
     }
 
@@ -5030,6 +5130,7 @@ export class FibonacciHeap {
         this._degree[z] = 0; this._mark[z] = 0; this._parent[z] = 0; this._child[z] = 0;
         this._pool.free(z);
         this._n--;
+        this._version = (this._version + 1) | 0; // S5
         if (zr === z) {
             // z was the only root -> heap now empty
             this._left[z] = z; this._right[z] = z;
@@ -5078,6 +5179,7 @@ export class FibonacciHeap {
         // Toward-extreme only: a move away cannot be served by a cut-and-link -- fail closed.
         if (this._isMin ? newKey > cur : newKey < cur) return this._badDir(id);
         this._key[slot] = newKey;
+        this._version = (this._version + 1) | 0; // S5
         const p = this._parent[slot];
         if (p !== 0 && (this._isMin ? newKey < this._key[p] : newKey > this._key[p])) {
             this._cut(slot);       // detach the subtree, splice at root, clear mark
@@ -5176,6 +5278,8 @@ export class FibonacciHeap {
         // (owner = other._hid) resolve to this in O(1) -- NO per-node re-tag (that would be O(|b|)).
         this._alias[other._hid] = this._resolve(this._hid);
         other._min = 0; other._n = 0; other._consumed = true;
+        this._version = (this._version + 1) | 0;   // S5: this heap changed
+        other._version = (other._version + 1) | 0; // S5: other was consumed
         if (om !== 0) {
             if (this._min === 0) {
                 this._min = om;
@@ -5201,6 +5305,7 @@ export class FibonacciHeap {
         if (this._consumed) return this._badConsumed();
         this._freeForest(this._min);
         this._min = 0; this._n = 0;
+        this._version = (this._version + 1) | 0; // S5
         return this;
     }
 
@@ -5227,7 +5332,7 @@ export class FibonacciHeap {
      */
     [Symbol.iterator]() {
         if (this._consumed) return this._badConsumed();
-        return this._iterNode(this._min);
+        return this._iterNode(this._min, this._version);
     }
 
     // ---- private hot bodies (add-root / cut / cascade / consolidate / link) ----
@@ -5417,8 +5522,11 @@ export class FibonacciHeap {
         }
     }
 
-    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). */
-    *_iterNode(entry) {
+    /** @private STACKLESS forest id generator (the cold [Symbol.iterator] body; see _forEach). S5:
+     *  `v` is the `_version` captured at iterator creation; a mismatch throws DETERMINISTICALLY,
+     *  layered over the F2 budget + ownership guard that (even without the stamp) keeps the walk
+     *  terminating and never yielding a freed / sibling-owned id. */
+    *_iterNode(entry, v) {
         if (entry === 0) return;
         const R = this._right, C = this._child, P = this._parent, I = this._id, O = this._owner;
         let x = entry, left = this._n;
@@ -5426,6 +5534,9 @@ export class FibonacciHeap {
         for (;;) {
             if (left-- === 0 || O[x] === 0 || this._resolve(O[x]) !== mine) this._badMutation('iteration');
             yield I[x];
+            // S5: a mutation during the consumer's step bumps `_version` -> throw DETERMINISTICALLY
+            // (checked on resume, before the next x is derived from now-stale links).
+            if (this._version !== v) this._badMutation('iteration');
             if (C[x] !== 0) { x = C[x]; continue; }
             for (;;) {
                 const p = P[x];
@@ -5991,6 +6102,11 @@ export class SegmentTree2D {
         this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
         this._t = new Float64Array(cells);        // flat 2R x 2C; row 0 / col 0 unused
         if (this._idv !== 0) this._t.fill(this._idv); // sum/gcd identity is 0 already
+        // F7/S1 (sum kind): |value| <= MAX_VALUE / (2 * rows*cols) bounds a full-grid fold STRICTLY
+        // below MAX_VALUE, so no rectangle sum can reach Infinity / NaN. Non-sum kinds: no bound
+        // (Infinity). NaN-safe: the check is `value > _sumBound || value < _negSumBound`.
+        this._sumBound = k === 2 ? Number.MAX_VALUE / (2 * rows * cols) : Infinity;
+        this._negSumBound = -this._sumBound;
     }
 
     /** Row count this tree was sized for. O(1). */
@@ -6080,6 +6196,8 @@ export class SegmentTree2D {
     update(r, c, value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
         if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        // F7/S1: sum kind bounds |value| so no rectangle fold can overflow (checked BEFORE any write).
+        if (this._k === 2 && (value > this._sumBound || value < this._negSumBound)) return this._badSumValue(value);
         if (typeof r !== 'number' || !Number.isInteger(r) || r < 0 || r >= this._r) return this._badRow(r);
         if (typeof c !== 'number' || !Number.isInteger(c) || c < 0 || c >= this._c) return this._badCol(c);
         const t = this._t, k = this._k, w = this._w, R = this._r, C = this._c;
@@ -6200,6 +6318,11 @@ export class SegmentTree2D {
                         '[lite-logn] SegmentTree2D.build gcd value must be a nonnegative integer, got ' +
                         String(v));
                 }
+                if (k === 2 && !((v < 0 ? -v : v) <= st._sumBound)) { // F7/S1 sum bound (cold, at the door)
+                    throw new RangeError(
+                        '[lite-logn] SegmentTree2D.build sum value magnitude exceeds MAX_VALUE / (2 * rows*cols), got ' +
+                        String(v));
+                }
                 t[b + c] = v;
             }
         }
@@ -6232,6 +6355,13 @@ export class SegmentTree2D {
     }
 
     // ---- cold path only: throw builders (string concat off the hot body) ----
+
+    /** @private */
+    _badSumValue(value) {
+        throw new RangeError(
+            '[lite-logn] SegmentTree2D sum value magnitude exceeds MAX_VALUE / (2 * rows*cols) (' +
+            this._sumBound + '), got ' + String(value));
+    }
 
     /** @private */
     _badRow(r) {
@@ -6734,14 +6864,27 @@ const PST_MAX_NODES = 0x7FFFFFFF; // 2^31 - 1
  * `update` bump-allocates ONLY preallocated slots (no `new`, no typed-array growth). `query(version,
  * lo, hi)` folds `[lo, hi]` INCLUSIVE in worst-case O(log n) and is the gated O(log n) Witness op.
  */
+
+/**
+ * @private F6 module-private v0 seeder. `seed` is a Float64Array of length `tree._n` whose entries
+ * PersistentSegTree.build has ALREADY validated (finite; gcd => nonnegative integer). Rewinds the
+ * arena (as clear does) and rebuilds version 0 from the seed, so no unvalidated value can reach the
+ * fold. Not reachable from the public ctor (which no longer takes a seed parameter).
+ */
+function pstSeedV0(tree, seed) {
+    tree._next = 1;
+    tree._vcount = 0;
+    tree._roots[0] = tree._build0(0, tree._n - 1, seed);
+    tree._vcount = 1;
+}
+
 export class PersistentSegTree {
     /**
      * @param {number} length           exact element count; integer in [1, 2^30-1].
      * @param {number} versionCapacity  max updates (extra versions beyond v0); integer >= 1.
      * @param {'min'|'max'|'sum'|'gcd'} kind  the frozen associative fold.
-     * @param {Float64Array} [_seed]    PRIVATE: validated v0 leaf values (from PersistentSegTree.build).
      */
-    constructor(length, versionCapacity, kind, _seed) {
+    constructor(length, versionCapacity, kind) {
         // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
         if (typeof length !== 'number' || !Number.isInteger(length) ||
             length < 1 || length > PST_MAX_LENGTH) {
@@ -6777,6 +6920,11 @@ export class PersistentSegTree {
         this._n = length;                          // element count (fixed)
         this._k = k;                               // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
         this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity
+        // F7/S1 (sum kind): |value| <= MAX_VALUE / (2 * length) bounds a full-range fold STRICTLY
+        // below MAX_VALUE in EVERY version (each version is a length-n array), so no query can reach
+        // Infinity / NaN. Non-sum kinds: no bound (Infinity). NaN-safe compare at the door.
+        this._sumBound = k === 2 ? Number.MAX_VALUE / (2 * length) : Infinity;
+        this._negSumBound = -this._sumBound;
         this._vcap = versionCapacity;              // max extra versions beyond v0 (fixed)
         this._budget = budget;                     // node-arena size incl. NIL slot 0 (fixed)
         this._val = new Float64Array(budget);      // node folded value; _val[0] = NIL, unused
@@ -6789,8 +6937,10 @@ export class PersistentSegTree {
         // stack can hold up to 2 frames per level; (node, lo, hi) triples over 2H+2 frames.
         this._h = h;                               // tree height ceil(log2 n)
         this._qstk = new Int32Array(3 * (4 * (h + 2)));  // (node, lo, hi) frames; generous bound
-        // Seed version 0: identity leaves (fresh) or the validated _seed values (from build).
-        this._roots[0] = this._build0(0, length - 1, _seed);
+        // Seed version 0 with the fold identity. PersistentSegTree.build re-seeds v0 from its
+        // PRE-VALIDATED values via the module-private pstSeedV0 (F6: no unvalidated seed can reach
+        // the fold -- a NaN gcd leaf used to hang segGcd inside the public ctor).
+        this._roots[0] = this._build0(0, length - 1, undefined);
         this._vcount = 1;
     }
 
@@ -6980,6 +7130,8 @@ export class PersistentSegTree {
         }
         if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
         if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        // F7/S1: sum kind bounds |value| so no version's fold can overflow (checked BEFORE any write).
+        if (this._k === 2 && (value > this._sumBound || value < this._negSumBound)) return this._badSumValue(value);
         if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= this._n) {
             return this._badIndex(i);
         }
@@ -7068,10 +7220,19 @@ export class PersistentSegTree {
                     '[lite-logn] PersistentSegTree.build gcd value must be a nonnegative integer, got ' +
                     String(v));
             }
+            if (kind === 'sum' && !((v < 0 ? -v : v) <= Number.MAX_VALUE / (2 * length))) { // F7/S1 sum bound
+                throw new RangeError(
+                    '[lite-logn] PersistentSegTree.build sum value magnitude exceeds MAX_VALUE / (2 * length), got ' +
+                    String(v));
+            }
             seed[i] = v;
         }
-        // The ctor validates versionCapacity + kind and seeds v0 from the pre-validated column.
-        return new PersistentSegTree(length, versionCapacity, kind, seed);
+        // The ctor validates versionCapacity + kind (and identity-seeds v0); then the module-private
+        // pstSeedV0 re-seeds v0 from the PRE-VALIDATED column (F6: the seed never routes through the
+        // public ctor, so an unvalidated NaN gcd leaf can no longer hang segGcd).
+        const tree = new PersistentSegTree(length, versionCapacity, kind);
+        pstSeedV0(tree, seed);
+        return tree;
     }
 
     // ---- cold path only: throw builders (string concat off the hot body) ----
@@ -7101,6 +7262,13 @@ export class PersistentSegTree {
     _badValue(value) {
         throw new TypeError(
             '[lite-logn] PersistentSegTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badSumValue(value) {
+        throw new RangeError(
+            '[lite-logn] PersistentSegTree sum value magnitude exceeds MAX_VALUE / (2 * length) (' +
+            this._sumBound + '), got ' + String(value));
     }
 
     /** @private */
@@ -8478,8 +8646,13 @@ export class LinkCutTree {
         this._cap = capacity;                          // vertex count (fixed)
         this._k = k;                                   // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
         this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity (agg of NIL)
+        // F7/S1 (sum kind): |value| <= MAX_VALUE / (2 * capacity) bounds a path fold STRICTLY below
+        // MAX_VALUE (a path has <= capacity vertices), so pathAggregate can never reach Infinity /
+        // NaN. Non-sum kinds: no bound (Infinity). NaN-safe compare at the door.
+        this._sumBound = k === 2 ? Number.MAX_VALUE / (2 * capacity) : Infinity;
+        this._negSumBound = -this._sumBound;
         const s = capacity + 1;                        // slot 0 reserved NIL; live slots [1, cap]
-        this._val = new Float64Array(s);               // per-vertex value (default 0)
+        this._val = new Float64Array(s);               // per-vertex value (filled with the fold identity below)
         this._agg = new Float64Array(s);               // fold over the splay subtree at slot
         this._l = new Uint32Array(s);                  // splay left child; NIL = 0
         this._r = new Uint32Array(s);                  // splay right child; NIL = 0
@@ -8487,10 +8660,11 @@ export class LinkCutTree {
         this._rev = new Uint8Array(s);                 // lazy subtree-reversal flag
         this._stk = new Uint32Array(s);                // splay push-down scratch (preallocated)
         this._edges = 0;                               // live edge count
-        // NIL's aggregate is the fold identity so a missing child folds away (min +Inf / max -Inf;
-        // sum / gcd identity is 0, already the Float64Array default). Real singleton nodes have
-        // agg = val = 0 (both defaults), consistent for a one-node splay tree.
-        if (this._idv !== 0) this._agg[0] = this._idv;
+        // F9/S2: every vertex (and NIL) starts at the fold IDENTITY, not 0 -- an UNSET vertex must
+        // not read 0 (null is not zero). So `at(unset)` and a path over unset vertices both return
+        // the identity (min +Inf, max -Inf, sum 0, gcd 0). For sum / gcd the identity is 0, already
+        // the Float64Array default; for min / max we fill +-Infinity across every slot incl. NIL.
+        if (this._idv !== 0) { this._val.fill(this._idv); this._agg.fill(this._idv); }
     }
 
     /** The fixed vertex count (capacity) this forest was sized for. O(1). */
@@ -8588,8 +8762,13 @@ export class LinkCutTree {
      * root), access `v`, read `v`'s aggregate = the fold over `u..v` INCLUSIVE of both endpoints. Both
      * are AMORTIZED O(log n) MUTATING reads. Fails closed on a bad id BEFORE any splay; a two-argument
      * call with `u`, `v` in DIFFERENT trees throws `[lite-logn]` (no path exists).
+     *
+     * F9/S3 RE-ROOT: the two-argument form EVERTS `u`, so it LEAVES the tree ROOTED AT `u`
+     * (`findRoot(v) === u` afterwards, and a later `cut` severs the edge toward `u`, not the original
+     * root). This is BY DESIGN and not restored -- restoring would cost an extra access and move the
+     * witness slope. An unset vertex folds as the identity (min +Inf / max -Inf / sum 0 / gcd 0).
      * @param {number} u  vertex id in [0, capacity)
-     * @param {number} [v]  vertex id in [0, capacity); when present, fold the path u..v
+     * @param {number} [v]  vertex id in [0, capacity); when present, fold the path u..v (re-roots at u)
      * @returns {number} the fold over the path
      */
     pathAggregate(u, v) {
@@ -8626,6 +8805,8 @@ export class LinkCutTree {
     setValue(id, value) {
         if (typeof value !== 'number' || !Number.isFinite(value)) return this._badValue(value);
         if (this._k === 3 && (!Number.isInteger(value) || value < 0)) return this._badGcdValue(value);
+        // F7/S1: sum kind bounds |value| so no path fold can overflow (checked BEFORE any write).
+        if (this._k === 2 && (value > this._sumBound || value < this._negSumBound)) return this._badSumValue(value);
         const xs = this._slot('setValue', id);
         this._access(xs);
         this._val[xs] = value;
@@ -8654,9 +8835,10 @@ export class LinkCutTree {
         this._r.fill(0);
         this._p.fill(0);
         this._rev.fill(0);
-        this._val.fill(0);
-        this._agg.fill(0);
-        if (this._idv !== 0) this._agg[0] = this._idv; // NIL's aggregate stays the fold identity (min +Inf / max -Inf)
+        // F9/S2: values + aggregates return to the fold IDENTITY, not 0 -- the exact pristine state of
+        // a freshly constructed instance (an unset vertex must not read 0).
+        this._val.fill(this._idv);
+        this._agg.fill(this._idv);
         this._edges = 0;
         return this;
     }
@@ -8844,6 +9026,13 @@ export class LinkCutTree {
     _badGcdValue(value) {
         throw new RangeError(
             '[lite-logn] LinkCutTree gcd value must be a nonnegative integer, got ' + String(value));
+    }
+
+    /** @private */
+    _badSumValue(value) {
+        throw new RangeError(
+            '[lite-logn] LinkCutTree sum value magnitude exceeds MAX_VALUE / (2 * capacity) (' +
+            this._sumBound + '), got ' + String(value));
     }
 
     /** @private */

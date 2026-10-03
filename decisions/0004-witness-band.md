@@ -136,3 +136,25 @@ Seven solo runs:
   are kept and applied to each mode's median. The R^2 floor and the O(n^2) foil check are
   untouched, so an O(n) or O(n^2) regression (foil slopes in the thousands) is still caught.
   Revisit if the S1 compare is restructured.
+
+## 1.4.1 -- W1 R^2-only single retry + T10 CartesianTree hardening
+
+Two changes close the near-floor flake the 1.4.0 solo runs recorded (CartesianTree.rangeMinIndex OFF
+once in 7 at R^2 0.9577, and the whole-witness R^2 flake W1 names), WITHOUT loosening the frozen
+0.958 floor or moving any slope band.
+
+- **W1 -- the R^2-only single retry.** A lane that misses ONLY the R^2 floor -- slope INSIDE its
+  band AND the foil OFF -- is re-measured ONCE and the retry's R^2 decides. A slope-band miss or a
+  foil failure is NEVER retried (a retry is a noise filter for a quiescent-run R^2 dip, not a second
+  chance at a real shape / slope / foil violation). The retry prints `RETRY <lane> (R^2 x.xxx <
+  floor)`. The decision is a PURE function, `witnessVerdict(fit, foil, band, floor, retryFit)`
+  (exported from `test/witness.mjs`), unit-tested FAST in `test/WitnessVerdict.test.mjs` without
+  running a real sweep: an injected R^2-only miss passes on the retry; a second R^2 miss fails; a
+  slope-band miss and a foil failure each fail without a retry. Slope and foil are always judged on
+  the ORIGINAL fit; only the R^2 check consults the retry.
+
+- **T10 -- more work per sample for CartesianTree.rangeMinIndex.** Matching the SegmentTree.update
+  hardening of 1.4.0: `CT_ITERS` 200k -> 1M, `CT_BATCH` 10 -> 20, `CT_FIT_RUNS` 7 -> 9. This cuts
+  per-point timing noise so the R^2 clears the floor; it adds measurement work only. The slope band
+  ([1.69, 3.93]) and the 0.958 floor are UNCHANGED. The sweep width is unchanged (widening it could
+  move the slope; this change must not).

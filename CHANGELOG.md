@@ -4,6 +4,75 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-03
+
+H1 close (ROADMAP 8.5). Empties the 1.4.0 DEFERRED list and closes every remaining H1 finding. The
+byte-identical-prior-members invariant is SUSPENDED for the members listed below (LCT unset-vertex
+values, PST ctor arity, and the new tagged throws).
+
+### Added
+
+- **Iterator version stamps on `MinMaxHeap`, `BinomialHeap`, `PairingHeap`, `FibonacciHeap`** (S5) --
+  each gains a `_version` Smi bumped `(v + 1) | 0` on every mutation; `Symbol.iterator` captures it
+  and throws `[lite-logn] <Class> mutated during iteration` on a mismatch (checked on resume, before
+  the next node is derived from now-stale links). The Pairing / Fibonacci stackless walkers keep
+  their 1.4.0 F2 guarantees (the walk always terminates and never yields a freed id); the stamp adds
+  a DETERMINISTIC throw on top. `forEach` documents "no mutation from the callback" (it does not
+  version-check). BinaryHeap was already stamped in 1.4.0.
+
+### Changed
+
+- **LinkCutTree unset vertices = the fold identity** (F9 / S2) -- a fresh (and `clear()`-ed) vertex
+  now reads the fold identity (`min` +Infinity, `max` -Infinity, `sum` / `gcd` 0), not 0. So `min`
+  over values 5 / unset / 7 is 5 (was 0: null is not zero). `at(unset)` returns the identity.
+- **LinkCutTree `pathAggregate(u, v)` documents its re-root** (F9 / S3) -- the two-argument form
+  everts `u`, leaving the tree ROOTED AT `u` (`findRoot(v) === u` afterwards). This is by design and
+  not restored (restoring would cost an access and move the witness slope); now documented and tested.
+- **PersistentSegTree constructor arity is 3** (F6) -- the private `_seed` parameter is gone from the
+  public signature (the `.d.ts` already declared 3 parameters).
+- **New tagged throws** -- the F7 sum bound (SegmentTree2D / PST / LCT) and the F8 arena count bound.
+
+### Fixed
+
+- **F10 Treap / Scapegoat `successor` / `predecessor` / `_ceil`** -- the `best = undefined` phi boxed
+  the returned key double even on integer input. Now an integer slot `bs = 0` holds the node index
+  and the method returns `bs === 0 ? undefined : K[bs]` (the SplayTree pattern). 0 B/op on integer
+  input, <= 1 return box on a fractional / large key; the former DEFERRED cells are now hard GREEN.
+- **F16 Treap / Scapegoat `delete`** -- the key double crossed the recursive `_delete` boundary,
+  boxing once per call beyond the allowed argument box. The key now rides a `_dkey` Float64Array slot
+  and `_delete(t)` reads it inside, so no double flows through a tagged phi.
+- **F15 MinMaxHeap `popMin` / `popMax` / `build`** -- these passed the moving key double into the
+  non-inlined sift helpers. New slot-form `_siftDownMinAt` / `_siftDownMaxAt` read the key from the
+  array slot inside (exactly as BinaryHeap's `_siftDownAt` since 1.4.0); the `ni-minmax` DEFERRED
+  cells are now GREEN. **DEFERRED is now EMPTY** in `test/perf/Kinds.mjs` and torture's `G9_DEFERRED`.
+- **F6 PersistentSegTree constructor `_seed`** -- the undocumented 4th parameter skipped `build`'s
+  validation; `new PersistentSegTree(3, 1, 'gcd', [NaN, 3, 6])` hung inside the constructor (segGcd
+  over a NaN leaf). The public constructor now takes only `(length, versionCapacity, kind)`
+  (`PersistentSegTree.length === 3`); `build` validates first, then seeds v0 through a module-private
+  function. A stray 4th argument is ignored.
+- **F7 sum-kind magnitude bound** -- `SegmentTree2D`, `PersistentSegTree` and `LinkCutTree` now bound
+  a sum-kind write at the door to `|value| <= MAX_VALUE / (2 * cells)` (cells = `rows*cols` /
+  `length` / `capacity`), so a finite input can no longer fold to `Infinity` / `NaN`. The 1e308
+  repros throw `[lite-logn]` as a byte-identical no-op; a sweep AT the bound stays finite. NaN-safe
+  by construction (`value > bound || value < -bound`). Non-sum kinds are unbounded.
+- **F8 `arena(capacity, kind, count)` count bound** -- `BinomialHeap`, `PairingHeap` and
+  `FibonacciHeap` now require `count` to be an integer in `[1, capacity]`, throwing a tagged
+  `RangeError` BEFORE any allocation. `arena(8, 'min', 1e8)` and `arena(8, 'min', 2**32)` were a V8
+  FATAL OOM / "Invalid array length"; both now throw in < 10 ms with no abort.
+
+### Removed
+
+- The undocumented 4th `_seed` parameter of the `PersistentSegTree` constructor (F6). Seeding version 0
+  from values goes through `PersistentSegTree.build`, which validates first.
+
+### Testing
+
+- Red-first tests for every finding: Treap/Scapegoat succ/pred/delete (F10/F16) and MinMaxHeap sifts
+  (F15) via the now-empty DEFERRED gate; PST arity + gcd-NaN no-hang subprocess (F6); SegmentTree2D /
+  PST / LCT sum-bound reject + no-Infinity sweep (F7); arena count reject + subprocess no-abort (F8);
+  LCT unset-identity + `pathAggregate` re-root (F9); and a version-stamped iterator mutation test on
+  each of the four heaps (S5).
+
 ## [1.4.0] - 2026-09-28
 
 H1 hardening, consumer release (ROADMAP 8.4). The byte-identical-prior-members invariant is SUSPENDED

@@ -313,3 +313,19 @@ test('BinomialHeap is LEAN + NON-ADDRESSABLE: no decreaseKey / remove / changeKe
     assert.equal(typeof h.rank, 'undefined');
     assert.equal(typeof h.select, 'undefined');
 });
+
+// --- S5: version-stamped iterator (T4) --------------------------------------
+
+test('S5 iterator: clean walk yields every id; a mutation mid-iteration throws tagged', () => {
+    const h = new BinomialHeap(32, 'min');
+    for (let i = 0; i < 10; i++) h.push(i, i * 1.5);
+    const seen = [];
+    for (const id of h) seen.push(id);
+    assert.equal(seen.length, 10);
+    assert.deepEqual([...seen].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.throws(() => { for (const _id of h) h.push(20, 0.5); },
+        /\[lite-logn\] BinomialHeap mutated during iteration/);
+    const g = new BinomialHeap(32, 'min');
+    for (let i = 0; i < 8; i++) g.push(i, i);
+    assert.throws(() => { for (const _id of g) g.popMin(); }, /\[lite-logn\] BinomialHeap mutated/);
+});
