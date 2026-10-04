@@ -1,16 +1,21 @@
 # lite-logn demo -- blueprint (DEMO.md)
 
-Repo-only dev artifact (NEVER in package.json `files[]`). The demo demonstrates all
-SIXTEEN shipped members of `../LogN.js` (v1.0.0) across four thematic scenes, refactored
-onto the proven 4-file architecture of the lite-o1 demo. `LogN.js` stays BYTE-IDENTICAL:
+Repo-only dev artifact (NEVER in package.json `files[]`). The demo demonstrates 16 of the
+20 shipped members of `../LogN.js` (WaveletTree, CartesianTree, LinkCutTree, EulerTourTree
+are not in the demo yet) across four thematic scenes, refactored onto the proven 4-file
+architecture of the lite-o1 demo. The version is read live from the three trinity sites,
+never pinned in this doc. `LogN.js` stays BYTE-IDENTICAL:
 the demo READS the shipped classes, never modifies or re-implements them.
 
 ## Section 0 -- the non-negotiables
 
 1. **The demo of zero-GC must ITSELF be zero-GC.** Every hot frame kernel (`stepXWorld`,
-   `snapshotX`, the rAF draw) allocates ZERO bytes after warmup. The ONLY code allowed to
+   `snapshotX`, the rAF draw) allocates ZERO bytes after warmup -- with ONE documented
+   exception: `SegmentTree2D.query` returns a computed double, and in the demo's larger
+   combined step its call site is not inlined, so V8 boxes that return into a ~16 B HeapNumber
+   (the library's disclosed S7 return box; ~0.85 B/step measured). The ONLY code allowed to
    allocate on a frame is a scene's NAIVE FOIL, and it does so ON PURPOSE (that is the point
-   being made). All allocation lives in `createXWorld()` warmup factories.
+   being made). All other allocation lives in `createXWorld()` warmup factories.
 2. **Faithfulness: drive the REAL shipped classes.** `kernels.mjs` imports the members from
    `../LogN.js` and the demo's visualization STATE *is* those class instances. The demo can
    never drift from the library because `Demo.test.mjs` cross-checks every kernel against an
@@ -43,12 +48,15 @@ the demo READS the shipped classes, never modifies or re-implements them.
   read-and-advance-in-place (no closure, no boxed HeapNumber).
 - **`index.html`** -- the browser rAF loop + tabbed scenes (a tab `<button data-tab>` + a
   `<section class="scene" data-scene>` per scene). Canvas for dense animated worlds, SVG where
-  discrete structure carries the point. A per-scene zero-GC Truth Panel (live ns/op, fitted
-  slope + R^2 with the axis named, 0 B/op, foil ns/op, and a max-single-op row only for the
-  EXPECTED/AMORTIZED members). `#profile` hash flag gates `@zakkster/lite-layout-profiler`
-  (dev-only, never a dependency, never in `files[]`).
+  discrete structure carries the point. A per-scene zero-GC Truth Panel: live (approximate)
+  ns/op, the STATIC gated witness slope band + axis (from `demo/witness-data.mjs`, the browser
+  mirror of `npm run witness` -- NOT an in-browser fit), 0 B/op, and foil ns/op. The `max`
+  column shows no live value: the 0.1 ms timer tick is not a max; an amortized/expected
+  member's worst case is disclosed by the witness. (A former `#profile` layout-profiler hook
+  was removed as dead code -- a bare specifier with no import map.)
 - **`Demo.test.mjs`** -- the node:test HONESTY GATE: (a) FAITHFULNESS (16 oracle suites),
-  (b) VERSION-TRINITY (`kernels.VERSION === LogN.VERSION === package.json.version === '1.0.0'`),
+  (b) VERSION-TRINITY (`kernels.VERSION === LogN.VERSION === package.json.version`), plus a
+  fail-closed WITNESS-DATA drift check (the panel's band table must equal `test/witness.mjs`),
   (c) 0-B/op on every hot kernel (foils excluded + asserted to be the only allocators),
   (d) LAYOUT-DRIFT guard pinning the exact internal `_field` names each snapshot reads, so a
   future `LogN.js` rename fails loudly. Behind an entry-point guard, an opt-in headless
@@ -98,8 +106,9 @@ a fresh array each frame -- `// FOIL: allocates ON PURPOSE -- this is the point`
 - **FibonacciHeap** (AMORTIZED, disclosed max): `push`/`decreaseKey` (cascading cut, `_mark`
   bits drawn)/`popMin()` (consolidate over `_bucket`). SVG circular root ring + marked badges.
 
-Truth Panel: per-member ns/op, slope + R^2 on log2(n), 0 B/op, a "max single op" row ONLY for
-Pairing/Fibonacci, foil ns/op beside it.
+Truth Panel: per-member live ns/op (approximate), the gated witness slope band on log2(n) (static,
+from `demo/witness-data.mjs`), 0 B/op; Pairing/Fibonacci are marked "disclosed by witness" for the max
+single op (no live max: the browser timer quantum is not a max); foil ns/op in the note.
 Snapshot pins: BinaryHeap `_key _id _pos _n _cap _min`; MinMaxHeap `_key _id _n _cap`;
 BinomialHeap `_key _id _parent _child _sibling _order _head _min _n _isMin _kind _consumed _cap`;
 PairingHeap `_key _id _child _sibling _parent _pos _owner _alias _cap`;
@@ -129,8 +138,8 @@ each frame, the only allocator.
   cost): `get`/`rank`/`select`/`keyAt`. Canvas dense band of `_size` cells (SVG would die),
   binary-search probe sequence overlaid.
 
-Truth Panel: per-member get ns/op + slope/R^2, an expected-vs-worst-case badge per row, foil
-line, 0 B/op.
+Truth Panel: per-member live get ns/op + the gated witness slope band, an expected-vs-worst-case
+marker per row, foil line, 0 B/op.
 Snapshot pins: SkipList `_key _val _next _update _level _maxLevel _size _stride _cap _version`;
 Treap `_key _value _left _right _prio _size _root _sr _version`;
 Scapegoat `_key _value _left _right _size _root _maxCount _alpha _invAlpha _flat _stack _version`;
@@ -155,8 +164,9 @@ O(n^2) per write); both allocate a fresh array/grid each frame, the only allocat
 - **SegmentTree2D** (SQUARED-log axis): `update(r,c,value)` + `query(...)` over the same
   rectangle with a min/max fold, overlaid so the two 2D members race side by side. Canvas.
 
-Truth Panel: TWO fit rows -- 1D on log2(n), 2D on (log2 n)^2, axis label explicit; all four
-worst-case so NO max row; foil ns/op; 0 B/op.
+Truth Panel: the 1D members' bands on log2(n), the 2D members' on (log2 n)^2, axis label explicit; all
+four worst-case so NO max; foil ns/op; 0 B/op (SegmentTree2D.query: the documented S7 return box when
+its call is not inlined).
 Snapshot pins: Fenwick `_t _n`; SegmentTree `_t _n _k _idv`; Fenwick2D `_t _r _c _w`;
 SegmentTree2D `_t _r _c _w _k _idv`.
 Oracles: naive prefix/rect sums + naive fold scans over an independent plain array/grid, exact
@@ -178,8 +188,8 @@ an O(n) scan per range-rank query. Both allocate per frame, the only allocators.
   `rangeCount(lo,hi,vlo,vhi)` with a dragging window + threshold. Canvas for the `_t` level
   bands + the result histogram. Panel: "build O(n log n) once; query is the measured line".
 
-Truth Panel: PST on log2(n), MST on (log2 n)^2 with the axis named; both worst-case so NO max
-row; version count + node budget shown as the space co-headline; foil clone bytes counted.
+Truth Panel: PST's band on log2(n), MST's on (log2 n)^2 with the axis named; both worst-case so NO
+max; version count + node budget shown as the space co-headline; foil clone bytes counted.
 Snapshot pins: PersistentSegTree `_val _left _right _roots _next _vcount _vcap _budget _n _k _idv`;
 MergeSortTree `_t _n _h _m _cells`. (Coder: VERIFY these against LogN.js -- the field names for
 PST's arena/version arrays and MST's run table MUST be confirmed, not assumed.)
@@ -197,7 +207,8 @@ over randomized (lo,hi,x) triples; plus mutate-the-caller-array-after-build prov
 2. `kernels.mjs:rng` -- `makeRng(seed)` -> `Uint32Array(1)` + `nextU32`/`nextKey`
    read-and-advance-in-place.
 3. `kernels.mjs:scene01` -- 5 create/step pairs (BinaryHeap, MinMaxHeap, BinomialHeap,
-   PairingHeap, FibonacciHeap) + `foilLinearScanPQ`; amortized members record `maxNs`.
+   PairingHeap, FibonacciHeap) + `foilLinearScanPQ`. (The former per-step `maxNs` timing was
+   removed: it is no longer displayed, and a per-step `performance.now()` inflated the live ns/op.)
 4. `kernels.mjs:scene02` -- 5 create/step pairs (SkipList, Treap, Scapegoat, SplayTree,
    SortedArray) + `foilSortedArrayInsertScan`; `rangeIter`/`forEach` excluded from every step.
 5. `kernels.mjs:scene03` -- 4 create/step pairs (Fenwick, SegmentTree, Fenwick2D,
@@ -212,17 +223,19 @@ over randomized (lo,hi,x) triples; plus mutate-the-caller-array-after-build prov
 9. `index.html:dom` -- every handle cached at module init in a `$`-prefixed const; strict
    read-phase/write-phase split per frame; no interleaving without a rAF boundary.
 10. `index.html:rings` -- pow2-length Float64Array ring buffers (mask index) for ns/op history;
-    a `frameMask` counter gating all `toFixed`/text writes to ~10Hz.
-11. `index.html:truth` -- per-scene Truth Panel: ns/op, slope + R^2 (axis label log2(n) or
-    (log2 n)^2), bytes/op 0, foil ns/op, a max-single-op row ONLY for
-    SkipList/Treap/SplayTree/PairingHeap/FibonacciHeap.
+    a `frameMask` counter gating the text writes to ~10Hz; a write happens only when the quantized
+    value changes, formatted with integer math (no `toFixed` on the rAF path).
+11. `index.html:truth` -- per-scene Truth Panel: live ns/op, the static gated witness band (axis
+    label log2(n) or (log2 n)^2), bytes/op 0, foil ns/op; "disclosed by witness" in the max column
+    for SkipList/Treap/SplayTree/PairingHeap/FibonacciHeap (no live max).
 12. `index.html:render` -- Canvas for BinaryHeap/MinMaxHeap/SortedArray/Fenwick/SegmentTree/
     Fenwick2D/SegmentTree2D/MergeSortTree; SVG for BinomialHeap/PairingHeap/FibonacciHeap/
     SkipList/Treap/Scapegoat/SplayTree/PersistentSegTree.
-13. `index.html:profile` -- `#profile` hash flag dynamically importing
-    `@zakkster/lite-layout-profiler` (dev-only, never a dependency, never in files[]).
+13. `index.html:profile` -- REMOVED: the former `#profile` hook dynamically imported
+    `@zakkster/lite-layout-profiler`, a bare specifier with no import map (dead code in a plain
+    static serve). Deleted; the demo takes no runtime dependency.
 14. `Demo.test.mjs:faithfulness` -- the 16 per-member oracle suites above.
-15. `Demo.test.mjs:trinity` -- `kernels.VERSION === LogN.VERSION === package.json === '1.0.0'`.
+15. `Demo.test.mjs:trinity` -- `kernels.VERSION === LogN.VERSION === package.json` (no pinned literal).
 16. `Demo.test.mjs:alloc` -- 0-B/op over every `stepXWorld` and every `snapshotX`; foils
     explicitly excluded AND asserted to be the only allocators.
 17. `Demo.test.mjs:pins` -- the layout-drift guard asserting each pinned `_field` exists and has
@@ -238,26 +251,29 @@ over randomized (lo,hi,x) triples; plus mutate-the-caller-array-after-build prov
 
 ## Assertions (falsifiable; qa proves each has TEETH)
 
-1. Every one of the 16 `stepXWorld` and 16 `snapshotX` measures exactly 0 B/op over 1e5 iters
-   after 1e4 warmup (`--expose-gc`, heapUsed delta / ops rounded to 0); each of the 6 foils
-   measures > 0 B/op (gate non-vacuous).
+1. Every one of the 16 `stepXWorld` and 16 `snapshotX` measures 0 B/op -- EXCEPT
+   `SegmentTree2D.query`, which boxes one ~16 B HeapNumber per non-inlined call (the documented
+   S7 return box, ~0.85 B/step). The gate is scavenge-counted in a child process with the
+   semi-space pinned to 1 MB (so transient allocation forces -- and is caught by -- scavenges):
+   scenes 1/2/4 produce no scavenge even at 8N, scene 3 stays within the one-HeapNumber S7 budget,
+   and a one-object-per-step control MUST fail the gate (teeth). Each of the 6 foils allocates > 0.
 2. GC budget over a 60s headless soak of all 16 kernels: `maxMajor === 0`, `maxPauseMs <= 2`,
    total heapUsed growth < 64 KB.
 3. Retention: over 10 create -> 5e4 steps -> `clear()` -> teardown cycles, every pooled member
    returns to zero (`_pool` active 0 for SkipList/Treap/Scapegoat/SplayTree/BinomialHeap/
    PairingHeap/FibonacciHeap), `size === 0` for all 16, PST `_next`/`_vcount` back to the fresh
    v0 state after `clear()`, heapUsed after cycle 10 within 64 KB of cycle 1.
-4. Version trinity is exactly `'1.0.0'` at all three sites, and `git diff --stat LogN.js` is
-   empty.
+4. Version trinity agrees at all three sites (`kernels.VERSION === LogN.VERSION ===
+   package.json.version`, no pinned literal), and `git diff --stat LogN.js` is empty.
 5. Layout-drift pins pass for all 16; a scripted rename of any single pinned field makes
    Demo.test.mjs FAIL with a `[lite-logn-demo]` message -- verified by injection on >= 4
    members, then reverted byte-clean.
 6. Faithfulness: all 16 oracles agree exactly over >= 2000 randomized ops each (PST proves older
    versions unchanged; MST proves copy-in immutability); a wrong op reordering makes the oracle
    fail (non-vacuousness probe on >= 3 members).
-7. Hot-path law: with `#profile`, the layout profiler reports `violationCount === 0` over 600
-   frames on all 4 scenes; no `toFixed`/`toLocaleString` on a non-masked frame; `grep -n
-   "rangeIter\|forEach" demo/kernels.mjs` shows zero hits inside any `step*` body.
+7. Hot-path law: no `toFixed`/`toLocaleString` anywhere on the rAF path (the Truth Panel caches
+   the last quantized integer per cell and formats from integer math, writing textContent only on
+   change); `grep -n "rangeIter\|forEach" demo/kernels.mjs` shows zero hits inside any `step*` body.
 8. ASCII-only: `demo/*.{mjs,html,md}` have no bytes > 0x7F except U+00D7/U+00B5; no `[lite-logn]`
    prefix in demo sources (only `[lite-logn-demo]`); `npm pack` file list byte-identical to
    pre-change.

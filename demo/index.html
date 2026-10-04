@@ -124,6 +124,11 @@
             display: block;
         }
 
+        /* [hidden] must beat the `display: block` above (scenes with no SVG member). */
+        svg[hidden] {
+            display: none;
+        }
+
         .panel {
             background: var(--bg2);
             border: 1px solid var(--line);
@@ -193,17 +198,19 @@
 <body>
 <header>
     <h1>lite-logn <span class="v" id="version">--</span> -- the O(log n) demo</h1>
-    <p class="tagline">All 16 shipped members driving live. Every frame kernel is 0 B/op; only the naive foils
-        allocate.</p>
+    <p class="tagline">16 of the 20 shipped members driving live (WaveletTree, CartesianTree, LinkCutTree,
+        EulerTourTree are not in the demo yet). Every frame kernel is 0 B/op, except the documented S7 return
+        box on SegmentTree2D.query (a non-inlined double-returning read); only the naive foils allocate, on
+        purpose.</p>
 </header>
-<nav class="tabs" id="tabs" role="tablist">
-    <button class="tab" role="tab" data-tab="s1" aria-selected="true">01 Priority Queues</button>
-    <button class="tab" role="tab" data-tab="s2" aria-selected="false">02 Ordered Maps</button>
-    <button class="tab" role="tab" data-tab="s3" aria-selected="false">03 Range &amp; Prefix</button>
-    <button class="tab" role="tab" data-tab="s4" aria-selected="false">04 Time-Travel</button>
+<nav class="tabs" id="tabs" role="tablist" aria-label="demo scenes">
+    <button class="tab" id="tab-s1" role="tab" data-tab="s1" aria-controls="scene-s1" aria-selected="true" tabindex="0">01 Priority Queues</button>
+    <button class="tab" id="tab-s2" role="tab" data-tab="s2" aria-controls="scene-s2" aria-selected="false" tabindex="-1">02 Ordered Maps</button>
+    <button class="tab" id="tab-s3" role="tab" data-tab="s3" aria-controls="scene-s3" aria-selected="false" tabindex="-1">03 Range &amp; Prefix</button>
+    <button class="tab" id="tab-s4" role="tab" data-tab="s4" aria-controls="scene-s4" aria-selected="false" tabindex="-1">04 Time-Travel</button>
 </nav>
 <main>
-    <section class="scene" data-scene="s1" data-active="true">
+    <section class="scene" id="scene-s1" role="tabpanel" aria-labelledby="tab-s1" data-scene="s1" data-active="true">
         <div class="stage">
             <canvas id="c1" width="900" height="360"></canvas>
             <svg id="v1" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg>
@@ -214,8 +221,8 @@
                 <tr>
                     <th>member</th>
                     <th>ns/op</th>
-                    <th>slope</th>
-                    <th>R^2</th>
+                    <th>band</th>
+                    <th>axis</th>
                     <th>B/op</th>
                     <th>max</th>
                 </tr>
@@ -224,7 +231,7 @@
             </table>
             <p class="note" id="n1"></p></div>
     </section>
-    <section class="scene" data-scene="s2" data-active="false">
+    <section class="scene" id="scene-s2" role="tabpanel" aria-labelledby="tab-s2" data-scene="s2" data-active="false">
         <div class="stage">
             <canvas id="c2" width="900" height="360"></canvas>
             <svg id="v2" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg>
@@ -235,8 +242,8 @@
                 <tr>
                     <th>member</th>
                     <th>ns/op</th>
-                    <th>slope</th>
-                    <th>R^2</th>
+                    <th>band</th>
+                    <th>axis</th>
                     <th>B/op</th>
                     <th>max</th>
                 </tr>
@@ -245,7 +252,7 @@
             </table>
             <p class="note" id="n2"></p></div>
     </section>
-    <section class="scene" data-scene="s3" data-active="false">
+    <section class="scene" id="scene-s3" role="tabpanel" aria-labelledby="tab-s3" data-scene="s3" data-active="false">
         <div class="stage">
             <canvas id="c3" width="900" height="360"></canvas>
             <svg id="v3" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg>
@@ -256,17 +263,17 @@
                 <tr>
                     <th>member</th>
                     <th>ns/op</th>
-                    <th>slope</th>
-                    <th>R^2</th>
-                    <th>B/op</th>
+                    <th>band</th>
                     <th>axis</th>
+                    <th>B/op</th>
+                    <th>max</th>
                 </tr>
                 </thead>
                 <tbody></tbody>
             </table>
             <p class="note" id="n3"></p></div>
     </section>
-    <section class="scene" data-scene="s4" data-active="false">
+    <section class="scene" id="scene-s4" role="tabpanel" aria-labelledby="tab-s4" data-scene="s4" data-active="false">
         <div class="stage">
             <canvas id="c4" width="900" height="360"></canvas>
             <svg id="v4" viewBox="0 0 900 360" preserveAspectRatio="xMidYMid meet"></svg>
@@ -277,10 +284,10 @@
                 <tr>
                     <th>member</th>
                     <th>ns/op</th>
-                    <th>slope</th>
-                    <th>R^2</th>
-                    <th>B/op</th>
+                    <th>band</th>
                     <th>axis</th>
+                    <th>B/op</th>
+                    <th>max</th>
                 </tr>
                 </thead>
                 <tbody></tbody>
@@ -292,6 +299,7 @@
 <script type="module">
     import * as K from './kernels.mjs';
     import {VERSION} from './kernels.mjs';
+    import {WITNESS_BANDS, R2_FLOOR} from './witness-data.mjs';
 
     // ---- DOM handles cached ONCE at module init ($-prefixed per hot-path law) --------------
     const $version = document.getElementById('version');
@@ -318,6 +326,12 @@
         COL_GOOD = '#3fb950', COL_LINE = '#8b949e', COL_ACCENT = '#58a6ff';
     const RING = 64, RMASK = RING - 1;
     const BATCH = 400; // steps per frame per member (drives a legible flow, stays 0 B/op)
+    // The browser timer quantum is up to ~100 us. A single BATCH (9-65 ns/step x 400 = 3.6-26 us)
+    // is well BELOW one tick, so timing a lone batch reads 0 or one whole tick -- the "39.1"
+    // artifact. Instead ACCUMULATE elapsed time + step count per member across frames and emit one
+    // ns/op ring sample only once >= NS_SAMPLE_MS has accumulated (~20 ticks), so the quantum is
+    // < ~5% of the measured interval. Whole ns is displayed (integer math, write-on-change).
+    const NS_SAMPLE_MS = 2;
 
     // ---- ns/op ring buffers (pow2, bitmask index) -- one per member ------------------------
     function makeRing() {
@@ -329,33 +343,15 @@
         r.head = (r.head + 1) | 0;
     }
 
+    // Mean over the FILLED samples only: one sample lands per NS_SAMPLE_MS of accumulated step time
+    // (~2 s of wall time per member), so dividing by RING before the ring fills would read the empty
+    // zero slots as 0 ns and under-report for minutes. -1 = no sample yet (the panel shows '--').
     function ringMean(r) {
+        const n = r.head < RING ? r.head : RING;
+        if (n === 0) return -1;
         let s = 0;
-        for (let i = 0; i < RING; i++) s += r.buf[i];
-        return s / RING;
-    }
-
-    // ---- inline least-squares fit (slope + R^2) for the static init sweep ------------------
-    function fit(xs, ys, n) {
-        let sx = 0, sy = 0, sxx = 0, sxy = 0;
-        for (let i = 0; i < n; i++) {
-            sx += xs[i];
-            sy += ys[i];
-            sxx += xs[i] * xs[i];
-            sxy += xs[i] * ys[i];
-        }
-        const d = n * sxx - sx * sx;
-        const slope = d === 0 ? 0 : (n * sxy - sx * sy) / d;
-        const icpt = (sy - slope * sx) / n;
-        let ssTot = 0, ssRes = 0;
-        const my = sy / n;
-        for (let i = 0; i < n; i++) {
-            const yh = icpt + slope * xs[i];
-            ssRes += (ys[i] - yh) ** 2;
-            ssTot += (ys[i] - my) ** 2;
-        }
-        const r2 = ssTot === 0 ? 1 : 1 - ssRes / ssTot;
-        return {slope, r2};
+        for (let i = 0; i < n; i++) s += r.buf[i];
+        return s / n;
     }
 
     // ---- member registry -- the SINGLE source of scene wiring ------------------------------
@@ -455,29 +451,20 @@
         },
     ];
 
-    // ---- warmup: build every world once + one static ns/op sweep for the panel slope -------
-    const SWEEP = [256, 512, 1024, 2048];
-    const _xs = new Float64Array(SWEEP.length), _ys = new Float64Array(SWEEP.length);
+    // ---- warmup: build every world once; the panel band/axis come from the STATIC witness
+    // table (demo/witness-data.mjs == the gated `npm run witness` bands), NEVER an in-browser
+    // sweep. A 4-point in-page fit on the 0.1 ms timer is noise, not proof -- the proof is the
+    // witness gate. The live ns/op column is measured per frame and labelled approximate. -------
     for (let m = 0; m < MEMBERS.length; m++) {
         const M = MEMBERS[m];
         M.world = M.make(1024);
         M.ring = makeRing();
         M.foilRing = makeRing();
-        // static slope/R^2 off the REAL kernel (init only, off the hot path).
-        for (let i = 0; i < SWEEP.length; i++) {
-            const w = M.make(SWEEP[i]);
-            for (let j = 0; j < 4000; j++) M.step(w);
-            const t0 = performance.now();
-            const IT = 40000;
-            for (let j = 0; j < IT; j++) M.step(w);
-            const ns = (performance.now() - t0) * 1e6 / IT;
-            _xs[i] = M.squared ? Math.log2(SWEEP[i]) ** 2 : Math.log2(SWEEP[i]);
-            _ys[i] = ns;
-        }
-        const f = fit(_xs, _ys, SWEEP.length);
-        M.slope = f.slope;
-        M.r2 = f.r2;
+        M.accMs = 0;    // accumulated elapsed ms since the last ring sample (Blocker-1 accumulator)
+        M.accSteps = 0; // accumulated steps since the last ring sample
+        const wd = WITNESS_BANDS[M.name]; // { op, axis, lo, hi } -- the gated slope band
         // pre-build one Truth-Panel row (DOM created ONCE, updated in place forever).
+        // columns: member | ns/op (live) | band (ns/lvl) | axis | B/op | max
         const tb = M.s === 1 ? $t1 : M.s === 2 ? $t2 : M.s === 3 ? $t3 : $t4;
         const tr = document.createElement('tr');
         const c0 = document.createElement('td');
@@ -487,31 +474,42 @@
         const c3 = document.createElement('td');
         const c4 = document.createElement('td');
         const c5 = document.createElement('td');
-        c2.textContent = M.slope.toFixed(2);
-        c3.textContent = M.r2.toFixed(3);
-        c4.textContent = '0';
+        // init-time toFixed is fine (cold path, built once -- never the rAF loop).
+        c2.textContent = wd.lo.toFixed(2) + '-' + wd.hi.toFixed(2);
+        c3.textContent = wd.axis;
+        c3.className = 'axis';
+        // Every kernel is a true 0 B/op EXCEPT SegmentTree2D, whose query returns a computed
+        // double that V8 boxes into one ~16 B HeapNumber when the demo's larger step is not
+        // inlined (the library's documented S7 return box, ~0.85 B/step) -- marked, never hidden.
+        c4.textContent = M.name === 'SegmentTree2D' ? '0 + S7' : '0';
         c4.className = 'zero';
-        if (M.s <= 2) c5.textContent = M.amortized ? '--' : 'n/a';
-        else {
-            c5.textContent = M.squared ? '(log2 n)^2' : 'log2(n)';
-            c5.className = 'axis';
-        }
+        // the live timer tick (up to 0.1 ms) is NOT a max -- the worst-case of an amortized/
+        // expected member is disclosed by the witness gate, not by a per-frame tick.
+        c5.textContent = M.amortized ? 'disclosed' : '--';
         tr.append(c0, c1, c2, c3, c4, c5);
         tb.appendChild(tr);
         M.$ns = c1;
-        M.$max = c5;
     }
     const FOIL_NS = {1: 0, 2: 0, 3: 0, 4: 0};
-    $n1.textContent = 'Foil: unsorted-array PQ rescans for min every pop -- O(n) per extract, and it allocates every frame.';
-    $n2.textContent = 'Foil: plain-array ordered map -- O(n) memmove insert + linear scan, allocating each frame.';
-    $n3.textContent = '1D on log2(n); 2D on (log2 n)^2 (axis named per row). Foils rebuild the whole prefix/grid each write.';
-    $n4.textContent = 'PST path-copies O(log n) nodes per version; the foil clones the whole array each version. MST builds once, queries hot.';
+    const NOTE_BAND = ' band = the gated `npm run witness` slope band (ns per axis-level, R^2 >= ' +
+        R2_FLOOR + ' floor); ns/op is live and approximate (whole ns over accumulated intervals). ' +
+        'max is disclosed by the witness, not timed live -- the 0.1 ms browser tick is not a max.';
+    const NOTE_S7 = ' SegmentTree2D B/op shows "0 + S7": the one documented S7 return box on its ' +
+        'query (a non-inlined double-returning read, ~0.85 B/step); every other kernel is a true 0.';
+    $n1.textContent = 'Foil: unsorted-array PQ rescans for min every pop -- O(n) per extract, and it allocates every frame.' + NOTE_BAND;
+    $n2.textContent = 'Foil: plain-array ordered map -- O(n) memmove insert + linear scan, allocating each frame.' + NOTE_BAND;
+    $n3.textContent = '1D on log2(n); 2D on (log2 n)^2 (axis named per row). Foils rebuild the whole prefix/grid each write.' + NOTE_BAND + NOTE_S7;
+    $n4.textContent = 'PST path-copies O(log n) nodes per version; the foil clones the whole array each version. MST builds once, queries hot.' + NOTE_BAND;
 
     // ---- SVG member banding: each scene's SVG members share ONE <svg>, split into horizontal
     // bands. Assign each SVG member its band index + a slice of the pre-allocated node pool. ------
+    const _svgByScene = [$v1, $v2, $v3, $v4];
     for (let s = 1; s <= 4; s++) {
         let count = 0;
         for (let m = 0; m < MEMBERS.length; m++) if (MEMBERS[m].s === s && MEMBERS[m].svg) count++;
+        // A scene with zero SVG members (scene 3: all dense Canvas) must not show an empty 20rem
+        // svg box. Set `hidden` ONCE at init (never toggled on the hot path).
+        if (count === 0) _svgByScene[s - 1].setAttribute('hidden', '');
         let idx = 0;
         for (let m = 0; m < MEMBERS.length; m++) {
             const M = MEMBERS[m];
@@ -615,13 +613,25 @@
     function drawStrip(g, arr, count, w, h, y0, hh, hot) {
         if (count <= 0) return;
         const cw = w / count;
+        // One COL_CELL pass over every non-hot cell (fillStyle -- a CSS color parse -- set ONCE),
+        // then the single hot cell drawn separately in COL_HOT. globalAlpha is a cheap numeric
+        // write, so it still varies per cell. Visually identical to the per-rect fillStyle version.
+        g.fillStyle = COL_CELL;
         for (let i = 0; i < count; i++) {
+            if (i === hot) continue;
             const v = arr[i] | 0;
             const t = (v & 255) / 255;
-            g.fillStyle = i === hot ? COL_HOT : COL_CELL;
             const bh = 2 + t * (hh - 2);
             g.globalAlpha = 0.35 + 0.65 * t;
             g.fillRect(i * cw, y0 + (hh - bh), cw > 2 ? cw - 1 : cw, bh);
+        }
+        if (hot >= 0 && hot < count) {
+            const v = arr[hot] | 0;
+            const t = (v & 255) / 255;
+            const bh = 2 + t * (hh - 2);
+            g.fillStyle = COL_HOT;
+            g.globalAlpha = 0.35 + 0.65 * t;
+            g.fillRect(hot * cw, y0 + (hh - bh), cw > 2 ? cw - 1 : cw, bh);
         }
         g.globalAlpha = 1;
     }
@@ -629,10 +639,11 @@
     // Dense 2D grid heat (Fenwick2D/SegmentTree2D), drawn within its lane [y0, y0+h).
     function drawGrid(g, arr, rows, cols, stride, w, h, y0) {
         const cw = w / cols, ch = h / rows;
+        // Every cell is COL_CELL (only its alpha varies), so set fillStyle ONCE outside the loop.
+        g.fillStyle = COL_CELL;
         for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
             const v = Math.abs(arr[(r + 1) * stride + (c + 1)] | 0);
             const t = Math.min(1, v / 64);
-            g.fillStyle = COL_CELL;
             g.globalAlpha = 0.15 + 0.85 * t;
             g.fillRect(c * cw, y0 + r * ch, cw > 2 ? cw - 1 : cw, ch > 2 ? ch - 1 : ch);
         }
@@ -643,20 +654,42 @@
     // the tree: a faint source-value backdrop (world.values, by index) with the live index window
     // [lo,hi] highlighted, the counted set tinted (countLE: v<=x; rangeCount: vlo<=v<=vhi), the
     // threshold/value-band drawn, and a live result gauge. All state read from M.world.* each frame
-    // (numbers only -> 0 alloc); it moves every step. Drawn in the TOP half (PST DAG owns the bottom).
+    // (numbers only -> 0 alloc); it moves every step. Drawn across the WHOLE canvas (the PST version
+    // DAG lives in the separate stacked svg box below, not a shared half).
     function drawMST(g, M, x0, y0, w, h) {
         const world = M.world, vals = world.values, n = world.n;
         const lo = world.lo, hi = world.hi, x = world.x, vlo = world.vlo, vhi = world.vhi, op = world.lastOp;
         const VS = 65536, botY = y0 + h - 6, room = h - 14;
         const xstep = w / n;
         const wx0 = x0 + (lo / n) * w, wx1 = x0 + ((hi + 1) / n) * w;
-        // 1) source backdrop + window tint of the COUNTED set (this is what countLE/rangeCount select)
+        // 1) source backdrop + window tint of the COUNTED set (this is what countLE/rangeCount
+        // select). Batched into THREE color passes (dim out-of-window, accent in-window-uncounted,
+        // good counted) so fillStyle (a CSS color parse) is set 3x, not once per bar. The alpha is
+        // constant within each category, so it is set once per pass too. n fillRects total over up
+        // to 3n iterations (each bar is drawn in exactly one pass), same pixels as the per-bar version.
+        g.fillStyle = COL_DIM;
+        g.globalAlpha = 0.16;
         for (let i = 0; i < n; i++) {
-            const v = vals[i], bh = (v / VS) * room, inWin = i >= lo && i <= hi;
-            let counted = 0;
-            if (inWin) counted = op === 1 ? (v <= x ? 1 : 0) : ((v >= vlo && v <= vhi) ? 1 : 0);
-            g.fillStyle = counted ? COL_GOOD : (inWin ? COL_ACCENT : COL_DIM);
-            g.globalAlpha = counted ? 0.9 : (inWin ? 0.5 : 0.16);
+            if (i >= lo && i <= hi) continue;
+            const bh = (vals[i] / VS) * room;
+            g.fillRect(x0 + i * xstep, botY - bh, xstep > 1.5 ? xstep - 0.5 : xstep, bh);
+        }
+        g.fillStyle = COL_ACCENT;
+        g.globalAlpha = 0.5;
+        for (let i = lo; i <= hi; i++) {
+            const v = vals[i];
+            const counted = op === 1 ? (v <= x ? 1 : 0) : ((v >= vlo && v <= vhi) ? 1 : 0);
+            if (counted) continue;
+            const bh = (v / VS) * room;
+            g.fillRect(x0 + i * xstep, botY - bh, xstep > 1.5 ? xstep - 0.5 : xstep, bh);
+        }
+        g.fillStyle = COL_GOOD;
+        g.globalAlpha = 0.9;
+        for (let i = lo; i <= hi; i++) {
+            const v = vals[i];
+            const counted = op === 1 ? (v <= x ? 1 : 0) : ((v >= vlo && v <= vhi) ? 1 : 0);
+            if (!counted) continue;
+            const bh = (v / VS) * room;
             g.fillRect(x0 + i * xstep, botY - bh, xstep > 1.5 ? xstep - 0.5 : xstep, bh);
         }
         g.globalAlpha = 0.9;
@@ -910,12 +943,19 @@
         for (let m = 0; m < MEMBERS.length; m++) {
             const M = MEMBERS[m];
             if (M.s !== s) continue;
-            // --- step batch, timed (0 B/op) ---
+            // --- step batch, timed into the per-member accumulator (0 B/op) ---
             const w = M.world;
             const t0 = performance.now();
             for (let b = 0; b < BATCH; b++) M.step(w);
-            const ns = (performance.now() - t0) * 1e6 / BATCH;
-            ringPush(M.ring, ns);
+            M.accMs += performance.now() - t0;
+            M.accSteps += BATCH;
+            // Emit a ring sample only once enough time has accumulated that the ~100 us quantum is
+            // < ~5% of the interval, then reset. ns/op = accumulated-ms * 1e6 / accumulated-steps.
+            if (M.accMs >= NS_SAMPLE_MS) {
+                ringPush(M.ring, M.accMs * 1e6 / M.accSteps);
+                M.accMs = 0;
+                M.accSteps = 0;
+            }
             M.snap(w, w.snap);
             // --- render ---
             if (M.svg) {
@@ -965,12 +1005,23 @@
     const _foilPrev = new Float64Array(256), _foilVals = new Float64Array(256);
 
     // ---- Truth Panel text throttled to ~10Hz via a frame-counter mask ----------------------
+    // Per-cell cache of the last DISPLAYED WHOLE ns/op (Math.round of the ring mean). textContent
+    // is written ONLY when that integer changes, formatted by integer coercion -- NO toFixed
+    // anywhere on the rAF path (a string is created only on an actual change). The ring now holds
+    // accumulated-interval samples (>= NS_SAMPLE_MS each), so sub-tick quantization is gone; whole
+    // ns is the honest resolution of a 400-step batch. -1 = never displayed yet.
+    const _nsWhole = new Int32Array(MEMBERS.length).fill(-1);
+
     function updatePanel(s) {
         for (let m = 0; m < MEMBERS.length; m++) {
             const M = MEMBERS[m];
             if (M.s !== s) continue;
-            M.$ns.textContent = ringMean(M.ring).toFixed(1);
-            if (M.s <= 2 && M.amortized) M.$max.textContent = (M.world.maxNs * 1e6).toFixed(0);
+            const mean = ringMean(M.ring);
+            const q = mean < 0 ? -2 : Math.round(mean) | 0; // -2 = no sample yet
+            if (q !== _nsWhole[m]) {
+                _nsWhole[m] = q;
+                M.$ns.textContent = q === -2 ? '--' : '' + q; // whole ns, integer -- no toFixed
+            }
         }
     }
 
@@ -987,26 +1038,43 @@
         requestAnimationFrame(loop);
     }
 
-    // ---- tab switching (click = accessible activation) ------------------------------------
+    // ---- tabs: WAI-ARIA tabs pattern (roving tabindex + arrow keys; click kept) ------------
+    // activateTab selects one tab: aria-selected, the roving tabindex (active 0, rest -1), the
+    // matching tabpanel's data-active, and the rAF driver's active scene. These listeners are
+    // bound ONCE at init (not per frame); the keydown path only runs on real key events.
+    function activateTab(btn) {
+        const id = btn.getAttribute('data-tab');
+        for (let i = 0; i < $tabBtns.length; i++) {
+            const on = $tabBtns[i] === btn;
+            $tabBtns[i].setAttribute('aria-selected', on ? 'true' : 'false');
+            $tabBtns[i].setAttribute('tabindex', on ? '0' : '-1');
+        }
+        for (let i = 0; i < $scenes.length; i++) $scenes[i].setAttribute('data-active', $scenes[i].getAttribute('data-scene') === id ? 'true' : 'false');
+        active = id === 's1' ? 1 : id === 's2' ? 2 : id === 's3' ? 3 : 4;
+    }
+
     $tabs.addEventListener('click', (e) => {
         const btn = e.target.closest('.tab');
         if (!btn) return;
-        const id = btn.getAttribute('data-tab');
-        for (let i = 0; i < $tabBtns.length; i++) $tabBtns[i].setAttribute('aria-selected', $tabBtns[i] === btn ? 'true' : 'false');
-        for (let i = 0; i < $scenes.length; i++) $scenes[i].setAttribute('data-active', $scenes[i].getAttribute('data-scene') === id ? 'true' : 'false');
-        active = id === 's1' ? 1 : id === 's2' ? 2 : id === 's3' ? 3 : 4;
+        activateTab(btn);
     });
 
-    // ---- #profile hash flag -> dev-only layout profiler (never a dependency, never in files[]) --
-    if (location.hash === '#profile') {
-        import('@zakkster/lite-layout-profiler')
-            .then((mod) => {
-                if (mod && mod.attach) mod.attach({label: 'lite-logn-demo'});
-            })
-            .catch((err) => {
-                console.warn('[lite-logn-demo] layout profiler unavailable:', err && err.message);
-            });
-    }
+    $tabs.addEventListener('keydown', (e) => {
+        const key = e.key;
+        let idx = -1;
+        for (let i = 0; i < $tabBtns.length; i++) if ($tabBtns[i] === document.activeElement) { idx = i; break; }
+        if (idx < 0) return;
+        let next = idx;
+        if (key === 'ArrowRight') next = (idx + 1) % $tabBtns.length;
+        else if (key === 'ArrowLeft') next = (idx - 1 + $tabBtns.length) % $tabBtns.length;
+        else if (key === 'Home') next = 0;
+        else if (key === 'End') next = $tabBtns.length - 1;
+        else return;
+        e.preventDefault();
+        const btn = $tabBtns[next];
+        btn.focus();
+        activateTab(btn);
+    });
 
     requestAnimationFrame(loop);
 </script>

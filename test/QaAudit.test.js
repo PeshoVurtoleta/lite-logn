@@ -33,8 +33,8 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 1.5.0 at the 1.5.0 release', () => {
-    assert.equal(VERSION, '1.5.0');
+test('VERSION is exactly 1.5.1 at the 1.5.1 release', () => {
+    assert.equal(VERSION, '1.5.1');
 });
 
 // --- frozen export surface: VERSION + the shipped members (20 members) --------

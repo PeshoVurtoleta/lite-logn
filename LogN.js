@@ -55,7 +55,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.5.0';
+export const VERSION = '1.5.1';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap        -- indexed O(log n) min|max heap  (BELOW)
@@ -8627,7 +8627,10 @@ const LCT_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
  * non-finite / out-of-domain value, a bad `kind`, and capacity overflow each throw
  * `[lite-logn]`. Reads that MUTATE (splay) -- `findRoot` / `pathAggregate` / `connected`
  * -- validate their ids FIRST, before any splay (the SplayTree 0010 fail-OPEN
- * precedent). NOT-FOR: this member answers PATH folds only; a SUBTREE aggregate is the
+ * precedent). `findRoot` / `connected` / one-argument `pathAggregate(u)` only reshape
+ * the splay forest; the TWO-argument `pathAggregate(u, v)` also RE-ROOTS the represented
+ * tree at `u` (it everts `u`; F9/S3, by design, not restored), so `findRoot` and every
+ * later `cut` see `u` as the root. Call `evert(r)` to restore a root `r`. NOT-FOR: this member answers PATH folds only; a SUBTREE aggregate is the
  * shipped EulerTourTree sibling's job (decisions/0021 / 0022). LCT or ETT? Path fold / evert
  * -> LinkCutTree; subtree or component fold, read-only connectivity -> EulerTourTree. Every hot
  * op allocates ZERO bytes after construction.

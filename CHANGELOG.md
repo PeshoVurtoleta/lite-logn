@@ -4,6 +4,50 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-04
+
+Docs and demo patch. No runtime behaviour changes: the only `LogN.js` edit is a JSDoc comment, and every
+member's code is byte-identical to 1.5.0.
+
+### Changed
+
+- **LinkCutTree `pathAggregate(u, v)` re-root, documented everywhere.** The class doc, `.d.ts`, README API
+  table and llms.txt now say the two-argument form RE-ROOTS the tree at `u` (unlike `findRoot` / `connected`
+  / one-argument `pathAggregate`, which only splay), that a later `cut` is relative to `u`, and that
+  `evert(r)` restores a root. Behaviour unchanged (S3 SETTLED: documented, not restored).
+
+### Fixed
+
+- **LinkCutTree README quick-start threw.** It called `cut(2)` right after `pathAggregate(2, 3)`. The
+  two-argument fold everts 2 (F9 / S3), so 2 was the root and `cut(2)` threw "no parent edge". The example
+  now shows `findRoot(3) === 2` and restores the root with `evert(0)` before cutting.
+- **Demo (repo-only; `demo/` is not in the tarball).** The ROADMAP section 10 audit, DM1-DM7:
+  - DM1: the Truth Panel no longer fits a slope / R^2 in the browser. A 4-point sweep timed with the
+    coarse browser clock showed negative slopes and R^2 0.12-0.74. It now shows each member's gated
+    `npm run witness` slope band from a static `demo/witness-data.mjs`; a test fails if that table drifts
+    from `test/witness.mjs`. Live ns/op is whole ns, averaged over >= 2 ms of accumulated steps, so the
+    timer quantum no longer shows. The fake "max" value (one 0.1 ms timer tick) is gone.
+  - DM2: the demo PRNG returned a uint32, which boxed a HeapNumber on non-inlined calls. It is now
+    30-bit. BinaryHeap: 3 -> 0 scavenges per 1M steps; SkipList: 5 -> 0.
+  - DM3: the "every frame kernel is 0 B/op" claim now names the documented S7 exception
+    (SegmentTree2D.query's return box, 0.65-0.85 B/step in the demo). The 0-B/op gate counts scavenges in a
+    child process with a 1 MB semi-space; the old heap-delta-after-GC gate missed short-lived allocation. A
+    one-allocation-per-step control fails the new gate (120.6 B/op implied).
+  - DM4: no `toFixed` in the rAF loop. Panel text is written only when its integer value changes.
+  - DM5: the version-trinity test no longer pins `'1.0.0'`. The page states its scope (16 of the 20
+    members; WaveletTree / CartesianTree / LinkCutTree / EulerTourTree are not in it). The GC soak passes
+    under its unchanged 64 KB budget (~5 KB projected).
+  - DM6: `fillStyle` is set once per color pass, not per rect.
+  - DM7: scene 3's empty svg is hidden (`svg[hidden]`), the tabs follow the WAI-ARIA tabs pattern
+    (keyboard arrows / Home / End, roving tabindex), and the dead `#profile` import of an uninstalled
+    package is removed.
+
+### Testing
+
+- LinkCutTree: new tests pin `cut` after a two-argument `pathAggregate`, the one-argument form keeping the
+  root, and the README sequence.
+- Demo: `npm run demo` 28/28 (was 27/29).
+
 ## [1.5.0] - 2026-10-04
 
 The twentieth member: **EulerTourTree**, the LinkCutTree sibling (decisions/0021 D-LCT6 defers subtree

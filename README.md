@@ -268,7 +268,7 @@ All twenty-five gated op-rows report **0 B/op** across the `n = 1e3..1e6` sweep,
 
 | Export | Type | Value | Meaning |
 | --- | --- | --- | --- |
-| `VERSION` | `string` | `'1.5.0'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
+| `VERSION` | `string` | `'1.5.1'` | The package version. One of the three version sites (package.json / `LogN.js` `VERSION` const / `llms.txt`), kept in lockstep and enforced in review. |
 
 ### BinaryHeap
 
@@ -1091,8 +1091,10 @@ f.connected(2, 0);       // -> true   (same tree)
 f.findRoot(3);           // -> 0      (0 is the current root)
 f.pathAggregate(3);      // -> 70     (fold ROOT 0 -> 3: 10 + 20 + 40)
 f.pathAggregate(2, 3);   // -> 90     (fold the 2..3 path inclusive: 30 + 20 + 40)
+f.findRoot(3);           // -> 2      (the two-argument fold EVERTS 2: the tree is now rooted at 2)
 
-f.cut(2);                // detach 2 from its parent (the edge toward the root)
+f.evert(0);              // put the root back at 0 -- cut() is relative to the CURRENT root
+f.cut(2);                // detach 2 from its parent 1 (the edge toward root 0)
 f.connected(2, 0);       // -> false  (2 is now its own singleton tree)
 
 f.evert(3);              // re-root 3's tree at 3 (makeRoot)
@@ -1110,7 +1112,7 @@ f.findRoot(0);           // -> 3      (3 is now the root)
 | `evert` | `evert(u) -> this` | amortized O(log n) | Re-root the tree containing `u` at `u` (makeRoot). 0 B/op. A bad id throws. |
 | `findRoot` | `findRoot(u) -> number` | amortized O(log n) | The root vertex of `u`'s tree under the current rooting. A MUTATING read (splays). A bad id throws BEFORE any splay. |
 | `connected` | `connected(u, v) -> boolean` | amortized O(log n) | True iff `u` and `v` are in the SAME tree (`findRoot(u) === findRoot(v)`). A MUTATING read. A bad id throws BEFORE any splay. |
-| `pathAggregate` | `pathAggregate(u, v?) -> number` | amortized O(log n) | One argument: the fold over the ROOT -> `u` path. Two arguments: the fold over the `u..v` path INCLUSIVE (both endpoints). The gated witness op. A MUTATING read, 0 B/op. A bad id throws BEFORE any splay; a two-argument call with `u`, `v` in DIFFERENT trees throws. |
+| `pathAggregate` | `pathAggregate(u, v?) -> number` | amortized O(log n) | One argument: the fold over the ROOT -> `u` path. Two arguments: the fold over the `u..v` path INCLUSIVE (both endpoints). The gated witness op. A MUTATING read, 0 B/op. A bad id throws BEFORE any splay; a two-argument call with `u`, `v` in DIFFERENT trees throws. **Re-roots:** the two-argument form everts `u`, leaving the tree ROOTED AT `u` (`findRoot(v) === u`; a later `cut` is relative to `u`); by design, not restored -- `evert(r)` restores a root `r`. The one-argument form keeps the root. |
 | `setValue` | `setValue(id, value) -> this` | amortized O(log n) | Set vertex `id`'s value to `value` (ABSOLUTE), then fix the aggregate. 0 B/op. Throws (no-op) on a bad id, a non-finite value, or (gcd kind) a negative / non-integer value. |
 | `at` | `at(id) -> number` | O(1) | Vertex `id`'s stored value. NON-mutating (no splay), 0 B/op. A bad id throws. |
 | `clear` | `clear() -> this` | O(n) | Reset the forest to isolated singleton vertices (edges dropped, values + aggregates back to the fold identity, edge count 0). Buffers reset in place, zero-alloc, so the instance is immediately reusable. |

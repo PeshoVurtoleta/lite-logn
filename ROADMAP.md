@@ -12,8 +12,9 @@
 > Reproduced independently the same day (section 8.1). F1-F11 and F13 hold. F12 (the perf-gate
 > flake) did not reproduce. Next-session run order: section 8.2. The accepted 1.4.0 brief is section 8.3, RE-PRIORITIZED in 8.4 (consumers first).
 > **1.4.0 SHIPPED (c25188b). 1.4.1 SHIPPED (b45ac49) -- H1 closed, DEFERRED empty.**
-> **NEXT: EulerTourTree -- v1.5.0** (section 9; the execution plan is 9.0; research in RESEARCH.md section 13).
-> THEN: the demo (its own session).
+> **1.5.0 SHIPPED (b790137) -- EulerTourTree, the twentieth member.**
+> **Demo session DONE (2026-10-04): DM1-DM7 fixed** (section 10). The demo covers 16 of 20 members; scenes for
+> WaveletTree / CartesianTree / LinkCutTree / EulerTourTree are the open, optional follow-up.
 
 Seven full BRIEF sessions plus a queued Tier 2/3/4 reserve, all for one package:
 `@zakkster/lite-logn`, the zero-GC O(log n) data-structure family (folder
@@ -1643,3 +1644,36 @@ DONE WHEN
 ```
 
 MIT (c) Zahary Shinikchiev
+
+## 10. Demo audit (2026-10-04, at 1.5.0 b790137) -- the brief for the demo session
+
+A read-only audit of `demo/`, run before any demo work. It looked for the violation classes the maintainer found
+in the lite-adaptive / lite-pick demos (var, toFixed in a hot path, closures, layout thrashing, duplicate ids).
+Method: grep, a node-level per-kernel scavenge count + a sampling heap profiler, `npm run demo`, and a live
+browser run. No file in `demo/` was changed.
+
+**Clean (no action):** no `var`. No layout reads anywhere (no thrashing; sizes come from the canvas attributes
++ the svg viewBox). Ids are unique: 18, static and at runtime. The closures are init-only (the MEMBERS `make`
+arrows, the `prefillMap` callbacks, one click listener). The snapshot private-field reads are all still valid
+at 1.5.0 (0 missing, 0 undefined / NaN). No console errors.
+
+**Findings (ranked):**
+
+| id | class | finding | evidence | fix |
+| --- | --- | --- | --- | --- |
+| DM1 | false claim (the demo's core) | The Truth Panel slope / R^2 come from a 4-point in-browser sweep (256..2048, 40k iters, `performance.now()`). It shows a non-log line, and the `max` column is the timer quantum. | Live: slopes -13.50 / -2.75 / -2.75 / -11.50 / -9.00, R^2 0.12-0.74; `max` = 100000 ns (one 0.1 ms tick); ns/op quantized (39.1 twice). Node run of the same sweep: BinaryHeap R^2 0.008, Fenwick 0.51. | Do not fit in the browser. Show the witness's measured slope / R^2 / band per member (static, labelled "from `npm run witness`"), plus a live ns/op only. Drop the live `max` or time single ops with a batch big enough for the timer. |
+| DM2 | hot-path allocation | `nextU32` returns `... >>> 0`, a uint32. Values >= 2^31 (>= 2^30 on Chrome's 31-bit Smi) box a HeapNumber when the call is not inlined. The `_arcHash` bug class from 1.5.0. | Isolated, semi-space 1 MB: BinaryHeap 3 scavenges / 1M steps; SkipList / Treap / Scapegoat / PST 0.15-0.37 B/step. With `& 0x3FFFFFFF` (scratch copy): all ~0 (0.008-0.030). | `return (a ^ (a >>> 14)) & 0x3FFFFFFF;` (every caller masks or mods it). |
+| DM3 | false claim | "Every frame kernel is 0 B/op" is false for SegmentTree2D: 0.85 B/step. The heap profiler pins it to `SegmentTree2D.query`'s return, the documented S7 box when the call is not inlined (the demo's larger step stops the inline). The library alone measures 0. | sampling heap profile: 858 KB / 1M steps at `query` < `stepSegmentTree2DWorld` | Make the claim match the library: "0 B/op, except the documented S7 return box on non-inlined double-returning reads". Or keep that call site small. |
+| DM4 | toFixed on the rAF path | `updatePanel` runs `toFixed(1)` / `toFixed(0)` into `textContent` every 8th frame (~7.5 Hz, <= 5 rows x 2 strings). | `index.html` 972-973 | Write only when a quantized integer (e.g. `Math.round(ns * 10)`) changes; format from integer digits. No `toFixed` in the loop. |
+| DM5 | stale / failing | The header says "All 16 shipped members"; 20 have shipped (WaveletTree, CartesianTree, LinkCutTree, EulerTourTree are missing). DEMO.md says v1.0.0 / sixteen. `npm run demo` fails 2 of 29: the version trinity is pinned to `'1.0.0'`, and the GC soak heap trend is 83,566 B over the soak (> 64 KB; DM2 is part of it, JIT warm-up order the rest). | `npm run demo` | Add the 4 members, or state the scope honestly. Un-pin the version test (compare against package.json). Re-run the soak after DM2. |
+| DM6 | CPU (no allocation) | `drawStrip` / `drawGrid` / `drawMST` set `fillStyle` (a CSS color string parse) per rect. | `index.html` 621, 635, 658 | Batch by color: one pass per fill color, or `globalAlpha` only. |
+| DM7 | minor | Scene 3 has no SVG member, so it shows an empty 20rem svg box. The `drawMST` comment says "TOP half" but it draws the whole canvas. The tabs lack keyboard arrows / `aria-controls` / a roving `tabindex`. `import('@zakkster/lite-layout-profiler')` is a bare specifier with no import map (fails in a browser; it is caught and only runs under `#profile`). | `index.html` | Fix in passing. |
+
+**Status (2026-10-04): all seven FIXED.** `npm run demo` passes 28/28. The scavenge-counted 0-B/op gate runs in a
+child process with a 1 MB semi-space, and a one-allocation-per-step control fails it. The live browser check is
+clean (ARIA tabs, scene-3 svg hidden, `0 + S7` on SegmentTree2D, whole-ns ns/op averaged over the filled ring
+samples). The ROADMAP 8.5 process ran: one coder, one reviewer (REJECTED: 4 blockers), one fix round, and the
+main session fixed one more display bug (an unfilled ring read as 0 ns).
+
+**Order for the demo session:** DM2 (one line) -> DM1 (the honesty of the page) -> DM3 / DM5 claims + tests ->
+DM4 -> new-member scenes, if wanted -> DM6 / DM7. The same cost rules as 8.5 apply.

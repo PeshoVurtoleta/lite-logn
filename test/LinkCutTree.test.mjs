@@ -303,6 +303,48 @@ test('F9/S3 (T8): pathAggregate(u, v) leaves the tree rooted at u (findRoot(v) =
     assert.equal(t.findRoot(0), 3);
 });
 
+test('F9/S3: after pathAggregate(u, v), cut is relative to the NEW root u (the severed edge moves)', () => {
+    const t = new LinkCutTree(6, 'sum');
+    for (let i = 0; i < 6; i++) t.setValue(i, (i + 1) * 10);
+    t.link(1, 0).link(2, 1).link(3, 2).link(4, 1);      // 0-1-2-3, 1-4, rooted at 0
+    assert.equal(t.findRoot(3), 0);
+    assert.equal(t.pathAggregate(3, 4), 140, '40 + 30 + 20 + 50');
+    assert.equal(t.findRoot(0), 3, 'the two-argument read re-rooted the tree at u=3');
+    t.cut(2);                                           // 2's parent toward root 3 is 3
+    assert.equal(t.connected(2, 1), true, 'edge 2-1 survives');
+    assert.equal(t.connected(2, 3), false, 'edge 2-3 is the one severed');
+    assert.equal(t.edges, 3);
+});
+
+test('F9/S3: one-argument pathAggregate(u) keeps the root; evert(r) restores it after a two-argument read', () => {
+    const t = new LinkCutTree(5, 'min');
+    t.link(1, 0).link(2, 1).link(3, 2).link(4, 1);
+    for (let u = 0; u < 5; u++) { t.pathAggregate(u); assert.equal(t.findRoot(u), 0, 'one-arg keeps root 0'); }
+    t.pathAggregate(3, 4);
+    assert.equal(t.findRoot(0), 3);
+    t.evert(0);
+    assert.equal(t.findRoot(3), 0, 'evert(0) restores the original root');
+    t.cut(2);                                           // 2's parent toward root 0 is 1
+    assert.equal(t.connected(2, 3), true);
+    assert.equal(t.connected(2, 1), false);
+});
+
+test('README quick-start: the LinkCutTree example runs as written', () => {
+    const f = new LinkCutTree(6, 'sum');
+    f.setValue(0, 10); f.setValue(1, 20); f.setValue(2, 30); f.setValue(3, 40);
+    f.link(1, 0); f.link(2, 1); f.link(3, 1);
+    assert.equal(f.connected(2, 0), true);
+    assert.equal(f.findRoot(3), 0);
+    assert.equal(f.pathAggregate(3), 70);
+    assert.equal(f.pathAggregate(2, 3), 90);
+    assert.equal(f.findRoot(3), 2);
+    f.evert(0);
+    f.cut(2);
+    assert.equal(f.connected(2, 0), false);
+    f.evert(3);
+    assert.equal(f.findRoot(0), 3);
+});
+
 // --- F7 (T6): sum-kind magnitude bound at setValue ------------------------------------------
 
 test('F7 (T6): LinkCutTree sum setValue rejects a value over MAX_VALUE / (2*capacity), no-op', () => {

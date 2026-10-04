@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.5.0
+Version: 1.5.1
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -965,7 +965,8 @@ The roster (one member per session, each landing append-only):
     Amortized O(log n) MUTATING read. A bad id throws BEFORE any splay.
   - `pathAggregate(u, v)` -> number. One argument (v omitted): the fold over the ROOT -> u path. Two
     arguments: the fold over the u..v path INCLUSIVE of both endpoints. The two-argument form EVERTS u,
-    so it LEAVES the tree ROOTED AT u (findRoot(v) === u afterwards) -- by design, not restored. An
+    so it LEAVES the tree ROOTED AT u (findRoot(v) === u afterwards, and a later cut is relative to u) --
+    by design, not restored; evert(r) restores a root r. The one-argument form keeps the root. An
     unset vertex folds as the identity. The gated witness op. Amortized O(log n) MUTATING read, 0 B/op.
     A bad id throws BEFORE any splay; a two-argument call with u, v in DIFFERENT trees throws.
   - `setValue(id, value)` -> this. Set vertex id's value to value (ABSOLUTE), then fix the aggregate.

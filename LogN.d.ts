@@ -904,7 +904,10 @@ export class LinkCutTree {
     connected(u: number, v: number): boolean;
     /** The path fold. One argument: the fold over ROOT -> `u`. Two arguments: the fold over the path
      *  `u..v` INCLUSIVE of both endpoints (evert `u`, access `v`). Amortized O(log n) MUTATING read, 0 B/op.
-     *  A bad id throws BEFORE any splay; a two-argument call with `u`, `v` in DIFFERENT trees throws. */
+     *  A bad id throws BEFORE any splay; a two-argument call with `u`, `v` in DIFFERENT trees throws.
+     *  RE-ROOTS: the two-argument form everts `u`, so it LEAVES the tree ROOTED AT `u` (`findRoot(v) === u`
+     *  afterwards, and a later `cut` severs the edge toward `u`). By design, not restored; `evert(r)` restores
+     *  a root `r`. The one-argument form does not change the root. */
     pathAggregate(u: number, v?: number): number;
     /** Set vertex `id`'s value to `value` (ABSOLUTE), then fix the aggregate. Amortized O(log n), 0 B/op.
      *  Throws `[lite-logn]` as a no-op on a bad id, a non-finite value, or (gcd kind) a negative /

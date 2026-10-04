@@ -2887,7 +2887,7 @@ function laneFit(m, xOf) {
 }
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.5.0\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.5.1\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),

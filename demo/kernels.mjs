@@ -1,14 +1,18 @@
 // @zakkster/lite-logn -- demo hot kernels (repo-only dev artifact, NEVER shipped).
 //
 // Pure, zero-allocation-after-warmup world factories + per-op step kernels that wrap the REAL
-// shipped classes of ../LogN.js, across four thematic scenes covering all SIXTEEN members. This
+// shipped classes of ../LogN.js, across four thematic scenes covering 16 of the 20 shipped
+// members (WaveletTree, CartesianTree, LinkCutTree, EulerTourTree are not in the demo yet). This
 // module is imported by BOTH:
 //   - demo/index.html    (the browser rAF loop -- the visualization state IS these classes)
 //   - demo/Demo.test.mjs (the honesty gate -- faithfulness + version-trinity + 0-B/op + pins)
 //
 // The one non-negotiable (DEMO.md section 0): the demo demonstrates zero-GC, so the demo's own
 // per-frame math must itself be zero-GC. Every stepX / snapshotX allocates ZERO bytes after
-// warmup; all allocation lives in a createXWorld factory. The ONLY frame allocators are the six
+// warmup -- with ONE documented exception: SegmentTree2D.query returns a computed double that V8
+// boxes into one ~16 B HeapNumber when the demo's larger step is not inlined (the library's
+// disclosed S7 return box, ~0.85 B/step; see Demo.test.mjs Scene-03 and the Truth-Panel "0 + S7"
+// marker). All other allocation lives in a createXWorld factory. The ONLY frame allocators are the six
 // naive FOILS, each marked "FOIL: allocates ON PURPOSE -- this is the point". ASCII-only per
 // suite law. Every throw here carries the [lite-logn-demo] prefix (never [lite-logn]).
 
@@ -26,7 +30,11 @@ export { VERSION };
 
 // ---- deterministic PRNG (integer state, zero-alloc) -----------------------------------
 // mulberry32 over a Uint32Array(1) state cell: no closure, no boxed HeapNumber, no wall-clock.
-// Reads and advances state[0] in place; returns a uint32 in [0, 2^32).
+// Reads and advances state[0] in place (the full 32-bit mulberry32 state), but the RETURN is
+// masked to a uint30 in [0, 2^30) so the value stays a Smi on every engine (incl. Chrome's
+// 31-bit Smi tag): a uint32 >= 2^31 (>= 2^30 on Chrome) would box a HeapNumber when a caller's
+// step kernel is not inlined (the _arcHash box class). Every caller masks (`& k`) or mods
+// (`% range`) the result, so dropping the top 2 bits changes the stream, never any contract.
 export function makeRng(seed) {
     const s = new Uint32Array(1);
     s[0] = seed >>> 0;
@@ -38,7 +46,7 @@ export function nextU32(state) {
     state[0] = a >>> 0;
     a = Math.imul(a ^ (a >>> 15), a | 1);
     a ^= a + Math.imul(a ^ (a >>> 7), a | 61);
-    return (a ^ (a >>> 14)) >>> 0;
+    return (a ^ (a >>> 14)) & 0x3FFFFFFF;
 }
 
 /** A uint32 in [0, range). range must be >= 1. Zero-alloc. */
@@ -68,7 +76,7 @@ export function createBinaryHeapWorld(cap, target) {
         key: new Float64Array(cap), id: new Uint32Array(cap), pos: new Int32Array(cap),
         n: 0, cap, min: true,
     };
-    return { heap, rng, cap, target, lastOp: 0, lastId: -1, lastKey: 0, maxNs: 0, snap };
+    return { heap, rng, cap, target, lastOp: 0, lastId: -1, lastKey: 0, snap };
 }
 export function stepBinaryHeapWorld(w) {
     const h = w.heap, size = h.size, cap = w.cap;
@@ -111,7 +119,7 @@ export function createMinMaxHeapWorld(cap, target) {
     const heap = new MinMaxHeap(cap);
     const rng = makeRng(0x2b3c4d5e);
     const snap = { key: new Float64Array(cap), id: new Uint32Array(cap), n: 0, cap };
-    return { heap, rng, cap, target, lastOp: 0, lastId: -1, lastKey: 0, maxNs: 0, snap };
+    return { heap, rng, cap, target, lastOp: 0, lastId: -1, lastKey: 0, snap };
 }
 export function stepMinMaxHeapWorld(w) {
     const h = w.heap, size = h.size, cap = w.cap;
@@ -147,7 +155,7 @@ export function createBinomialHeapWorld(cap, target) {
         sibling: new Uint32Array(cap + 1), order: new Uint32Array(cap + 1),
         head: 0, min: 0, n: 0, isMin: true, consumed: false, cap,
     };
-    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, maxNs: 0, snap };
+    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, snap };
 }
 export function stepBinomialHeapWorld(w) {
     const h = w.heap, size = h.size, cap = w.cap;
@@ -181,7 +189,7 @@ export function createPairingHeapWorld(cap, target) {
         owner: new Uint32Array(cap + 1), alias: new Int32Array(2),
         root: 0, n: 0, cap,
     };
-    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, maxNs: 0, snap };
+    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, snap };
 }
 export function stepPairingHeapWorld(w) {
     const h = w.heap, size = h.size, cap = w.cap;
@@ -206,10 +214,7 @@ export function stepPairingHeapWorld(w) {
         }
     }
     if (size > 0) {
-        const t0 = performance.now();
         const x = h.popMin();
-        const dt = performance.now() - t0;
-        if (dt > w.maxNs) w.maxNs = dt;
         w.lastOp = 2; w.lastId = x === undefined ? -1 : x; return;
     }
     w.lastOp = 0;
@@ -236,7 +241,7 @@ export function createFibonacciHeapWorld(cap, target) {
         pos: new Int32Array(cap), owner: new Uint32Array(cap + 1),
         bucket: new Uint32Array(blen), min: 0, n: 0, hid: 1, consumed: false, cap,
     };
-    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, maxNs: 0, snap };
+    return { heap, rng, cap, target, seq: 0, lastOp: 0, lastId: -1, lastKey: 0, snap };
 }
 export function stepFibonacciHeapWorld(w) {
     const h = w.heap, size = h.size, cap = w.cap;
@@ -260,10 +265,7 @@ export function stepFibonacciHeapWorld(w) {
         }
     }
     if (size > 0) {
-        const t0 = performance.now();
         const x = h.popMin();
-        const dt = performance.now() - t0;
-        if (dt > w.maxNs) w.maxNs = dt;
         w.lastOp = 2; w.lastId = x === undefined ? -1 : x; return;
     }
     w.lastOp = 0;
@@ -323,7 +325,7 @@ export function createSkipListWorld(cap, target) {
         level: 1, maxLevel: cols, size: 0, stride: list._stride, cap, version: 0,
     };
     const w = { list, rng, cap, target, kring: new Float64Array(rcap), rmask, rhead: 0,
-        lastOp: 0, lastKey: 0, maxNs: 0, snap };
+        lastOp: 0, lastKey: 0, snap };
     prefillMap(w, (k, v) => list.set(k, v));
     return w;
 }
@@ -340,9 +342,7 @@ export function stepSkipListWorld(w) {
         w.lastOp = 2; w.lastKey = k; return;
     }
     if (b === 2) {
-        const k = ringSample(w.kring, w, nextU32(w.rng));
-        const t0 = performance.now(); l.get(k); const dt = performance.now() - t0;
-        if (dt > w.maxNs) w.maxNs = dt;
+        const k = ringSample(w.kring, w, nextU32(w.rng)); l.get(k);
         w.lastOp = 3; w.lastKey = k; return;
     }
     const k = ringSample(w.kring, w, nextU32(w.rng)); l.successor(k);
@@ -368,7 +368,7 @@ export function createTreapWorld(cap, target) {
         root: 0, sr: 0, version: 0, n: 0, cap,
     };
     const w = { treap, rng, cap, target, kring: new Float64Array(rcap), rmask, rhead: 0,
-        lastOp: 0, lastKey: 0, rankVal: 0, maxNs: 0, snap };
+        lastOp: 0, lastKey: 0, rankVal: 0, snap };
     prefillMap(w, (k, v) => treap.set(k, v));
     return w;
 }
@@ -385,9 +385,7 @@ export function stepTreapWorld(w) {
         w.lastOp = 2; w.lastKey = k; return;
     }
     if (b === 2) {
-        const k = ringSample(w.kring, w, nextU32(w.rng));
-        const t0 = performance.now(); t.get(k); const dt = performance.now() - t0;
-        if (dt > w.maxNs) w.maxNs = dt;
+        const k = ringSample(w.kring, w, nextU32(w.rng)); t.get(k);
         w.lastOp = 3; w.lastKey = k; return;
     }
     // rank/select percentile marker
@@ -417,7 +415,7 @@ export function createScapegoatWorld(cap, target) {
         root: 0, maxCount: 0, version: 0, alpha: 2 / 3, invAlpha: 1.5, n: 0, cap,
     };
     const w = { tree, rng, cap, target, kring: new Float64Array(rcap), rmask, rhead: 0,
-        lastOp: 0, lastKey: 0, lastMaxCount: 0, rebuilt: false, maxNs: 0, snap };
+        lastOp: 0, lastKey: 0, lastMaxCount: 0, rebuilt: false, snap };
     prefillMap(w, (k, v) => tree.set(k, v));
     return w;
 }
@@ -458,7 +456,7 @@ export function createSplayTreeWorld(cap, target) {
         root: 0, hl: 0, hr: 0, version: 0, n: 0, cap,
     };
     const w = { tree, rng, cap, target, kring: new Float64Array(rcap), rmask, rhead: 0,
-        hotKey: 0, lastOp: 0, lastKey: 0, maxNs: 0, snap };
+        hotKey: 0, lastOp: 0, lastKey: 0, snap };
     prefillMap(w, (k, v) => tree.set(k, v));
     w.hotKey = w.kring[0];
     return w;
@@ -470,8 +468,7 @@ export function stepSplayTreeWorld(w) {
     let k;
     if ((r % 5) < 4) k = w.hotKey;
     else k = ringSample(w.kring, w, nextU32(w.rng));
-    const t0 = performance.now(); t.get(k); const dt = performance.now() - t0;
-    if (dt > w.maxNs) w.maxNs = dt;
+    t.get(k);
     w.lastOp = 3; w.lastKey = k;
     return size;
 }
@@ -489,7 +486,7 @@ export function createSortedArrayWorld(cap, target) {
     const rcap = 4096, rmask = rcap - 1;
     const snap = { key: new Float64Array(cap), value: new Float64Array(cap), size: 0, cap, version: 0 };
     const w = { arr, rng, cap, target, kring: new Float64Array(rcap), rmask, rhead: 0,
-        probe: 0, lastOp: 0, lastKey: 0, maxNs: 0, snap };
+        probe: 0, lastOp: 0, lastKey: 0, snap };
     prefillMap(w, (k, v) => arr.set(k, v));
     return w;
 }
@@ -548,7 +545,7 @@ export function createFenwickWorld(n) {
     const bit = new Fenwick(n);
     const rng = makeRng(0xb4657687);
     const snap = { t: new Float64Array(n + 1), n };
-    return { bit, rng, n, idx: 0, lastOp: 0, lastIdx: 0, sum: 0, maxNs: 0, snap };
+    return { bit, rng, n, idx: 0, lastOp: 0, lastIdx: 0, sum: 0, snap };
 }
 export function stepFenwickWorld(w) {
     const bit = w.bit, n = w.n;
@@ -571,7 +568,7 @@ export function createSegmentTreeWorld(n) {
         new SegmentTree(n, 'sum'), new SegmentTree(n, 'gcd')];
     const rng = makeRng(0xc5768798);
     const snap = { t: new Float64Array(2 * n), n, k: 0, idv: 0 };
-    return { trees, rng, n, active: 0, tick: 0, lastOp: 0, lastIdx: 0, val: 0, maxNs: 0, snap };
+    return { trees, rng, n, active: 0, tick: 0, lastOp: 0, lastIdx: 0, val: 0, snap };
 }
 export function stepSegmentTreeWorld(w) {
     w.tick = (w.tick + 1) | 0;
@@ -596,7 +593,7 @@ export function createFenwick2DWorld(rows, cols) {
     const grid = new Fenwick2D(rows, cols);
     const rng = makeRng(0xd6879809);
     const snap = { t: new Float64Array((rows + 1) * (cols + 1)), r: rows, c: cols, w: cols + 1 };
-    return { grid, rng, rows, cols, hotR: 0, hotC: 0, lastOp: 0, sum: 0, maxNs: 0, snap };
+    return { grid, rng, rows, cols, hotR: 0, hotC: 0, lastOp: 0, sum: 0, snap };
 }
 export function stepFenwick2DWorld(w) {
     const g = w.grid, rows = w.rows, cols = w.cols;
@@ -620,7 +617,7 @@ export function createSegmentTree2DWorld(rows, cols) {
     const grid = new SegmentTree2D(rows, cols, 'max');
     const rng = makeRng(0xe798890a);
     const snap = { t: new Float64Array(2 * rows * 2 * cols), r: rows, c: cols, w: 2 * cols, k: 1, idv: -Infinity };
-    return { grid, rng, rows, cols, hotR: 0, hotC: 0, lastOp: 0, val: 0, maxNs: 0, snap };
+    return { grid, rng, rows, cols, hotR: 0, hotC: 0, lastOp: 0, val: 0, snap };
 }
 export function stepSegmentTree2DWorld(w) {
     const g = w.grid, rows = w.rows, cols = w.cols;
@@ -676,7 +673,7 @@ export function createPersistentSegTreeWorld(n, versionCap) {
         next: 0, vcount: 0, vcap: versionCap, budget, n, k: 2, idv: 0,
     };
     // curV = newest minted version; queriedV = the OLD version read this step (drives the DAG pulse).
-    return { pst, rng, n, versionCap, curV: 0, queriedV: 0, qResult: 0, atResult: 0, lastOp: 0, maxNs: 0, snap };
+    return { pst, rng, n, versionCap, curV: 0, queriedV: 0, qResult: 0, atResult: 0, lastOp: 0, snap };
 }
 export function stepPersistentSegTreeWorld(w) {
     const p = w.pst, n = w.n;
@@ -717,7 +714,7 @@ export function createMergeSortTreeWorld(n) {
     // `values` is the demo's OWN copy of the source-by-index (MST copied its own in), retained
     // ONLY as the render backdrop. Never mutated -> does not touch the copy-in immutability.
     // vlo/vhi are the live rangeCount value-window; x is the live countLE threshold.
-    return { mst, rng, n, values, countRes: 0, rangeRes: 0, lastOp: 0, lo: 0, hi: 0, x: 0, vlo: 0, vhi: 0, maxNs: 0, snap };
+    return { mst, rng, n, values, countRes: 0, rangeRes: 0, lastOp: 0, lo: 0, hi: 0, x: 0, vlo: 0, vhi: 0, snap };
 }
 export function stepMergeSortTreeWorld(w) {
     const m = w.mst, n = w.n;

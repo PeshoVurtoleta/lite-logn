@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 
 import {
     BinaryHeap, MinMaxHeap, BinomialHeap, PairingHeap, FibonacciHeap,
@@ -28,7 +29,8 @@ import {
     PersistentSegTree, MergeSortTree, VERSION as LOGN_VERSION,
 } from '../LogN.js';
 import * as K from './kernels.mjs';
-import { fitLogLinear } from '../test/witness.mjs';
+import { fitLogLinear, MEMBERS as WITNESS_MEMBERS } from '../test/witness.mjs';
+import { WITNESS_BANDS, R2_FLOOR } from './witness-data.mjs';
 
 const DEMO_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(DEMO_DIR);
@@ -48,10 +50,55 @@ function u32(s) {
 // (b) VERSION TRINITY
 // =======================================================================================
 
-test('version trinity: kernels.VERSION === LogN.VERSION === package.json.version === 1.0.0', () => {
+test('version trinity: kernels.VERSION === LogN.VERSION === package.json.version', () => {
+    // No pinned literal: the trinity tracks whatever /release sets, it does not freeze a number.
     assert.equal(K.VERSION, LOGN_VERSION, 'kernels re-export must equal LogN.VERSION');
     assert.equal(K.VERSION, PKG.version, 'kernels VERSION must equal package.json version');
-    assert.equal(K.VERSION, '1.0.0', 'the version trinity must be exactly 1.0.0');
+});
+
+// =======================================================================================
+// (b2) WITNESS-DATA DRIFT -- the browser Truth Panel's static band table must equal the
+// gated `npm run witness` registry. witness-data.mjs is a hand-copied, browser-importable
+// mirror (test/witness.mjs pulls in node: modules); this fail-closed test is the ONLY thing
+// keeping it honest. A witness recalibration that forgets to update witness-data.mjs FAILS
+// here -- the panel can never silently show a stale band.
+// =======================================================================================
+
+// The exact drift check, factored out so the TEETH test exercises the SAME code on a mutated
+// copy (not a stand-in). Throws (via assert) the instant any band/axis/floor/op disagrees.
+function assertBandsMatch(bands) {
+    const names = Object.keys(bands);
+    assert.equal(names.length, 16, 'the demo band table must cover all 16 demo members');
+    for (const name of names) {
+        const wd = bands[name];
+        const m = WITNESS_MEMBERS.find((x) => x.name === name && x.op === wd.op);
+        assert.ok(m, '[lite-logn-demo] no gated witness MEMBER for ' + name + '.' + wd.op +
+            ' -- witness-data.mjs op drifted from the registry');
+        assert.equal(wd.lo, m.slopeLo, '[lite-logn-demo] ' + name + '.' + wd.op + ' lo band drifted: ' +
+            wd.lo + ' vs witness ' + m.slopeLo);
+        assert.equal(wd.hi, m.slopeHi, '[lite-logn-demo] ' + name + '.' + wd.op + ' hi band drifted: ' +
+            wd.hi + ' vs witness ' + m.slopeHi);
+        const axis = m.xOf ? '(log2 n)^2' : 'log2(n)';
+        assert.equal(wd.axis, axis, '[lite-logn-demo] ' + name + '.' + wd.op + ' axis drifted: ' +
+            wd.axis + ' vs witness ' + axis);
+        assert.equal(R2_FLOOR, m.r2Floor, '[lite-logn-demo] ' + name + ' R^2 floor drifted: ' +
+            R2_FLOOR + ' vs witness ' + m.r2Floor);
+    }
+}
+
+test('witness-data drift: every demo band equals the test/witness.mjs gated registry (fail closed)', () => {
+    assertBandsMatch(WITNESS_BANDS);
+});
+
+test('witness-data drift has TEETH: the real check fails on a mutated band copy', () => {
+    assertBandsMatch(WITNESS_BANDS); // sanity: the real table passes
+    // deep-copy the table, nudge Treap.lo 2.55 -> 2.56, and prove the SAME check now throws.
+    const mutated = {};
+    for (const name in WITNESS_BANDS) mutated[name] = { ...WITNESS_BANDS[name] };
+    assert.equal(mutated.Treap.lo, 2.55, 'guard: the Treap lo we mutate must start at 2.55');
+    mutated.Treap.lo = 2.56;
+    assert.throws(() => assertBandsMatch(mutated),
+        'a drifted Treap lo band (2.56 vs gated 2.55) must fail the drift check');
 });
 
 test('index.html reads VERSION via import, never a hardcoded version literal', () => {
@@ -342,69 +389,145 @@ test('layout-drift pins have TEETH: a renamed field reads as missing', () => {
 });
 
 // =======================================================================================
-// (c) 0-B/op HOT-KERNEL GATE + foil non-vacuousness
+// (c) 0-B/op HOT-KERNEL GATE (SCAVENGE-COUNTED) + foil non-vacuousness
 // =======================================================================================
+// A post-GC heapUsed delta cannot see a TRANSIENT allocation that dies before the forced GC --
+// `{ a: i, b: [i, i + 1] }` per step reads ~0 B/op that way and sails through. So the gate runs
+// in a CHILD process with the semi-space pinned SMALL (--max/min-semi-space-size=1), where any
+// per-step allocation forces SCAVENGES, and COUNTS them (PerformanceObserver 'gc', kind = minor)
+// over a window with NO forced GC. Scenes 1/2/4 are a true 0 (no scavenge even at 8N). Scene 3
+// is bounded to the documented S7 return box of SegmentTree2D.query (<= 1 HeapNumber/call, i.e.
+// implied bytes/step <= 16). A CONTROL that allocates one small object per step is the teeth: the
+// SAME gate must catch it (implied bytes/step >> 16, scavenges dwarfing the identical lite scene).
 
-async function gateZeroAlloc(t, label, warmup, fn) {
-    if (typeof global.gc !== 'function') { t.skip('needs --expose-gc'); return; }
-    for (let i = 0; i < warmup; i++) fn(i);
-    global.gc(); global.gc();
-    const before = process.memoryUsage().heapUsed;
-    const HOT = 120000; let sink = 0;
-    for (let i = 0; i < HOT; i++) sink += fn(i) | 0;
-    global.gc();
-    const after = process.memoryUsage().heapUsed;
-    const bpo = (after - before) / HOT;
-    process.stdout.write('  ' + label + ': alloc=' + (bpo <= 0 ? 0 : bpo.toFixed(3)) + ' B/op\n');
-    assert.ok(sink === sink, 'sink keeps work live');
-    assert.ok(bpo < 16, label + ' must be ~0 B/op (ambient test-runner heap aside), got ' + bpo.toFixed(3));
-}
+const ZERO_ALLOC_WORKER = `
+import { PerformanceObserver } from 'node:perf_hooks';
+const K = await import(process.env.KPATH);
+const N = 200000, N8 = 1600000, WARM = 20000;
 
-test('0-B/op: Scene-01 step + snapshot kernels allocate ~0 B/op', async (t) => {
-    const bh = K.createBinaryHeapWorld(256, 128), mm = K.createMinMaxHeapWorld(256, 128),
-        bi = K.createBinomialHeapWorld(256, 128), pa = K.createPairingHeapWorld(256, 128),
-        fi = K.createFibonacciHeapWorld(256, 128);
-    await gateZeroAlloc(t, 'scene01', 20000, () => {
-        K.stepBinaryHeapWorld(bh); K.stepMinMaxHeapWorld(mm); K.stepBinomialHeapWorld(bi);
-        K.stepPairingHeapWorld(pa); K.stepFibonacciHeapWorld(fi);
-        K.snapshotBinaryHeap(bh, bh.snap); K.snapshotMinMaxHeap(mm, mm.snap);
-        K.snapshotBinomialHeap(bi, bi.snap); K.snapshotPairingHeap(pa, pa.snap);
-        K.snapshotFibonacciHeap(fi, fi.snap);
-        return bh.snap.n + mm.snap.n + bi.snap.n;
-    });
-});
-
-test('0-B/op: Scene-02 step + snapshot kernels allocate ~0 B/op', async (t) => {
-    const sk = K.createSkipListWorld(512, 256), tr = K.createTreapWorld(512, 256),
-        sc = K.createScapegoatWorld(512, 256), sp = K.createSplayTreeWorld(512, 256),
-        sa = K.createSortedArrayWorld(512, 256);
-    await gateZeroAlloc(t, 'scene02', 20000, () => {
-        K.stepSkipListWorld(sk); K.stepTreapWorld(tr); K.stepScapegoatWorld(sc);
-        K.stepSplayTreeWorld(sp); K.stepSortedArrayWorld(sa);
-        K.snapshotSkipList(sk, sk.snap); K.snapshotTreap(tr, tr.snap); K.snapshotScapegoat(sc, sc.snap);
-        K.snapshotSplayTree(sp, sp.snap); K.snapshotSortedArray(sa, sa.snap);
-        return sk.snap.size + tr.snap.n + sa.snap.size;
-    });
-});
-
-test('0-B/op: Scene-03 step + snapshot kernels allocate ~0 B/op', async (t) => {
-    const fw = K.createFenwickWorld(512), sg = K.createSegmentTreeWorld(512),
-        f2 = K.createFenwick2DWorld(32, 32), s2 = K.createSegmentTree2DWorld(32, 32);
-    await gateZeroAlloc(t, 'scene03', 20000, () => {
-        K.stepFenwickWorld(fw); K.stepSegmentTreeWorld(sg); K.stepFenwick2DWorld(f2); K.stepSegmentTree2DWorld(s2);
-        K.snapshotFenwick(fw, fw.snap); K.snapshotSegmentTree(sg, sg.snap);
-        K.snapshotFenwick2D(f2, f2.snap); K.snapshotSegmentTree2D(s2, s2.snap);
-        return fw.snap.n + sg.snap.n;
-    });
-});
-
-test('0-B/op: Scene-04 step + snapshot kernels allocate ~0 B/op', async (t) => {
+function mkStep(id) {
+    if (id === '1' || id === 'control') {
+        const bh = K.createBinaryHeapWorld(256, 128), mm = K.createMinMaxHeapWorld(256, 128),
+            bi = K.createBinomialHeapWorld(256, 128), pa = K.createPairingHeapWorld(256, 128),
+            fi = K.createFibonacciHeapWorld(256, 128);
+        if (id === 'control') {
+            const hold = new Array(1024); // bounded ring: the per-step object ESCAPES (defeats scalar replacement) but does not accumulate
+            return (i) => {
+                K.stepBinaryHeapWorld(bh); K.stepMinMaxHeapWorld(mm); K.stepBinomialHeapWorld(bi);
+                K.stepPairingHeapWorld(pa); K.stepFibonacciHeapWorld(fi);
+                K.snapshotBinaryHeap(bh, bh.snap); K.snapshotMinMaxHeap(mm, mm.snap);
+                K.snapshotBinomialHeap(bi, bi.snap); K.snapshotPairingHeap(pa, pa.snap);
+                K.snapshotFibonacciHeap(fi, fi.snap);
+                const o = { a: i, b: [i, i + 1] }; // ONE small object/step -- MUST trip the gate
+                hold[i & 1023] = o;
+                return bh.snap.n + o.b[0];
+            };
+        }
+        return (i) => {
+            K.stepBinaryHeapWorld(bh); K.stepMinMaxHeapWorld(mm); K.stepBinomialHeapWorld(bi);
+            K.stepPairingHeapWorld(pa); K.stepFibonacciHeapWorld(fi);
+            K.snapshotBinaryHeap(bh, bh.snap); K.snapshotMinMaxHeap(mm, mm.snap);
+            K.snapshotBinomialHeap(bi, bi.snap); K.snapshotPairingHeap(pa, pa.snap);
+            K.snapshotFibonacciHeap(fi, fi.snap);
+            return bh.snap.n + mm.snap.n + bi.snap.n;
+        };
+    }
+    if (id === '2') {
+        const sk = K.createSkipListWorld(512, 256), tr = K.createTreapWorld(512, 256),
+            sc = K.createScapegoatWorld(512, 256), sp = K.createSplayTreeWorld(512, 256),
+            sa = K.createSortedArrayWorld(512, 256);
+        return (i) => {
+            K.stepSkipListWorld(sk); K.stepTreapWorld(tr); K.stepScapegoatWorld(sc);
+            K.stepSplayTreeWorld(sp); K.stepSortedArrayWorld(sa);
+            K.snapshotSkipList(sk, sk.snap); K.snapshotTreap(tr, tr.snap); K.snapshotScapegoat(sc, sc.snap);
+            K.snapshotSplayTree(sp, sp.snap); K.snapshotSortedArray(sa, sa.snap);
+            return sk.snap.size + tr.snap.n + sa.snap.size;
+        };
+    }
+    if (id === '3') {
+        const fw = K.createFenwickWorld(512), sg = K.createSegmentTreeWorld(512),
+            f2 = K.createFenwick2DWorld(32, 32), s2 = K.createSegmentTree2DWorld(32, 32);
+        return (i) => {
+            K.stepFenwickWorld(fw); K.stepSegmentTreeWorld(sg); K.stepFenwick2DWorld(f2); K.stepSegmentTree2DWorld(s2);
+            K.snapshotFenwick(fw, fw.snap); K.snapshotSegmentTree(sg, sg.snap);
+            K.snapshotFenwick2D(f2, f2.snap); K.snapshotSegmentTree2D(s2, s2.snap);
+            return fw.snap.n + sg.snap.n;
+        };
+    }
     const pst = K.createPersistentSegTreeWorld(128, 400), mst = K.createMergeSortTreeWorld(512);
-    await gateZeroAlloc(t, 'scene04', 20000, () => {
+    return (i) => {
         K.stepPersistentSegTreeWorld(pst); K.stepMergeSortTreeWorld(mst);
         K.snapshotPersistentSegTree(pst, pst.snap); K.snapshotMergeSortTree(mst, mst.snap);
         return pst.snap.vcount + mst.snap.n;
+    };
+}
+
+async function scav(fn, steps) {
+    gc(); gc();
+    let n = 0;
+    const obs = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) { const k = e.detail ? e.detail.kind : e.kind; if (k === 1) n++; }
     });
+    obs.observe({ entryTypes: ['gc'] });
+    let sink = 0;
+    for (let i = 0; i < steps; i++) sink += fn(i) | 0;
+    await new Promise((r) => setTimeout(r, 60)); // GC entries arrive async -- settle before reading
+    obs.disconnect();
+    if (sink !== sink) throw new Error('nan sink');
+    return n;
+}
+
+for (const id of ['1', '2', '3', '4', 'control']) {
+    const fn = mkStep(id);
+    for (let i = 0; i < WARM; i++) fn(i);
+    const sN = await scav(fn, N);
+    const s8 = await scav(fn, N8);
+    process.stdout.write('RESULT ' + id + ' ' + N + ' ' + sN + ' ' + N8 + ' ' + s8 + '\\n');
+}
+`;
+
+test('0-B/op (scavenge-counted, semi=1MB child): scenes 1/2/4 true 0; scene 3 <= S7; control FAILS', () => {
+    const KPATH = fileURLToPath(new URL('./kernels.mjs', import.meta.url));
+    const res = spawnSync(process.execPath,
+        ['--expose-gc', '--max-semi-space-size=1', '--min-semi-space-size=1', '--input-type=module', '-e', ZERO_ALLOC_WORKER],
+        { env: { ...process.env, KPATH }, encoding: 'utf8', maxBuffer: 1 << 24, timeout: 120000 });
+    assert.equal(res.status, 0, '[lite-logn-demo] alloc worker failed (status ' + res.status + '): ' +
+        String(res.stderr || res.error || '').slice(0, 800));
+    const by = {};
+    for (const line of res.stdout.split('\n')) {
+        if (!line.startsWith('RESULT ')) continue;
+        const p = line.split(' ');
+        by[p[1]] = { N: +p[2], sN: +p[3], N8: +p[4], s8: +p[5] };
+    }
+    const SEMI = 1 << 20;      // ~1 MB semi-space -> ~1 scavenge per MB of transient allocation
+    const S7_BUDGET_B = 16;    // one HeapNumber per non-inlined double-returning read (SegmentTree2D.query)
+    const AMBIENT = 1;         // tolerate at most one incidental scavenge across a whole window
+    process.stdout.write('  0-B/op scavenges (semi=1MB): ' +
+        ['1', '2', '3', '4', 'control'].map((id) => id + ' N=' + by[id].sN + ' 8N=' + by[id].s8).join(' | ') + '\n');
+
+    // scenes 1, 2, 4: a TRUE 0 B/op -- no per-step allocation, so no scavenge even at 8N.
+    for (const id of ['1', '2', '4']) {
+        const r = by[id];
+        assert.ok(r, '[lite-logn-demo] missing scene ' + id + ' result');
+        assert.ok(r.sN <= AMBIENT && r.s8 <= AMBIENT, '[lite-logn-demo] scene ' + id +
+            ' must be a true 0 B/op: scavenges N=' + r.sN + ' 8N=' + r.s8 + ' must each be <= ' + AMBIENT);
+    }
+    // scene 3: ONLY the documented S7 box (SegmentTree2D.query) is allowed. Bound the IMPLIED
+    // bytes/step (scavenges * semi-space / steps) to one HeapNumber -- not a loose "< 16 B averaged".
+    const r3 = by['3'];
+    const impliedB3 = r3.s8 * SEMI / r3.N8;
+    assert.ok(impliedB3 <= S7_BUDGET_B, '[lite-logn-demo] scene 3 implied ' + impliedB3.toFixed(2) +
+        ' B/op (scavenges ' + r3.s8 + ' over ' + r3.N8 + ') must stay within the S7 budget ' +
+        S7_BUDGET_B + ' B (<= 1 HeapNumber per SegmentTree2D.query)');
+
+    // TEETH: the control adds ONE small object/step. The SAME gate must CATCH it -- implied
+    // bytes/step must blow past the S7 budget, and its scavenge count must dwarf the lite scene 1.
+    const rc = by['control'];
+    const impliedBc = rc.sN * SEMI / rc.N;
+    assert.ok(impliedBc > S7_BUDGET_B, '[lite-logn-demo] teeth: the one-object-per-step control must ' +
+        'FAIL the gate -- implied ' + impliedBc.toFixed(1) + ' B/op must exceed ' + S7_BUDGET_B);
+    assert.ok(rc.s8 > by['1'].s8 + 8, '[lite-logn-demo] teeth: control scavenges (' + rc.s8 +
+        ') must dwarf the identical lite scene 1 (' + by['1'].s8 + ')');
 });
 
 test('the 6 foils are the ONLY allocators (each measures > 0 heap -- gate non-vacuous)', (t) => {
