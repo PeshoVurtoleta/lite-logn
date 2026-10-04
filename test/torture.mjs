@@ -98,7 +98,7 @@ async function main() {
         await import('@zakkster/lite-gc-profiler');
     const { createLeakTracker } = await import('@zakkster/lite-leak');
     // >>> WIRE: the members under test.
-    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } = await import('../LogN.js');
+    const { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree, EulerTourTree } = await import('../LogN.js');
 
     // Minor-GC (scavenge) counter for the G9 gate: transient boxes are young and
     // scavenged, so a scavenge delta is the instrument that sees them (measureAllocs
@@ -357,6 +357,22 @@ async function main() {
             lct.cut(15);
             lct.link(15, 3);
             tracker.track(lct, noopRelease, 18 * CYCLES + i, { audit: true });
+            // A fresh EulerTourTree per cycle: build a small UNROOTED forest (a chain + a star), churn it
+            // (cut / re-link / subtree + component folds / connected) then drop it. Same held-value
+            // contract: an EulerTourTree owns only its pointer-free node + arc-table typed-array columns +
+            // a scratch stack + a private arc free-list of INDICES (no external resource, no object pool),
+            // so the no-op cleanup never defeats finalization.
+            const ett = new EulerTourTree(64, (i & 1) ? 'max' : 'sum');
+            for (let k = 0; k < 64; k++) ett.setValue(k, (k * 2654435761) & 0xffff);
+            for (let k = 1; k < 32; k++) ett.link(k, k - 1);        // a chain 0..31
+            for (let k = 32; k < 64; k++) ett.link(k, 0);           // a star of leaves on 0
+            ett.subtreeAggregate(5, 4);
+            ett.componentAggregate(40);
+            ett.componentSize(10);
+            ett.connected(10, 60);
+            ett.cut(15, 14);
+            ett.link(15, 3);
+            tracker.track(ett, noopRelease, 19 * CYCLES + i, { audit: true });
         }
         return tracker.size();
     }
@@ -1185,6 +1201,70 @@ async function main() {
         lctk = (lctk + 1) | 0;
     };
 
+    // EulerTourTree: one out-of-loop UNROOTED forest -- a warmed CAP-vertex balanced-ish tree (each vertex
+    // linked to its halved index, so the subtree of vertex x hangs off edge (x, x>>1)). Every lane is a real
+    // hot op that MUST allocate zero RETAINED bytes: link / cut flip EDGES only (the arc free-list hands out
+    // INDICES, not objects) and split / merge use the preallocated _stk scratch (iterative, no recursion).
+    // connected / componentSize / subtreeSize are NON-mutating parent climbs + range reads; subtreeAggregate /
+    // componentAggregate return a double (an S7 k=1 box when not inlined -- a TRANSIENT young HeapNumber that
+    // measureAllocs, which reads RETAINED bytes, correctly sees as 0). Vertex values are & MASK Smis so the
+    // folds stay Smi here; the frac / p31 boxing is gated by the G9 scavenge lanes below.
+    const ett = new EulerTourTree(CAP, 'sum');
+    for (let i = 0; i < CAP; i++) ett.setValue(i, (i * 2654435761) & MASK);
+    for (let i = 1; i < CAP; i++) ett.link(i, i >> 1);     // a balanced binary-ish tree over [0, CAP)
+    let ettk = 0, ettacc = 0;
+    // subtreeAggregate(v, p): the gated Witness op -- fold v's side of edge (v, v>>1), folded in.
+    const stepEttSubtreeAgg = () => {
+        const v = 1 + (ettk & (MASK >> 1)); const p = v >> 1;
+        ettacc = (ettacc + (ett.subtreeAggregate(v, p) | 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // componentAggregate(v): whole-component fold (parent climb to the tour root), folded in.
+    const stepEttComponentAgg = () => {
+        ettacc = (ettacc + (ett.componentAggregate(ettk & MASK) | 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // componentSize(v): whole-component vertex count (k=0, returns a Smi count), folded in.
+    const stepEttComponentSize = () => {
+        ettacc = (ettacc + (ett.componentSize(ettk & MASK) | 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // subtreeSize(v, p): v's-side vertex count (k=0), folded in.
+    const stepEttSubtreeSize = () => {
+        const v = 1 + (ettk & (MASK >> 1)); const p = v >> 1;
+        ettacc = (ettacc + (ett.subtreeSize(v, p) | 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // connected(u, v): two NON-mutating parent climbs (k=0, returns a bool), folded in.
+    const stepEttConnected = () => {
+        ettacc = (ettacc + (ett.connected(ettk & MASK, (ettk * 2246822519) & MASK) ? 1 : 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // hasEdge(u, v): one NON-mutating arc-table probe (k=0, returns a bool), folded in.
+    const stepEttHasEdge = () => {
+        const v = 1 + (ettk & (MASK >> 1));
+        ettacc = (ettacc + (ett.hasEdge(v, v >> 1) ? 1 : 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // at(v): O(1) value read (k=0 for a Smi value), folded in.
+    const stepEttAt = () => {
+        ettacc = (ettacc + (ett.at(ettk & MASK) | 0)) | 0;
+        ettk = (ettk + 1) | 0;
+    };
+    // setValue: a mutating value write (write + _pull up the ancestor chain), folded in. int value -> k=0.
+    const stepEttSetValue = () => {
+        ett.setValue(ettk & MASK, (ettk * 2654435761) & MASK);
+        ettk = (ettk + 1) | 0;
+    };
+    // cut + re-link churn: detach vertex x from its parent x>>1 then re-link the same edge -- the dynamic-
+    // forest hot loop. Flips EDGES only (arc free-list of indices) -> 0 retained B/op.
+    const stepEttCutLink = () => {
+        const x = 1 + (ettk & (MASK >> 1)); const p = x >> 1;
+        ett.cut(x, p);
+        ett.link(x, p);
+        ettk = (ettk + 1) | 0;
+    };
+
     // ---- G9: frac + p31 value-fill lanes, MINOR-GC gated (stage G, v1.4.0) --
     // The 1.3.0 audit's boxing defects fire only when a NON-Smi double crosses a
     // fold: F3 (LinkCutTree _pull), F4 (SegmentTree / SegmentTree2D / PersistentSeg-
@@ -1226,6 +1306,25 @@ async function main() {
     const stepG9LctFracSetValue = () => { g9LctFrac.setValue(g9k & G9MASK, g9Frac[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
     const stepG9LctP31SetValue = () => { g9LctP31.setValue(g9k & G9MASK, g9P31[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
     const stepG9LctFracPathAgg = () => { g9acc = (g9acc + (g9LctFrac.pathAggregate(g9k & G9MASK, (g9k * 3 + 7) & G9MASK) | 0)) | 0; g9k = (g9k + 1) | 0; };
+
+    // EulerTourTree (v1.5.0): the folds + setValue over a frac / p31 chain. ETT uses slot-form internals
+    // from day one (the `_acc` accumulator slot + per-kind `_pull` stores, no tagged phi), so these lanes
+    // carry ONLY the S7 boundary box: setValue[frac/p31] is one double ARG (k=1), subtreeAggregate /
+    // componentAggregate return one double (k=1). Each stays WITHIN its k=1 budget (no internal multi-box
+    // defect like F3), so all ETT lanes are hard GREEN -- the proof ETT was born box-clean.
+    function g9MakeEtt(vals) {
+        const t = new EulerTourTree(4096, 'sum');
+        for (let i = 0; i < 4096; i++) t.setValue(i, vals[i]);
+        for (let i = 1; i < 4096; i++) t.link(i, i - 1);       // a chain so subtreeAggregate(v, v-1) is valid
+        return t;
+    }
+    const g9EttFrac = g9MakeEtt(g9Frac), g9EttP31 = g9MakeEtt(g9P31);
+    // setValue only (k=1: one double ARG). Do NOT also read a fold -- that would cross a second double.
+    const stepG9EttFracSetValue = () => { g9EttFrac.setValue(g9k & G9MASK, g9Frac[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9EttP31SetValue = () => { g9EttP31.setValue(g9k & G9MASK, g9P31[g9k & G9MASK]); g9acc = (g9acc + (g9k & G9MASK)) | 0; g9k = (g9k + 1) | 0; };
+    // subtreeAggregate / componentAggregate: the returned double is the single S7 box (k=1).
+    const stepG9EttFracSubtreeAgg = () => { const v = 1 + (g9k & (G9MASK >> 1)); g9acc = (g9acc + (g9EttFrac.subtreeAggregate(v, v - 1) | 0)) | 0; g9k = (g9k + 1) | 0; };
+    const stepG9EttFracComponentAgg = () => { g9acc = (g9acc + (g9EttFrac.componentAggregate(g9k & G9MASK) | 0)) | 0; g9k = (g9k + 1) | 0; };
 
 
     // SegmentTree2D (F4): rectangle query over a frac / p31 grid.
@@ -1284,7 +1383,8 @@ async function main() {
         stepMstCountLE, stepMstRangeCount,
         stepWtAccess, stepWtRank, stepWtSelect, stepWtQuantile, stepWtRangeCount,
         stepCtRangeMinIndex, stepCtRangeMin, stepCtAt, stepCtTopology,
-        stepLctPathAgg, stepLctPathAgg2, stepLctFindRoot, stepLctConnected, stepLctCutLink, stepLctSetValue]) {
+        stepLctPathAgg, stepLctPathAgg2, stepLctFindRoot, stepLctConnected, stepLctCutLink, stepLctSetValue,
+        stepEttSubtreeAgg, stepEttComponentAgg, stepEttComponentSize, stepEttSubtreeSize, stepEttConnected, stepEttHasEdge, stepEttAt, stepEttSetValue, stepEttCutLink]) {
         const r = measureAllocs(step, { iterations: 100000, batches: 8 });
         const bpc = r.bytesPerCall === null ? 0 : r.bytesPerCall;
         const b = Math.max(0, Math.round(bpc));
@@ -1346,7 +1446,9 @@ async function main() {
         ['SegmentTree2D.query[frac]', stepG9St2FracQuery, 1], ['SegmentTree2D.query[p31]', stepG9St2P31Query, 1],
         ['PST.update[frac]', stepG9PstFracUpdate, 1], ['PST.update[p31]', stepG9PstP31Update, 1],
         ['Treap.successor[frac]', stepG9TreapFracSucc, 1], ['Treap.successor[p31]', stepG9TreapP31Succ, 1],
-        ['WaveletTree.quantile[frac]', stepG9WtFracQuantile, 1], ['WaveletTree.quantile[p31]', stepG9WtP31Quantile, 1]]) {
+        ['WaveletTree.quantile[frac]', stepG9WtFracQuantile, 1], ['WaveletTree.quantile[p31]', stepG9WtP31Quantile, 1],
+        ['ETT.setValue[frac]', stepG9EttFracSetValue, 1], ['ETT.setValue[p31]', stepG9EttP31SetValue, 1],
+        ['ETT.subtreeAggregate[frac]', stepG9EttFracSubtreeAgg, 1], ['ETT.componentAggregate[frac]', stepG9EttFracComponentAgg, 1]]) {
         const scav = await countG9(step);
         const budget = g9Budget(k);
         const red = scav > budget;
@@ -1401,6 +1503,7 @@ async function main() {
     if (wtacc === 0x7fffffff) throw new Error('unreachable'); // keep wtacc live
     if (ctacc === 0x7fffffff) throw new Error('unreachable'); // keep ctacc live
     if (lctacc === 0x7fffffff) throw new Error('unreachable'); // keep lctacc live
+    if (ettacc === 0x7fffffff) throw new Error('unreachable'); // keep ettacc live
     const allocOk = allocBytes === 0;
 
     // The control MUST be detected as allocating (teeth). If it reads 0, the
@@ -1588,6 +1691,17 @@ async function main() {
         if ((i & 15) === 0) sink = (sink + (lct.connected(i & MASK, (i * 2246822519) & MASK) ? 1 : 0)) | 0;
         if ((i & 31) === 0) lct.setValue(i & MASK, i & 0xffff);
         if ((i & 63) === 0) { const x = 1 + (i & (MASK >> 1)); const p = x >> 1; lct.evert(p); lct.cut(x); lct.link(x, p); }
+        // EulerTourTree churn every op: a wide subtreeAggregate (the gated expected-O(log n) range fold over
+        // a NON-mutating treap read), plus a componentAggregate every 4th, a componentSize every 8th, a
+        // connected every 16th, a setValue every 32nd, and -- the load-bearing DYNAMIC-FOREST lane -- a cut +
+        // re-link every 64th. link / cut flip EDGES only (arc free-list of indices), so the whole forest churn
+        // runs inside the GC window allocating zero RETAINED bytes and triggering no major collection.
+        { const v = 1 + (i & (MASK >> 1)); const p = v >> 1; sink = (sink + (ett.subtreeAggregate(v, p) | 0)) | 0; }
+        if ((i & 3) === 0) sink = (sink + (ett.componentAggregate(i & MASK) | 0)) | 0;
+        if ((i & 7) === 0) sink = (sink + (ett.componentSize(i & MASK) | 0)) | 0;
+        if ((i & 15) === 0) sink = (sink + (ett.connected(i & MASK, (i * 2246822519) & MASK) ? 1 : 0)) | 0;
+        if ((i & 31) === 0) ett.setValue(i & MASK, i & 0xffff);
+        if ((i & 63) === 0) { const x = 1 + (i & (MASK >> 1)); const p = x >> 1; ett.cut(x, p); ett.link(x, p); }
         if ((i & 8191) === 0) {
             gc.sampleHeap(performance.now(), process.memoryUsage().heapUsed);
         }
@@ -1639,6 +1753,13 @@ async function main() {
     const abLct = new LinkCutTree(1024, 'sum');
     for (let i = 0; i < 1024; i++) abLct.setValue(i, (i * 2654435761) & 0xffff);
     for (let i = 1; i < 1024; i++) abLct.link(i, i - 1);   // a chain 0-1-...-1023 (1023 edges)
+    // EulerTourTree is MUTABLE via link / cut but its node columns + arc table + scratch stack + arc free-list
+    // are FIXED at construction: link / cut flip EDGES only (the arc free-list hands out INDICES), so a full
+    // cut-then-re-link churn round reuses the SAME backing stores and arrayBuffers must not grow. Built ONCE
+    // here as a chain over [0, 1024); the soak churns its edges and asserts edge + arc-pool conservation.
+    const abEtt = new EulerTourTree(1024, 'sum');
+    for (let i = 0; i < 1024; i++) abEtt.setValue(i, (i * 2654435761) & 0xffff);
+    for (let i = 1; i < 1024; i++) abEtt.link(i, i - 1);   // a chain 0-1-...-1023 (1023 edges, 2046 arcs)
     // A reused two-heap arena for the conservation-ACROSS-MELD soak (one backing store, so
     // arrayBuffers stay flat). The donor is refreshed in place each round (white-box) so the
     // consumed-fails-closed contract does not force a fresh allocation per soak cycle.
@@ -1885,6 +2006,26 @@ async function main() {
             const a = abLct.pathAggregate(i & 1023, (i * 3 + 1) & 1023);
             if (!Number.isFinite(a)) conservationOk = false;
         }
+        // EulerTourTree: EDGE + ARC-POOL conservation across a dynamic-forest churn. A batch of cut-then-re-
+        // link rounds (cut the chain edge (x, x-1), re-link the same edge) flips edges IN PLACE -- so the edge
+        // count returns to the chain's 1023, the arc free-list balances (activeSlots + freeListLength ===
+        // capacity after every phase), and the backing stores never grow. A botched link/cut that leaked an
+        // arc slot or an edge (or reallocated a column) would break it here.
+        for (let i = 1; i < 512; i++) {
+            const x = i, p = i - 1;
+            abEtt.cut(x, p);
+            if (abEtt.edges !== 1022) conservationOk = false; // exactly one edge removed
+            if (abEtt._pool.activeSlots + abEtt._pool.freeListLength !== abEtt._pool.capacity) conservationOk = false;
+            abEtt.link(x, p);
+            if (abEtt.edges !== 1023) conservationOk = false; // and restored
+            if (abEtt._pool.activeSlots + abEtt._pool.freeListLength !== abEtt._pool.capacity) conservationOk = false;
+        }
+        if (abEtt.edges !== 1023) conservationOk = false;     // chain fully conserved after the churn round
+        if (abEtt.connected(0, 1023) !== true) conservationOk = false; // still one connected tree
+        for (let i = 1; i < 256; i++) {                       // read-only subtree folds never grow a column
+            const a = abEtt.subtreeAggregate(i, i - 1);
+            if (!Number.isFinite(a)) conservationOk = false;
+        }
     }
     globalThis.gc();
     const abAfter = process.memoryUsage().arrayBuffers;
@@ -1907,7 +2048,7 @@ async function main() {
         ' maxMs=' + s2.gc.maxMs.toFixed(2) +
         ' | alloc=' + allocBytes + ' B/op' +
         ' | ' + (ok ? 'ok' : 'FAIL') +
-        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree + LinkCutTree; control=' + controlBytes + ' B/op sink=' + sink +
+        ' (BinaryHeap + Fenwick + SegmentTree + SkipList + Treap + Scapegoat + MinMaxHeap + SplayTree + BinomialHeap + PairingHeap + FibonacciHeap + Fenwick2D + SegmentTree2D + SortedArray + PersistentSegTree + MergeSortTree + WaveletTree + CartesianTree + LinkCutTree + EulerTourTree; control=' + controlBytes + ' B/op sink=' + sink +
         ' abGrowth=' + abDelta + ' conservation=' + (conservationOk ? 'ok' : 'FAIL') + ')');
 
     // G9: frac / p31 value-fill lanes, MINOR-GC gated, S7k per-lane k budgets.

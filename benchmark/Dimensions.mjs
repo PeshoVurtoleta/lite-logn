@@ -22,7 +22,7 @@
  * and test/witness.mjs (repo-only) for the frozen D1 kernels/bands.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree, EulerTourTree } from '../LogN.js';
 import { MEMBERS as WITNESS_MEMBERS, fitLogLinear } from '../test/witness.mjs';
 import {
     prng, median, warm, gcNow, percentile, collect, DEFAULT_SEED,
@@ -466,6 +466,22 @@ function kLctPathAggregate(n) {
     return { obj: t, op: () => { SINK = (SINK + (t.pathAggregate((ru() >>> 1) % n) | 0)) | 0; } };
 }
 
+function kEttSubtreeAggregate(n) {
+    // A DYNAMIC UNROOTED forest of n vertices linked into ONE complete binary tree (each vertex k > 0 hangs
+    // under its parent (k-1)>>1 -> depth ~ log2 n), each vertex seeded a bounded Smi value. Each op folds v's
+    // side of edge (v, parent(v)) for a UNIFORM-RANDOM v -- a NON-mutating treap read (rank the two arc
+    // occurrences by parent climbs, then a top-down range fold). The index is `ru() >>> 1` (31-bit Smi) and a
+    // subtree holds <= n vertices with values & 0xff, so the fold stays a Smi and SINK stays a 32-bit Smi
+    // (`| 0`) -- no HeapNumber is created per op. A Euler-tour tree's representative steady op is this
+    // subtree-fold read (its gated D1 op-row).
+    const t = new EulerTourTree(n, 'sum');
+    const rng = prng(0x1234 ^ n);
+    for (let k = 0; k < n; k++) t.setValue(k, rng() & 0xff);
+    for (let k = 1; k < n; k++) t.link(k, (k - 1) >> 1);   // complete binary tree rooted at 0 (depth ~ log2 n)
+    const ru = prng(0x5A17 ^ n);
+    return { obj: t, op: () => { const v = 1 + ((ru() >>> 1) % (n - 1)); const p = (v - 1) >> 1; SINK = (SINK + (t.subtreeAggregate(v, p) | 0)) | 0; } };
+}
+
 /**
  * The steady alloc-free kernel for a gated op-row, or a throw for an unknown row.
  * @param {string} member
@@ -500,6 +516,7 @@ export function makeOpKernel(member, op, n) {
         case 'WaveletTree.quantile': return kWtQuantile(n);
         case 'CartesianTree.rangeMinIndex': return kCtRmq(n);
         case 'LinkCutTree.pathAggregate': return kLctPathAggregate(n);
+        case 'EulerTourTree.subtreeAggregate': return kEttSubtreeAggregate(n);
         default: throw new Error('[bench] unhandled op-row: ' + key);
     }
 }
@@ -531,6 +548,9 @@ export function makeSubject(member, n) {
     // LinkCutTree is DYNAMIC (link/cut/evert) but over a FIXED vertex set; its representative steady op is
     // the pathAggregate path-fold read (its only gated op-row) over a fixed balanced forest.
     if (member === 'LinkCutTree') return kLctPathAggregate(n);
+    // EulerTourTree is DYNAMIC (link/cut) over a FIXED vertex set; its representative steady op is the
+    // subtreeAggregate range-fold read (its only gated op-row) over a fixed complete-binary-tree forest.
+    if (member === 'EulerTourTree') return kEttSubtreeAggregate(n);
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -756,6 +776,16 @@ export function memberBytes(member, obj) {
             obj._l.buffer.byteLength + obj._r.buffer.byteLength + obj._p.buffer.byteLength +
             obj._rev.buffer.byteLength + obj._stk.buffer.byteLength;
     }
+    if (member === 'EulerTourTree') {
+        // 3V-1 node slots x (6 Uint32 columns + 2 Float64 columns) + the split/merge scratch + a power-of-two
+        // >= 4V arc table (2 Int32 key columns + 1 Uint32 slot column) + the private arc free-list -- the
+        // disclosed ~188-236 B/vertex footprint (D3 overheadRatio), the price of subtree folds + connectivity.
+        return obj._left.buffer.byteLength + obj._right.buffer.byteLength + obj._parent.buffer.byteLength +
+            obj._prio.buffer.byteLength + obj._size.buffer.byteLength + obj._vcnt.buffer.byteLength +
+            obj._val.buffer.byteLength + obj._agg.buffer.byteLength + obj._stk.buffer.byteLength +
+            obj._arcFrom.buffer.byteLength + obj._arcTo.buffer.byteLength + obj._arcSlot.buffer.byteLength +
+            obj._pool._free.buffer.byteLength;
+    }
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -792,6 +822,10 @@ export function theoreticalMinPerLive(member) {
     // The _agg column + three pointer columns + the reversal flag + the splay scratch are the DISCLOSED
     // space co-headline (a full LCT costs 8 columns), surfaced as D3's overheadRatio, never hidden.
     if (member === 'LinkCutTree') return 8;
+    // EulerTourTree stores the source as 8 B (one Float64 value) per vertex -- the minimum to hold the data.
+    // The 3V-1 node columns + the arc table + the scratch + the free-list are the DISCLOSED space co-headline
+    // (~188-236 B/vertex), surfaced as D3's overheadRatio, never hidden.
+    if (member === 'EulerTourTree') return 8;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -805,6 +839,7 @@ function liveCount(member, obj) {
     if (member === 'WaveletTree') return obj.length;                         // static: the n source elements are the live set
     if (member === 'CartesianTree') return obj.length;                       // static: the n source elements are the live set
     if (member === 'LinkCutTree') return obj.capacity;                       // fixed vertex set: every vertex is always live
+    if (member === 'EulerTourTree') return obj.capacity;                     // fixed vertex set: every vertex is always live
     return obj.size;
 }
 
@@ -844,6 +879,10 @@ function fillMember(member, obj, count) {
     // columns are preallocated at construction); the D3 footprint is measured on the constructed forest, so
     // "fill" is a no-op (every vertex already exists as a live slot).
     if (member === 'LinkCutTree') return;
+    // EulerTourTree has a FIXED vertex set and a footprint independent of the edge count (columns + arc table
+    // preallocated at construction); the D3 footprint is measured on the constructed forest, so "fill" is a
+    // no-op (every vertex already exists as a live slot).
+    if (member === 'EulerTourTree') return;
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -876,6 +915,7 @@ function clearContent(member, obj) {
     if (member === 'SegmentTree2D') return obj.query(0, 0, obj.rows - 1, obj.cols - 1); // fold of the whole grid
     if (member === 'PersistentSegTree') return obj.query(obj.versions - 1, 0, obj.length - 1); // fold of the HEAD version (0 once cleared to identity v0)
     if (member === 'LinkCutTree') return obj.edges; // dynamic forest: the live edge count (0 iff cleared to isolated singletons)
+    if (member === 'EulerTourTree') return obj.edges; // unrooted forest: the live edge count (0 iff cleared to isolated singletons)
     throw new Error('[bench] clearWitness: unhandled member ' + member);
 }
 
@@ -904,6 +944,14 @@ function clearWitnessRefill(member, obj, n) {
     if (member === 'LinkCutTree') {
         // Re-link the isolated singletons into a complete binary tree (each vertex k > 0 under (k-1)>>1),
         // restoring the fold-bearing forest; n-1 edges. Zero-alloc (link flips edges only).
+        const cap = obj.capacity;
+        for (let k = 0; k < cap; k++) obj.setValue(k, k & 0xffff);
+        for (let k = 1; k < cap; k++) obj.link(k, (k - 1) >> 1);
+        return cap - 1;
+    }
+    if (member === 'EulerTourTree') {
+        // Re-link the isolated singletons into a complete binary tree (each vertex k > 0 under (k-1)>>1),
+        // restoring the fold-bearing unrooted forest; n-1 edges. Zero-alloc (link flips edges / arc indices only).
         const cap = obj.capacity;
         for (let k = 0; k < cap; k++) obj.setValue(k, k & 0xffff);
         for (let k = 1; k < cap; k++) obj.link(k, (k - 1) >> 1);
@@ -976,6 +1024,7 @@ export function D3(member, opts = {}) {
     else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else if (member === 'CartesianTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new CartesianTree(vals, 'min'); } // static: built full at construction
     else if (member === 'LinkCutTree') obj = new LinkCutTree(n, 'sum'); // fixed vertex set: footprint independent of edges
+    else if (member === 'EulerTourTree') obj = new EulerTourTree(n, 'sum'); // fixed vertex set: footprint independent of edges
     else throw new Error('[bench] unhandled member: ' + member);
 
     gcNow();
@@ -1010,7 +1059,7 @@ export function D3(member, opts = {}) {
     // always live), so their curve is FLAT by design -- stated, not hidden.
     // MergeSortTree is positional + static: every source element is always live and its footprint is a
     // single fixed table, so its load-factor curve is FLAT by design too (like the index-addressed members).
-    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree' || member === 'WaveletTree' || member === 'CartesianTree' || member === 'LinkCutTree');
+    const indexAddressed = (member === 'Fenwick' || member === 'SegmentTree' || member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'PersistentSegTree' || member === 'MergeSortTree' || member === 'WaveletTree' || member === 'CartesianTree' || member === 'LinkCutTree' || member === 'EulerTourTree');
     const loadFactorCurve = [];
     for (const lf of (opts.loadFactors ?? [0.25, 0.5, 0.75, 1.0])) {
         const target = Math.max(1, Math.round(live * lf));
@@ -1107,6 +1156,17 @@ function denseIterNsPerElem(member, obj, reps) {
         const dtp = performance.now() - t0p;
         return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
     }
+    // EulerTourTree has no forEach (a forest, not a single timeline); its dense-iteration analogue is a full
+    // O(n) positional sweep of at(i) point reads (each an O(1) `_val` read). at returns a Smi so no box.
+    if (member === 'EulerTourTree') {
+        const L = obj.capacity, size0 = Math.max(1, L);
+        for (let i = 0; i < L; i++) acc = (acc + (obj.at(i) | 0)) | 0; // warm
+        const t0p = performance.now();
+        for (let r = 0; r < reps; r++) for (let i = 0; i < L; i++) acc = (acc + (obj.at(i) | 0)) | 0;
+        SINK += acc;
+        const dtp = performance.now() - t0p;
+        return dtp > 0 ? (dtp * 1e6) / (size0 * reps) : 1e-3;
+    }
     const cb = (x) => { acc = (acc + (x | 0)) | 0; };
     obj.forEach(cb); // warm
     const size = Math.max(1, liveCount(member, obj));
@@ -1159,6 +1219,8 @@ function randomLookupOp(member, obj, n, rng) {
     // LinkCutTree is index-addressed by vertex id: a random at(i) point read (its O(1) value read) is the
     // analogue. at returns a Smi so no HeapNumber is boxed.
     if (member === 'LinkCutTree') return () => { const i = rng() % n; SINK = (SINK + (obj.at(i) | 0)) | 0; };
+    // EulerTourTree is index-addressed by vertex id: a random at(i) point read (its O(1) value read) is the analogue.
+    if (member === 'EulerTourTree') return () => { const i = rng() % n; SINK = (SINK + (obj.at(i) | 0)) | 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1198,6 +1260,8 @@ function seqLookupOp(member, obj, n) {
     // LinkCutTree is index-addressed by vertex id: a sequential at(i) point read (row-major). at returns a
     // Smi so no HeapNumber is boxed.
     if (member === 'LinkCutTree') return () => { SINK = (SINK + (obj.at(i) | 0)) | 0; i++; if (i >= n) i = 0; };
+    // EulerTourTree is index-addressed by vertex id: a sequential at(i) point read (row-major).
+    if (member === 'EulerTourTree') return () => { SINK = (SINK + (obj.at(i) | 0)) | 0; i++; if (i >= n) i = 0; };
     throw new Error('[bench] unhandled member: ' + member);
 }
 
@@ -1242,6 +1306,7 @@ function buildFull(member, n) {
     else if (member === 'WaveletTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new WaveletTree(vals); } // static: built full at construction
     else if (member === 'CartesianTree') { const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = i & 0xffff; obj = new CartesianTree(vals, 'min'); } // static: built full at construction
     else if (member === 'LinkCutTree') { obj = new LinkCutTree(n, 'sum'); for (let k = 0; k < n; k++) obj.setValue(k, k & 0xffff); for (let k = 1; k < n; k++) obj.link(k, (k - 1) >> 1); } // dynamic forest: n vertices linked into a complete binary tree (depth ~log2 n)
+    else if (member === 'EulerTourTree') { obj = new EulerTourTree(n, 'sum'); for (let k = 0; k < n; k++) obj.setValue(k, k & 0xffff); for (let k = 1; k < n; k++) obj.link(k, (k - 1) >> 1); } // unrooted forest: n vertices linked into a complete binary tree (depth ~log2 n)
     else throw new Error('[bench] unhandled member: ' + member);
     return obj;
 }
@@ -1615,7 +1680,7 @@ export function traceHash(member, seed = DEFAULT_SEED, length = 100000) {
         member === 'Fenwick2D' || member === 'SegmentTree2D' || member === 'SortedArray' ||
         member === 'PersistentSegTree' || member === 'MergeSortTree' ||
         member === 'WaveletTree' || member === 'CartesianTree' ||
-        member === 'LinkCutTree') mode = 0;
+        member === 'LinkCutTree' || member === 'EulerTourTree') mode = 0;
     else throw new Error('[bench] unhandled member: ' + member);
 
     const rng = prng(seed);

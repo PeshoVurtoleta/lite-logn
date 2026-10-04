@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.4.1
+Version: 1.5.0
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
@@ -42,6 +42,12 @@ v1.3.0 adds LinkCutTree (the family's FIRST dynamic-topology structure: a Sleato
 maintaining a FOREST of rooted trees over a FIXED vertex set under link / cut / evert with AMORTIZED
 O(log n) PATH aggregates -- min / max / sum / gcd, frozen at construction -- via a preferred-path splay
 decomposition that flips EDGES only, so no op allocates).
+v1.5.0 adds EulerTourTree (the LinkCutTree sibling and the family's SUBTREE / dynamic-connectivity member:
+an UNROOTED forest over a FIXED vertex set under link / cut, answering connected, whole-COMPONENT folds, and
+SUBTREE folds -- v's side of edge (v, p) -- in EXPECTED O(log n) with ZERO allocation, by storing each tree's
+Euler tour as a parent-pointer TREAP so the reads are NON-mutating. LCT folds PATHS; ETT folds SUBTREES and
+COMPONENTS. LCT or ETT? Path fold / evert -> LinkCutTree; subtree or component fold, read-only connectivity
+-> EulerTourTree).
 The roster (one member per session, each landing append-only):
 
 - BinaryHeap (v0.1.0)  -- an INDEXED binary heap (addressable priority queue): a
@@ -388,8 +394,32 @@ The roster (one member per session, each landing append-only):
   endpoints are already connected, keeping the structure a FOREST); `cut` throws on a bad id or on cutting
   a root with no parent edge; `setValue` throws on a bad id, a non-finite value, or (gcd kind) a negative /
   non-integer value; `capacity` must be an integer in [1, LCT_MAX_CAPACITY] (2^31-1) and `kind` one of the
-  four folds. PATH-only: there is NO subtree aggregate (deferred to a future EulerTourTree) and NO forEach
+  four folds. PATH-only: there is NO subtree aggregate (answered by the shipped EulerTourTree, v1.5.0) and NO forEach
   / iterator. Zero allocation on every hot op.
+- EulerTourTree (v1.5.0) -- the LinkCutTree sibling (decisions/0021 D-LCT6 defers subtree folds to it) and the
+  family's SUBTREE / dynamic-connectivity member. Over a FIXED vertex set `[0, capacity)` it keeps an UNROOTED
+  forest under `link(u, v)` / `cut(u, v)`, answering `connected(u, v)`, whole-COMPONENT folds, and SUBTREE folds
+  ("v's side of edge (v, p)") in EXPECTED O(log n) with ZERO allocation. The trick (Henzinger-King): store each
+  tree's EULER TOUR -- every edge walked both ways -- as a balanced-BST SEQUENCE (one VERTEX node per vertex
+  carrying its value; two ARC nodes per edge carrying the identity). `link` splices two tours; `cut` splits a
+  tour at the two arc occurrences; a SUBTREE is one contiguous tour segment, so a subtree fold is a RANGE fold.
+  The backing BST is a parent-pointer TREAP (seeded instance-local LCG, the Treap one), so split / merge keep
+  EXPECTED O(log n) depth and `connected` / the folds are NON-mutating reads (no splay, unlike LCT's mutating
+  reads) -- the cost is EXPECTED, as the family already discloses for SkipList / Treap. `cut` / `hasEdge` address
+  edges by endpoints through a private open-addressed arc table (linear probing, BACKWARD-SHIFT delete, no
+  tombstones). The fold `kind` (`'min'` | `'max'` | `'sum'` | `'gcd'`) is frozen at construction with per-kind
+  `_pull` stores (no tagged phi) + an ALWAYS-ON vertex-count column (component / subtree SIZE for free). An unset
+  vertex reads the fold IDENTITY (never 0); the sum kind bounds `|value| <= MAX_VALUE / (2 * capacity)`. Split /
+  merge / rank / range-fold are ITERATIVE over preallocated `_stk` scratch (a 2^20 path does not RangeError). It
+  sits on the DEFAULT log2(n) witness axis: witness op = `subtreeAggregate` via a lane-scoped median-of-9 fit
+  (the frozen 0.958 floor; slope band [55.16, 128.71] = median-of-15 warm fits 91.936 ns/level x [0.6, 1.4]), with an O(component) adjacency-DFS foil OFF-line. EXPECTED: the witness prints the MAX single link +
+  cut as a disclosure, never gated. S7: the double-returning folds (`subtreeAggregate` / `componentAggregate` /
+  `at`) box <= 1 HeapNumber per call when NOT inlined; the k=0 ops (link / cut / connected / componentSize /
+  subtreeSize / hasEdge / setValue int) never box. Fail closed: `link` throws (no-op) on a bad id, a self-link,
+  or a CYCLE-creating link; `cut` / `subtreeAggregate` / `subtreeSize` throw on a `(u, v)` / `(v, p)` that is not
+  an edge; `setValue` throws on a bad id, a non-finite value, (gcd) a negative / non-integer, or (sum) an
+  over-bound magnitude; `capacity` an integer in [1, ETT_MAX_CAPACITY] (2^28). NO path fold and NO evert
+  (LinkCutTree's job); NO forEach / iterator. Zero allocation on every hot op.
 
 ## Exports (from the single main file LogN.js)
 
@@ -918,7 +948,7 @@ The roster (one member per session, each landing append-only):
   allocation. `link` / `cut` / `evert` flip EDGES only over eight flat columns, so no op allocates (no
   free-list, no bump allocator). The fold `kind` is frozen at build; because the folds are COMMUTATIVE,
   `evert` (makeRoot) is aggregate-invariant (a lazy `_rev` bit). There is NO static `LinkCutTree.build`
-  factory. PATH-only (subtree folds deferred to a future EulerTourTree); NO forEach / iterator.
+  factory. PATH-only (subtree folds deferred to the shipped EulerTourTree (v1.5.0)); NO forEach / iterator.
   - `new LinkCutTree(capacity, kind = 'min')` -- capacity the exact vertex count, an integer in
     [1, LCT_MAX_CAPACITY] (2^31-1); vertex ids are [0, capacity). kind exactly `'min'` | `'max'` | `'sum'`
     | `'gcd'` (frozen at construction). All vertices start as isolated singletons at the fold identity. O(n).
@@ -948,6 +978,46 @@ The roster (one member per session, each landing append-only):
   - `capacity` getter -> the fixed vertex count (there is NO length / size getter -- the vertex count IS
     capacity); `kind` getter -> `'min'` | `'max'` | `'sum'` | `'gcd'` (the frozen path fold); `edges`
     getter -> the number of edges currently in the forest (link increments, cut decrements). All O(1).
+- `ETT_MAX_CAPACITY` -- number. `0x10000000` (2^28), the EulerTourTree vertex-count ceiling: the 3V-1 node
+  slots, the power-of-two (>= 4V) arc table, and every typed-array length stay < 2^31. A FLOAT-product guard in
+  the constructor (never `| 0`) is the real gate.
+- `EulerTourTree` -- class. The LinkCutTree sibling and the family's SUBTREE / dynamic-connectivity member: an
+  UNROOTED forest over a FIXED vertex set `[0, capacity)` under `link` / `cut`, answering `connected`, COMPONENT
+  folds, and SUBTREE folds in EXPECTED O(log n) with ZERO allocation, via each tree's Euler tour held in a
+  parent-pointer TREAP (NON-mutating reads). The fold `kind` is frozen at build (per-kind stores, no tagged phi,
+  + an always-on vertex-count column). NO path fold, NO evert (LinkCutTree's job); NO forEach / iterator. LCT or
+  ETT? Path fold / evert -> LinkCutTree; subtree or component fold, read-only connectivity -> EulerTourTree.
+  - `new EulerTourTree(capacity, kind = 'min')` -- capacity the exact vertex count, an integer in
+    [1, ETT_MAX_CAPACITY] (2^28); vertex ids are [0, capacity). kind exactly `'min'` | `'max'` | `'sum'` |
+    `'gcd'` (frozen). All vertices start as isolated singletons at the fold identity. O(n). Throws on a bad
+    capacity or kind.
+  - `link(u, v)` -> this. Add the edge (u, v) to the unrooted forest. Expected O(log n), 0 B/op. Throws (no-op)
+    on a bad id, a self-link, or a CYCLE-creating link (u and v already connected).
+  - `cut(u, v)` -> this. Remove the edge (u, v). Expected O(log n), 0 B/op. Throws (no-op) on a bad id or a
+    `(u, v)` that is NOT an edge.
+  - `setValue(v, x)` -> this. Set vertex v's value to x (ABSOLUTE), then fix the aggregate up the ancestor
+    chain. Expected O(log n), 0 B/op. Throws (no-op) on a bad id, a non-finite value, (gcd) a negative /
+    non-integer, or (sum) a magnitude over MAX_VALUE / (2 * capacity).
+  - `at(v)` -> number. Vertex v's stored value (the fold identity if unset). O(1), NON-mutating, 0 B/op (<= 1
+    S7 box when not inlined). A bad id throws.
+  - `connected(u, v)` -> boolean. True iff u and v are in the SAME component. Expected O(log n), NON-mutating
+    (two parent climbs, no restructuring), 0 B/op. A bad id throws.
+  - `componentAggregate(v)` -> number. The fold over EVERY vertex in v's component. Expected O(log n), NON-
+    mutating, <= 1 S7 box when not inlined. A bad id throws.
+  - `componentSize(v)` -> number. The vertex count of v's component. Expected O(log n), NON-mutating, 0 B/op.
+    A bad id throws.
+  - `subtreeAggregate(v, p)` -> number. The fold over v's side of edge (v, p) (the subtree hanging off v when
+    (v, p) is cut). The gated witness op. Expected O(log n), NON-mutating, <= 1 S7 box when not inlined. Throws
+    on a bad id or a `(v, p)` that is NOT an edge.
+  - `subtreeSize(v, p)` -> number. The vertex count on v's side of edge (v, p). Expected O(log n), NON-mutating,
+    0 B/op. Throws on a bad id or a non-edge.
+  - `hasEdge(u, v)` -> boolean. True iff edge (u, v) is in the forest. O(1) expected (one arc-table probe), NON-
+    mutating, 0 B/op. A bad id throws.
+  - `clear()` -> this. Reset the forest to isolated singleton vertices (edges dropped, values + aggregates back
+    to the fold identity, arc table emptied, LCG reseeded, edge count 0). O(n), buffers reset in place (zero-
+    alloc), instance reusable.
+  - `capacity` getter -> the fixed vertex count; `kind` getter -> `'min'` | `'max'` | `'sum'` | `'gcd'`;
+    `edges` getter -> the number of edges currently in the forest. All O(1).
 
 Member exports (one tree-shakeable class each) are appended here as each member
 ships.

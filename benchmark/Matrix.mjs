@@ -23,10 +23,10 @@
 /** Sentinel for a cell that does not apply. NEVER 0. */
 export const NA = 'n/a';
 
-/** The nineteen shipped members, in build order. */
-export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree', 'CartesianTree', 'LinkCutTree'];
+/** The twenty shipped members, in build order. */
+export const SUBJECTS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'MergeSortTree', 'WaveletTree', 'CartesianTree', 'LinkCutTree', 'EulerTourTree'];
 
-/** The twenty-four gated D1 witness op-rows (member.op), in build order. */
+/** The twenty-five gated D1 witness op-rows (member.op), in build order. */
 export const OP_ROWS = [
     'BinaryHeap.pop',
     'Fenwick.update', 'Fenwick.prefix',
@@ -47,6 +47,7 @@ export const OP_ROWS = [
     'WaveletTree.quantile',
     'CartesianTree.rangeMinIndex',
     'LinkCutTree.pathAggregate',
+    'EulerTourTree.subtreeAggregate',
 ];
 
 /** The eight measurement dimensions. */
@@ -85,6 +86,7 @@ export const BASELINE = {
     WaveletTree: 'linear-kth-sort',
     CartesianTree: 'linear-scan',
     LinkCutTree: 'linear-parent-walk',
+    EulerTourTree: 'adjacency-dfs-subtree',
 };
 
 /**
@@ -155,6 +157,10 @@ export const COUNTER_FOIL = {
     // answer "the fold over the path between two vertices in a changing forest" at all, so there is no
     // "faster but order-blind" O(1) rival -- NA (the string, never 0).
     LinkCutTree: NA,
+    // EulerTourTree is a DYNAMIC UNROOTED forest for subtree / component folds + connectivity under link/cut,
+    // not an ordered map; a Map cannot answer "the fold over a subtree of a changing forest" or "are these two
+    // vertices connected" at all, so there is no "faster but order-blind" O(1) rival -- NA (the string, never 0).
+    EulerTourTree: NA,
 };
 
 /**
@@ -310,6 +316,15 @@ export const RATIONALE = {
             'cut / evert / path-fold on a DYNAMIC forest whose topology changes; a Map cannot answer a path ' +
             'fold between two vertices of a changing forest at all, so there is no order-blind O(1) counter-foil.',
     },
+    EulerTourTree: {
+        verdict: 'FAIR-ALREADY', counter: NA,
+        why: 'a naive O(component) DFS over an adjacency list, folding v\'s side of the cut edge, is the honest ' +
+            'default before the Euler-tour trick -- the rival that motivates the EXPECTED O(log n) ' +
+            'subtreeAggregate over a balanced-BST tour sequence. The Euler-tour tree buys O(log n) link / cut / ' +
+            'connected / subtree + component folds on a DYNAMIC UNROOTED forest whose topology changes, with ' +
+            'NON-mutating reads; a Map cannot answer a subtree fold (or connectivity) over a changing forest at ' +
+            'all, so there is no order-blind O(1) counter-foil.',
+    },
 };
 
 /**
@@ -360,7 +375,7 @@ export function supportsWorkload(member, workload) {
 /**
  * Every (member, dimension, baseline) cell the orchestrator runs -- one child
  * process per cell (clean GC/JIT state). The matrix is exactly SUBJECTS x DIMENSIONS
- * (19 x 8 = 152 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
+ * (20 x 8 = 160 cells). The counter-foil is an EXTRA comparison carried INSIDE the D1
  * cell (as counterFoil), NOT a new dimension and NOT a separate cell.
  * @returns {{member:string, dim:string, baseline:string, counterFoil:string}[]}
  */
@@ -514,6 +529,14 @@ export const OP_CLASS = Object.freeze({
     // Pairing / Fibonacci amortized precedent). link / cut / evert are the same amortized class but are NOT the
     // gated D1 row, so they are not in this table. at / capacity / kind / edges are O(1) getters -> not listed.
     'LinkCutTree.pathAggregate': OLOGN_AMORTIZED, // access (splay the root-to-u path) + read the cached aggregate (the gated row)
+    // EulerTourTree: subtreeAggregate ranks the two arc occurrences by NON-mutating parent climbs and folds the
+    // tour segment between them (or its complement). The backing BST is a randomized TREAP, so the climb + fold
+    // depth is O(log n) EXPECTED (a cold deep treap spine is a DISCLOSED MAX-single-link/cut tail, never gated) --
+    // the same honesty class as SkipList / Treap, NEVER worst-case (no hard height bound) and NEVER amortized
+    // (no splay / rebuild: reads do not restructure). link / cut / connected / componentAggregate / componentSize /
+    // subtreeSize are the same expected class but are NOT the gated D1 row, so they are not in this table. at /
+    // capacity / kind / edges are O(1) getters -> not listed.
+    'EulerTourTree.subtreeAggregate': OLOGN_EXPECTED, // rank the arc pair (parent climbs) + a top-down range fold (the gated row)
 });
 
 // ===========================================================================
@@ -540,7 +563,7 @@ export const OP_CLASS = Object.freeze({
 // ===========================================================================
 
 /** The members whose clear()+reuse cycle is an elevated first-class witness (= the mutable SUBJECTS). */
-export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'LinkCutTree'];
+export const CLEAR_WITNESS = ['BinaryHeap', 'Fenwick', 'SegmentTree', 'SkipList', 'Treap', 'Scapegoat', 'MinMaxHeap', 'SplayTree', 'BinomialHeap', 'PairingHeap', 'FibonacciHeap', 'Fenwick2D', 'SegmentTree2D', 'SortedArray', 'PersistentSegTree', 'LinkCutTree', 'EulerTourTree'];
 
 /**
  * Everything EXCLUDED from CLEAR_WITNESS, each with a short honest reason. MergeSortTree is

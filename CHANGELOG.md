@@ -4,15 +4,70 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-04
+
+The twentieth member: **EulerTourTree**, the LinkCutTree sibling (decisions/0021 D-LCT6 defers subtree
+folds to it). It keeps an UNROOTED forest over a FIXED vertex set under `link` / `cut` and answers
+`connected`, whole-COMPONENT folds, and SUBTREE folds in EXPECTED O(log n) with ZERO allocation, via each
+tree's Euler tour held in a parent-pointer treap (NON-mutating reads). LCT folds PATHS; ETT folds SUBTREES
+and COMPONENTS -- together the dynamic-forest pair. Prior members stay byte-identical.
+
+### Added
+
+- **EulerTourTree** -- the twentieth member and the family's SUBTREE / dynamic-connectivity structure. A
+  Henzinger-King Euler-tour tree over a parent-pointer TREAP (seeded instance-local LCG, the Treap one):
+  one VERTEX node per vertex (carries the value), two ARC nodes per edge (carry the identity), the tour
+  stored as a balanced-BST sequence so `link` splices two tours, `cut` splits a tour at the two arc
+  occurrences, and a SUBTREE is one contiguous tour segment (a subtree fold is a RANGE fold). Surface:
+  `link(u, v)` / `cut(u, v)` / `setValue(v, x)` / `at(v)` / `connected(u, v)` / `componentAggregate(v)` /
+  `componentSize(v)` / `subtreeAggregate(v, p)` / `subtreeSize(v, p)` / `hasEdge(u, v)` / `clear()`, plus
+  `capacity` / `kind` / `edges` getters. The fold `kind` (`min` / `max` / `sum` / `gcd`) is frozen at
+  construction with per-kind `_pull` stores (no tagged phi) + an always-on vertex-count column (component /
+  subtree SIZE for free). Reads are NON-mutating (parent climbs + top-down range folds, no splay), so the
+  cost is EXPECTED rather than amortized (as the family already discloses for SkipList / Treap). Edges are
+  addressed by endpoints through a private open-addressed arc table (linear probing, BACKWARD-SHIFT delete,
+  no tombstones). Split / merge / rank / range-fold are ITERATIVE over preallocated `_stk` scratch (a 2^20
+  path does not RangeError). An unset vertex reads the fold IDENTITY (never 0); the sum kind bounds
+  `|value| <= MAX_VALUE / (2 * capacity)`. NO path fold and NO evert (LinkCutTree's job); NO forEach /
+  iterator. Footprint ~188-236 B/vertex. Witness op = `subtreeAggregate` on the DEFAULT log2(n) axis
+  (median-of-9 fit, shared 0.958 R^2 floor; slope band `[55.16, 128.71]` = median-of-15 warm
+  post-torture fits 91.936 ns/level x [0.6, 1.4], R^2 0.975-0.993, sweep 2^9..2^17); an O(component)
+  adjacency-DFS foil leaves the line (R^2 ~0.78); the MAX single link + cut are DISCLOSED, never gated. Zero allocation on every hot op (the double-returning folds box <= 1 HeapNumber
+  per call when not inlined, the documented S7 boundary).
+- **`ETT_MAX_CAPACITY`** -- `0x10000000` (2^28), the vertex-count ceiling: the 3V-1 node slots, the
+  power-of-two (>= 4V) arc table, and every typed-array length stay < 2^31. A FLOAT-product guard in the
+  constructor (never `| 0`) is the real gate.
+
+### Changed
+
+- **LinkCutTree docs point at the shipped sibling.** The "subtree folds deferred to a future EulerTourTree"
+  wording (README / llms.txt / GUIDE / decisions/0021 / `LogN.js` JSDoc) now names the shipped member, with
+  a two-line "LCT or ETT?" chooser (path fold / evert -> LinkCutTree; subtree or component fold, read-only
+  connectivity -> EulerTourTree).
 
 ### Fixed
+
 - Witness: SegmentTree.update R^2 flake (median-of-9 fit 0.949, retry 0.944 < 0.958 in the 1.4.1
   release gate; slope 0.739 in band). The update lane's sweep is widened from 2^10..2^16 to
   2^4..2^16, which doubles the log2(n) span on a ~0.7 ns/level line. Measured single-fit R^2 rose
   from 0.890-0.990 to 0.974-0.995, slope 0.62-0.74. The floor, the [0.43, 1.00] band and the foil
   are unchanged. Test-only, so no module change.
 - GUIDE: the SegmentTree.update band read `[2.29, 5.35]` (pre-1.4.0); it now reads `[0.43, 1.00]`.
+- README D5 table: every row still showed the 1.3.0 all-member bundle (18,603 B gzip) and ratios. It now
+  shows the measured 20-member values (all-member 23,948 B; ratios 0.046 MergeSortTree .. 0.134
+  EulerTourTree, all < 0.40).
+- README: the DEFERRED-map sentence said lanes are "deferred to 1.4.1"; the map has been empty since 1.4.1.
+
+### Testing
+
+- EulerTourTree contract + boundary + fuzz vs a BFS/adjacency oracle (4 kinds x int/frac, >= 80k ops, 0
+  mismatches) + an LCT cross-oracle (connected agrees on an 80k link/cut stream) + non-mutating-read
+  snapshots + a 2^20 path (no RangeError) + 1e6-op arc-table churn (max probe 18) + `clear()` after
+  churn byte-identical to a fresh instance (columns, arc table, pool, PRNG).
+- Gates extended to the twentieth member: torture ETT lanes (retention + hot reads + the G9 scavenge
+  kinds lanes, all hard GREEN) + the witness `subtreeAggregate` lane + the perf-gate Kinds / noinline `ett`
+  group (9 lanes) + benchmark Matrix / Dimensions cells (D7 insertion-order `n/a`, D8 a dynamic-forest
+  trace next to LCT). QaAudit is a 20-class surface with the ETT no-path-fold / no-evert assertion.
 
 ## [1.4.1] - 2026-10-03
 

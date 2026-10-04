@@ -387,13 +387,15 @@ test('BOUNDARY: every entry names a registered lane', () => {
     const ids = new Set(LANES.map((l) => l.id));
     for (const id of BOUNDARY) assert.ok(ids.has(id), 'BOUNDARY entry ' + id + ' has no lane');
 });
-test('shard registry: kinds = 675 cells, noinline = 564 cells, every shard > 0', () => {
+test('shard registry: kinds = 729 cells, noinline = 609 cells, every shard > 0', () => {
     // 1.4.0 added 5 new-API lanes (setFrom x2, search, quantileInto, rebuildFrom): +36 kinds cells    // (5 kinds x each group shard + 1 p30 each) and +25 noinline cells, over the 1.3.0 639 / 534 (setFrom x2, search, searchFrom, quantileInto, rebuildFrom).
+    // 1.5.0 added the EulerTourTree group (9 lanes): +45 kinds cells (ett shard) + 9 p30 cells = +54 kinds,
+    // and +45 noinline cells (ni-ett shard), over 1.4.x's 675 / 564.
     let a = 0, b = 0;
     for (const s of SHARDS_KINDS) { const n = expectedCells(s); assert.ok(n > 0, s); a += n; }
     for (const s of SHARDS_NOINLINE) { const n = expectedCells(s); assert.ok(n > 0, s); b += n; }
-    assert.equal(a, 675);
-    assert.equal(b, 564);
+    assert.equal(a, 729);
+    assert.equal(b, 609);
     for (const s of SHARDS_NOINLINE) assert.ok(SHARDS[s].flags.indexOf(NOINL) !== -1, s);
     for (const s of SHARDS_KINDS.concat(SHARDS_NOINLINE)) {
         for (const f of PIN) assert.ok(SHARDS[s].flags.indexOf(f) !== -1, s + ' ' + f);

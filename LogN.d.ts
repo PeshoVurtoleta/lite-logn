@@ -917,3 +917,58 @@ export class LinkCutTree {
      *  reset in place), so the instance is immediately reusable. */
     clear(): this;
 }
+
+/** EulerTourTree capacity ceiling: `0x10000000` (2^28). Keeps `3V - 1` node slots, the power-of-two
+ *  arc table (>= 4V entries) and every backing typed-array length < 2^31 (a float-product guard, never `| 0`). */
+export const ETT_MAX_CAPACITY: number;
+
+export class EulerTourTree {
+    /** An UNROOTED dynamic FOREST over a FIXED vertex set `[0, capacity)`, maintained under `link(u, v)` /
+     *  `cut(u, v)`. The LinkCutTree sibling: LCT folds PATHS in a rooted forest, ETT folds SUBTREES and whole
+     *  COMPONENTS in an unrooted one and answers `connected` as a NON-mutating read. Expected O(log n), zero
+     *  allocation. Backed by a Henzinger-King Euler tour over a treap with parent pointers. The fold `kind` is
+     *  frozen at construction. `capacity` non-integer or outside `[1, 2^28]`, or a bad `kind`, throws.
+     *  @param capacity exact vertex count; vertex ids are `[0, capacity)`
+     *  @param kind the frozen associative + commutative fold; default `'min'` */
+    constructor(capacity: number, kind?: 'min' | 'max' | 'sum' | 'gcd');
+
+    /** The fixed vertex count (capacity) this forest was sized for. */
+    readonly capacity: number;
+    /** The frozen fold: `'min'` | `'max'` | `'sum'` | `'gcd'` (frozen at construction). */
+    readonly kind: 'min' | 'max' | 'sum' | 'gcd';
+    /** The number of edges currently in the forest (link increments, cut decrements). */
+    readonly edges: number;
+
+    /** Add the edge `(u, v)` to the unrooted forest. Expected O(log n), 0 B/op. Throws `[lite-logn]` as a
+     *  no-op on a bad vertex id, a self-link, or a CYCLE-creating link (the two vertices are already connected). */
+    link(u: number, v: number): this;
+    /** Remove the edge `(u, v)`. Expected O(log n), 0 B/op. Throws `[lite-logn]` as a no-op on a bad vertex id
+     *  or a `(u, v)` that is NOT an edge of the forest. */
+    cut(u: number, v: number): this;
+    /** Set vertex `v`'s value to `x` (ABSOLUTE), then fix the aggregate up its ancestor chain. Expected
+     *  O(log n), 0 B/op on an integer value (<= 1 box/op on a fractional value when not inlined: the argument).
+     *  Throws `[lite-logn]` as a no-op on a bad id, a non-finite value, or (gcd kind) a negative / non-integer value. */
+    setValue(v: number, x: number): this;
+    /** Vertex `v`'s stored value (the fold identity if unset). O(1), NON-mutating. A bad id throws. */
+    at(v: number): number;
+    /** True iff `u` and `v` are in the SAME component. Expected O(log n) NON-mutating read. A bad id throws. */
+    connected(u: number, v: number): boolean;
+    /** The fold over EVERY vertex in `v`'s component. Expected O(log n) NON-mutating read; returns a double
+     *  (<= 1 box/op when not inlined). A bad id throws. */
+    componentAggregate(v: number): number;
+    /** The number of vertices in `v`'s component. Expected O(log n) NON-mutating read, 0 B/op. A bad id throws. */
+    componentSize(v: number): number;
+    /** The fold over v's side of edge `(v, p)` -- the subtree hanging off `v` when `(v, p)` is removed.
+     *  Expected O(log n) NON-mutating read; returns a double (<= 1 box/op when not inlined). Throws
+     *  `[lite-logn]` on a bad vertex id or a `(v, p)` that is NOT an edge. */
+    subtreeAggregate(v: number, p: number): number;
+    /** The number of vertices on v's side of edge `(v, p)`. Expected O(log n) NON-mutating read, 0 B/op.
+     *  Throws `[lite-logn]` on a bad vertex id or a `(v, p)` that is NOT an edge. */
+    subtreeSize(v: number, p: number): number;
+    /** True iff edge `(u, v)` is in the forest. O(1) expected NON-mutating read. A bad vertex id throws. */
+    hasEdge(u: number, v: number): boolean;
+    /** Reset the forest to isolated singleton vertices (edges dropped, values + aggregates back to the fold
+     *  identity, edge count 0) -- the pristine state of a fresh instance. O(n), zero allocation (buffers
+     *  reset in place), so the instance is immediately reusable. */
+    clear(): this;
+}

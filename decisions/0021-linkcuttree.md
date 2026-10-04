@@ -5,7 +5,7 @@
   link-cut tree WITH evert over a strictly-rooted variant, a commutative-fold aggregate that is
   reversal-INVARIANT (no mirrored aggregate), a FIXED vertex set with NO allocator (link / cut flip edges
   only), the min / max / sum / gcd path folds frozen at ctor, a PATH-only surface with subtree aggregates
-  deferred to a future EulerTourTree, and the amortized pathAggregate witness lane on the DEFAULT
+  deferred to the shipped EulerTourTree (v1.5.0), and the amortized pathAggregate witness lane on the DEFAULT
   single-log log2(n) axis with a DISCLOSED-not-gated max single-op bar)
 - Date: 2026-09-24
 - Session: LinkCutTree (v1.3.0)
@@ -78,9 +78,9 @@ the instance is immediately reusable -- LinkCutTree is a MUTABLE member and take
 
 **D-LCT6 PATH-only; NO subtree aggregate (the documented sibling asymmetry).** LinkCutTree answers PATH
 queries. Subtree aggregates and unrooted dynamic-connectivity-with-subtree-folds are deliberately NOT
-here -- they are the job of a future EulerTourTree (an Euler tour held in a balanced BST), the planned
+here -- they are the job of the shipped EulerTourTree (v1.5.0) (an Euler tour held in a balanced BST), the planned
 dynamic-forest sibling. Naming the boundary is the honesty discipline: reach for LinkCutTree for path
-folds under link / cut; reach for the future EulerTourTree for subtree folds. `findRoot` / `connected`
+folds under link / cut; reach for the shipped EulerTourTree for subtree folds. `findRoot` / `connected`
 are the connectivity surface offered here (cheap by-products of `access`).
 
 **D-LCT7 fail closed on every unverified state; reads that splay validate FIRST; witness = pathAggregate
@@ -140,7 +140,7 @@ which is O(n) on a deep chain) is linear on the log2(n) axis and MUST miss the f
   is what keeps evert and pathAggregate lean and 0 B/op. The four admitted folds (min / max / sum / gcd)
   are all commutative and match the family's other fold members.
 - **A subtree aggregate on LinkCutTree.** Rejected / DEFERRED (D-LCT6): subtree folds are the job of a
-  future EulerTourTree (Euler tour in a balanced BST). Folding both path and subtree into one member would
+  the shipped EulerTourTree (Euler tour in a balanced BST, v1.5.0). Folding both path and subtree into one member would
   blur the teaching boundary and the surface; the two are documented siblings.
 - **A free-list NodePool or a bump allocator.** Rejected (D-LCT5): the vertex set is FIXED and link / cut
   flip edges only -- no node is ever allocated or freed per op, so neither the SkipList / Treap free-list

@@ -11,8 +11,9 @@
 > lite-hud M5 (Fenwick / SegmentTree / WaveletTree) pins the hardened release.
 > Reproduced independently the same day (section 8.1). F1-F11 and F13 hold. F12 (the perf-gate
 > flake) did not reproduce. Next-session run order: section 8.2. The accepted 1.4.0 brief is section 8.3, RE-PRIORITIZED in 8.4 (consumers first).
-> **1.4.0 SHIPPED (c25188b). NEXT: 1.4.1 (section 8.5) -- close H1.** THEN: **EulerTourTree -- v1.5.0** (section 9; research in RESEARCH.md section 13). It depends on
-> 1.4.0's gates.
+> **1.4.0 SHIPPED (c25188b). 1.4.1 SHIPPED (b45ac49) -- H1 closed, DEFERRED empty.**
+> **NEXT: EulerTourTree -- v1.5.0** (section 9; the execution plan is 9.0; research in RESEARCH.md section 13).
+> THEN: the demo (its own session).
 
 Seven full BRIEF sessions plus a queued Tier 2/3/4 reserve, all for one package:
 `@zakkster/lite-logn`, the zero-GC O(log n) data-structure family (folder
@@ -1473,6 +1474,53 @@ PST ctor arity (T5), and new tagged throws (T6, T7).
 Research notes: RESEARCH.md section 13. Integration surface = the 16 files the 1.3.0 LinkCutTree commit
 touched, plus the cross-member items at the end of this brief.
 
+### 9.0 Session plan (written 2026-10-03, after 1.4.1 shipped at b45ac49)
+
+**State going in.** H1 is closed. The DEFERRED lists are empty. verify is green twice. Committed at
+7e78d09: the SegmentTree.update witness sweep is widened to 2^4..2^16 (the 1.4.1 release-gate flake;
+decisions/0004 "Post-1.4.1"), plus a GUIDE band fix. The fix is test/doc-only and nothing in it
+ships (GUIDE and test/ are not in `files[]`). Its CHANGELOG `[Unreleased]` entry folds into 1.5.0.
+
+**What 1.4.x settled, so the brief's open references are now concrete:**
+- D-ETT4 unset vertex = the fold identity (min +Inf, max -Inf, sum / gcd 0), the same as LCT
+  since 1.4.1. The sum bound is `|v| <= MAX_VALUE / (2 * capacity)` at setValue. A component holds
+  <= capacity vertices, and arc nodes carry the identity, so they add nothing to the sum.
+- S7k box policy: the folds return a double (k=1 when not inlined); link / cut / connected / sizes
+  are k=0. Use slot-form internals from day one (the `_dkey` / `_acc` pattern), so the kinds lanes
+  are green on the first run and no DEFERRED entry is ever needed.
+- Iterator stamps: N/A (ETT has no iterator, per D-ETT6).
+- The cross-member line numbers in the brief (README 1066/1112, llms 391/882, GUIDE 1031) are
+  stale. Locate them with `git grep -n "EulerTourTree"`.
+
+**Settle calls.** D-ETT1..8 take their LEANS (treap + parent pointers, Henzinger-King, an
+endpoint-addressed arc table with backward-shift delete, per-kind folds + a count column, the
+complement fold for subtrees, the surface as listed, the subtreeAggregate witness, the float-guarded
+capacity). **SETTLED 2026-10-03** (maintainer: "Go for 1.5.0"). Binding for every agent.
+
+**Process (the 8.5 cost rules, unchanged):**
+- **Run 1 -- coder A: the member + correctness.** EulerTourTree + ETT_MAX_CAPACITY appended to
+  LogN.js, LogN.d.ts + test/types, test/EulerTourTree.test.mjs (contract, fuzz vs the BFS oracle,
+  LCT cross-oracle, non-mutating-read snapshots, boundary doors, the 2^20 path, arc-table churn).
+  Exit: npm test green; a scratch 0 B/op check on link / cut / connected / sizes.
+- **Run 2 -- ONE reviewer pass** on run 1. Its focus: wrong results, recursion, hot-path allocation,
+  fail-open doors, and tagged phis in the folds. A re-loop to coder A happens ONLY for wrong
+  behaviour, a crash / hang, a hot-path allocation, or a false doc claim.
+- **Run 3 -- coder B: gates + docs.** torture lanes + G9 kinds lanes, perf Kinds / noinline / p30
+  lanes, bench Matrix / Dimensions cells (D7 `n/a`, D8 next to LCT), the witness lane with a
+  PROVISIONAL band (the main session calibrates it), QaAudit (20 classes; the ETT no-path-fold
+  assertion), decisions/0022, README / llms / GUIDE / CHANGELOG / package.json, and the LCT
+  cross-member docs + the "LCT or ETT?" chooser. No witness loops in a subagent.
+- **Main session:** calibrate the subtreeAggregate band (median of 15 warm post-torture fit runs
+  x [0.6, 1.4], ONE background script), run verify twice green, revert-check the new gates, then
+  `/release 1.5.0` and `/sync-card lite-logn`.
+
+**Budget guard.** If run 1 is not green after one re-loop, STOP and report to the maintainer with
+the failing assertion. Do not start a third coder round on your own.
+
+**Witness note (from the 1.4.1 flake).** A fast lane needs dynamic range, not more iterations. Pick
+the subtreeAggregate sweep so the log2(n) span is >= 8 levels from the start (cache-resident low
+end), rather than patching it after a gate failure.
+
 ```markdown
 ---
 package: "@zakkster/lite-logn"
@@ -1536,7 +1584,7 @@ DESIGN CALLS TO SETTLE (before code; each with a lean)
     link and cut (never gated). Foil: a DFS over an adjacency list, O(component), which must miss the
     floor.
   - D-ETT8 capacity. ETT_MAX_CAPACITY such that 3V-1 slots, the 4V-entry table and every typed-array
-    length stay < 2^31. Use a FLOAT-product guard, never `| 0`. Record the ~170 B/vertex footprint
+    length stay < 2^31. Use a FLOAT-product guard, never `| 0`. Record the ~188-236 B/vertex footprint (corrected at review: + _stk + pool + pow2 table rounding)
     (3 slots x 40 B + 48 B of table) in the D3 memory table.
 
 TASKS

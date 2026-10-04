@@ -4,7 +4,7 @@
  * problem AND proves its logarithm is real (the O(log n) Witness -- see
  * test/witness.mjs).
  *
- * The roster is 19 independent members (no shared mutable module state), so a
+ * The roster is 20 independent members (no shared mutable module state), so a
  * bundler that imports one drops the others (`sideEffects: false`). Members land
  * append-only, leaving this header and the `VERSION` const the only prior lines
  * that ever change:
@@ -38,6 +38,9 @@
  *   18. CartesianTree  -- STATIC range-minimum tree via binary-lifting LCA (RMQ = LCA).
  *   19. LinkCutTree    -- dynamic-topology Sleator-Tarjan link-cut tree: a FOREST under
  *                         link / cut / evert with amortized-O(log n) PATH folds, zero-GC.
+ *   20. EulerTourTree  -- dynamic-connectivity Euler-tour tree: an UNROOTED forest under
+ *                         link / cut with expected-O(log n) SUBTREE / COMPONENT folds +
+ *                         read-only connected over a parent-pointer treap, zero-GC.
  *
  * The family delta: lite-o1 proves a FLAT ops/ms line on a log-x axis (the
  * constant, slope ~ 0); lite-logn proves a STRAIGHT line on that same axis (one
@@ -52,7 +55,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.4.1';
+export const VERSION = '1.5.0';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap        -- indexed O(log n) min|max heap  (BELOW)
@@ -74,6 +77,7 @@ export const VERSION = '1.4.1';
 // WaveletTree       -- static wavelet matrix, quantile + rangeCount  (BELOW)
 // CartesianTree     -- static range-minimum tree via binary-lifting LCA  (BELOW)
 // LinkCutTree       -- dynamic-topology link-cut tree, amortized-O(log n) path folds  (BELOW)
+// EulerTourTree     -- dynamic-connectivity Euler-tour tree, expected-O(log n) subtree / component folds  (BELOW)
 
 /** Max heap capacity: slot indices 0..cap-1 must fit the Int32Array _pos map. */
 const BH_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
@@ -8624,8 +8628,9 @@ const LCT_MAX_CAPACITY = 0x7FFFFFFF; // 2^31 - 1
  * `[lite-logn]`. Reads that MUTATE (splay) -- `findRoot` / `pathAggregate` / `connected`
  * -- validate their ids FIRST, before any splay (the SplayTree 0010 fail-OPEN
  * precedent). NOT-FOR: this member answers PATH folds only; a SUBTREE aggregate is the
- * future EulerTourTree's job (decisions/0021). Every hot op allocates ZERO bytes after
- * construction.
+ * shipped EulerTourTree sibling's job (decisions/0021 / 0022). LCT or ETT? Path fold / evert
+ * -> LinkCutTree; subtree or component fold, read-only connectivity -> EulerTourTree. Every hot
+ * op allocates ZERO bytes after construction.
  */
 export class LinkCutTree {
     /**
@@ -9039,5 +9044,703 @@ export class LinkCutTree {
     _badKind(kind) {
         throw new RangeError(
             '[lite-logn] LinkCutTree kind must be "min", "max", "sum" or "gcd", got ' + String(kind));
+    }
+}
+
+/**
+ * EulerTourTree capacity ceiling: `0x10000000` (2^28). The float-product guard in the
+ * constructor (never `| 0`) is the real gate -- it keeps `3V - 1` node slots, the
+ * power-of-two arc table (>= 4V entries), and EVERY backing typed-array length < 2^31.
+ * 4V is the binding product: its next power of two must stay below 2^31, so 4V <= 2^30,
+ * i.e. V <= 2^28. At that ceiling `3V - 1 = 805306367 < 2^31` and the arc table is 2^30.
+ */
+export const ETT_MAX_CAPACITY = 0x10000000; // 2^28
+
+/**
+ * An EULER-TOUR TREE: the LinkCutTree sibling (decisions/0021 D-LCT6 defers to it). It
+ * keeps an UNROOTED forest over a FIXED vertex set `[0, capacity)` under `link(u, v)` /
+ * `cut(u, v)` and answers, in EXPECTED O(log n) with ZERO allocation:
+ *   - `connected(u, v)` -- same component? (a NON-mutating parent climb, no restructuring);
+ *   - `componentAggregate(v)` / `componentSize(v)` -- the whole-component fold / vertex count;
+ *   - `subtreeAggregate(v, p)` / `subtreeSize(v, p)` -- the fold / vertex count over v's side
+ *     of edge `(v, p)` (the subtree hanging off v when `(v, p)` is cut).
+ *
+ * LCT folds PATHS in a ROOTED forest; ETT folds SUBTREES and COMPONENTS in an UNROOTED
+ * one. Together they are the dynamic-forest pair (path fold / evert -> LCT; subtree or
+ * component fold, read-only connectivity -> ETT).
+ *
+ * The trick worth teaching (Henzinger-King): store each tree's EULER TOUR -- every edge
+ * walked both ways -- as a balanced BST SEQUENCE. One VERTEX node per vertex (carries the
+ * value); two ARC nodes per edge, `u->v` and `v->u` (carry the fold identity). The tour is
+ * CYCLIC; a rotation preserves every fold, so "reroot at u" is a split + concat. Then
+ * `link` splices two tours with two new arcs, `cut` splits a tour at the two arc
+ * occurrences, and a SUBTREE is one contiguous tour segment -- so a subtree fold is a
+ * RANGE fold. The backing BST is a TREAP with parent pointers (D-ETT1): split / merge keep
+ * expected O(log n) depth under any access pattern, so `connected` and the folds are
+ * NON-mutating reads (no splay, no PRNG), unlike LCT's mutating-read class. The cost is
+ * EXPECTED rather than amortized, as the family already discloses for SkipList / Treap.
+ *
+ * Storage (allocated once, sized to capacity; ~188-236 B/vertex = 3 x 44 B node slots + 8 B pool + a 48-96 B power-of-two arc table):
+ *   - node columns `_left` / `_right` / `_parent` / `_prio` / `_size` / `_vcnt`
+ *     `Uint32Array(3V - 1)` and `_val` / `_agg` `Float64Array(3V - 1)`. Slot 0 is NIL;
+ *     vertex slots are `[1, V]` (vertex id `v` -> slot `v + 1`); arc slots are `[V + 1,
+ *     3V - 2]`, handed out by a private NodePool free-list. `_vcnt` is an ALWAYS-ON vertex
+ *     count (vertex nodes contribute 1, arc nodes 0), so component / subtree SIZE is free.
+ *   - `_stk` `Uint32Array(3V - 1)` -- the split / merge spine scratch (split and merge are
+ *     ITERATIVE over it, never recursive: a 2^20-vertex path must not RangeError).
+ *   - `_acc` `Float64Array(1)` -- the fold accumulator slot (S7: an internal double never
+ *     crosses a non-inlined call boundary, so the folds stay box-free per level).
+ *   - `_arcFrom` / `_arcTo` `Int32Array` + `_arcSlot` `Uint32Array`, a power-of-two
+ *     open-addressed arc table (>= 4V entries): endpoint-addressed `cut` / `hasEdge` with
+ *     LINEAR probing and BACKWARD-SHIFT delete (no tombstone buildup under churn).
+ *
+ * The fold is chosen ONCE at construction and cached as a small-int `_k` (0 min, 1 max,
+ * 2 sum, 3 gcd), combined by per-kind stores with NO tagged phi (lesson 12.2.1). An UNSET
+ * vertex reads the fold IDENTITY (min +Inf, max -Inf, sum / gcd 0), never 0 (null is not
+ * zero); `clear()` returns every vertex to it. The sum kind bounds `|value| <= MAX_VALUE /
+ * (2 * capacity)` at `setValue` (a component holds <= capacity vertices and arc nodes carry
+ * the identity, so no fold can reach Infinity / NaN); gcd requires a nonnegative integer.
+ * Every door is typeof-guarded BEFORE coercion and every rejection is a byte-identical
+ * no-op. NO path fold and NO evert (LinkCutTree's job); NO forEach / iterator (D-ETT6).
+ */
+export class EulerTourTree {
+    /**
+     * @param {number} capacity  exact vertex count; integer in [1, 2^28]. Vertex ids are [0, capacity).
+     * @param {'min'|'max'|'sum'|'gcd'} [kind='min']  the frozen associative + commutative fold.
+     */
+    constructor(capacity, kind = 'min') {
+        // typeof guard BEFORE coercion (Number.isInteger is Symbol/BigInt-safe).
+        if (typeof capacity !== 'number' || !Number.isInteger(capacity) ||
+            capacity < 1 || capacity > ETT_MAX_CAPACITY) {
+            throw new RangeError(
+                '[lite-logn] EulerTourTree capacity must be an integer in [1, 2^28], got ' +
+                String(capacity));
+        }
+        const k = kind === 'min' ? 0 : kind === 'max' ? 1 : kind === 'sum' ? 2 :
+            kind === 'gcd' ? 3 : -1;
+        if (k === -1) this._badKind(kind);
+        // D-ETT8 FLOAT-product capacity guard (never `| 0`): 3V-1 node slots, a pow2 >= 4V arc
+        // table, every typed-array length < 2^31. capacity is already bounded by ETT_MAX_CAPACITY,
+        // but recompute the products as FLOATS and fail closed (the guard, not the const, is law).
+        const nodeCount = 3 * capacity - 1;            // float; node-column length
+        let tableSize = 4;                             // float; smallest pow2 >= 4V (>= 4 always)
+        const want = 4 * capacity;                     // float
+        while (tableSize < want) tableSize *= 2;
+        if (!(nodeCount < 2147483648) || !(tableSize < 2147483648)) {
+            throw new RangeError(
+                '[lite-logn] EulerTourTree capacity ' + String(capacity) +
+                ' overflows the 2^31 node-slot / arc-table bound');
+        }
+        this._cap = capacity;                          // vertex count (fixed)
+        this._k = k;                                   // ctor-frozen fold: 0 min 1 max 2 sum 3 gcd
+        this._idv = k === 0 ? Infinity : k === 1 ? -Infinity : 0; // fold identity (agg of an unset vertex / NIL / arc)
+        // F7/S1 (sum kind): |value| <= MAX_VALUE / (2 * capacity) bounds a component fold STRICTLY
+        // below MAX_VALUE (a component holds <= capacity vertices; arc nodes carry the identity),
+        // so no fold can reach Infinity / NaN. Non-sum kinds: no bound (Infinity). NaN-safe at the door.
+        this._sumBound = k === 2 ? Number.MAX_VALUE / (2 * capacity) : Infinity;
+        this._negSumBound = -this._sumBound;
+        const s = nodeCount;                           // 3V-1 node slots (slot 0 reserved NIL)
+        this._left = new Uint32Array(s);               // treap left child; NIL = 0
+        this._right = new Uint32Array(s);              // treap right child; NIL = 0
+        this._parent = new Uint32Array(s);             // treap parent (for non-mutating rank / root climbs); NIL = 0
+        this._prio = new Uint32Array(s);               // random heap priority (treap balance)
+        this._size = new Uint32Array(s);               // subtree NODE count (implicit-treap rank)
+        this._vcnt = new Uint32Array(s);               // subtree VERTEX count (component / subtree size)
+        this._val = new Float64Array(s);               // per-node value (vertex nodes carry it; arcs carry the identity)
+        this._agg = new Float64Array(s);               // fold over the treap subtree at slot
+        this._stk = new Uint32Array(s);                // split / merge spine scratch (preallocated, iterative)
+        this._acc = new Float64Array(1);               // fold accumulator slot (S7: no double across a non-inlined call)
+        this._arcMask = (tableSize - 1) >>> 0;         // power-of-two mask for the arc table
+        this._arcFrom = new Int32Array(tableSize);     // arc table key column: source vertex id
+        this._arcTo = new Int32Array(tableSize);       // arc table key column: target vertex id
+        this._arcSlot = new Uint32Array(tableSize);    // arc table value column: arc node slot (0 = empty)
+        this._pool = new NodePool(2 * (capacity - 1)); // arc free-list; hands out [1, 2V-2], 0 when V = 1
+        this._seed0 = TR_DEFAULT_SEED | 0;             // initial LCG seed (clear resets to it)
+        this._seed = this._seed0;                      // live LCG state (signed int32 Smi -- see _lcgNext)
+        this._sl = 0;                                  // split scratch: left result root
+        this._sr = 0;                                  // split scratch: right result root
+        this._edges = 0;                               // live edge count
+        this.clear();                                  // fills columns to the pristine singleton-forest state
+    }
+
+    /** The fixed vertex count (capacity) this forest was sized for. O(1). */
+    get capacity() { return this._cap; }
+
+    /** The frozen fold, 'min' | 'max' | 'sum' | 'gcd'. O(1). */
+    get kind() {
+        const k = this._k;
+        return k === 0 ? 'min' : k === 1 ? 'max' : k === 2 ? 'sum' : 'gcd';
+    }
+
+    /** The number of edges currently in the forest (link increments, cut decrements). O(1). */
+    get edges() { return this._edges; }
+
+    /**
+     * Add the edge `(u, v)` to the UNROOTED forest. Expected O(log n): reroot each tour at its
+     * endpoint (split + concat), then splice `rot_u ++ [u->v] ++ rot_v ++ [v->u]` and record the two
+     * arcs in the arc table. Fails closed: a bad vertex id, a self-link, or a CYCLE-creating link (the
+     * two vertices are already connected -- the read-only `connected` test) each throw `[lite-logn]` as
+     * a no-op. Ids are typeof-guarded BEFORE any restructuring.
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {this}
+     */
+    link(u, v) {
+        const su = this._slot('link', u);
+        const sv = this._slot('link', v);
+        if (su === sv) this._badLink(u, v);
+        if (this._rootOf(su) === this._rootOf(sv)) this._badLink(u, v); // cycle test: read-only connected
+        const pa = this._pool.alloc();                 // arc u->v
+        const pb = this._pool.alloc();                 // arc v->u
+        if (pa === 0 || pb === 0) {                    // fail closed (forest invariant means this cannot fire)
+            if (pb !== 0) this._pool.free(pb);
+            if (pa !== 0) this._pool.free(pa);
+            this._badLink(u, v);
+        }
+        const arcUV = this._cap + pa, arcVU = this._cap + pb;
+        this._initArc(arcUV);
+        this._initArc(arcVU);
+        const ru = this._reroot(su);                   // u's tour, starting at u's node
+        const rv = this._reroot(sv);                   // v's tour, starting at v's node
+        let root = this._merge(ru, arcUV);
+        root = this._merge(root, rv);
+        this._merge(root, arcVU);                      // final tour root (discoverable via parent climbs)
+        this._arcInsert(u, v, arcUV);
+        this._arcInsert(v, u, arcVU);
+        this._edges = (this._edges + 1) | 0;
+        return this;
+    }
+
+    /**
+     * Remove the edge `(u, v)`. Expected O(log n): find the two arc occurrences by rank, split the tour
+     * into `A (arcLo) B (arcHi) C`, keep `B` and `C ++ A` as the two resulting trees, free the two arc
+     * slots, and delete both arcs from the table (backward-shift). Fails closed: a bad vertex id, or a
+     * `(u, v)` that is NOT an edge each throw `[lite-logn]` as a no-op. Ids typeof-guarded BEFORE any work.
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {this}
+     */
+    cut(u, v) {
+        this._slot('cut', u);
+        this._slot('cut', v);
+        const arcUV = this._arcFind(u, v);
+        const arcVU = this._arcFind(v, u);
+        if (arcUV === 0 || arcVU === 0) this._badCut(u, v); // not an edge
+        const root = this._rootOf(arcUV);
+        const ru = this._rank(arcUV), rv = this._rank(arcVU);
+        const lo = ru < rv ? ru : rv;
+        const hi = ru < rv ? rv : ru;
+        this._split(root, lo);                         // A = [0, lo) | [lo, N)
+        const A = this._sl; let rest = this._sr;
+        this._split(rest, 1);                          // arcLo | [lo+1, N)
+        const arcLo = this._sl; rest = this._sr;
+        this._split(rest, hi - lo - 1);                // B (inside, standalone) | [hi, N)
+        rest = this._sr;
+        this._split(rest, 1);                          // arcHi | C
+        const arcHi = this._sl; const C = this._sr;
+        this._merge(C, A);                             // outside tree = C ++ A
+        this._arcRemove(u, v);
+        this._arcRemove(v, u);
+        this._pool.free(arcLo - this._cap);
+        this._pool.free(arcHi - this._cap);
+        this._edges = (this._edges - 1) | 0;
+        return this;
+    }
+
+    /**
+     * Set vertex `v`'s value to `x` (ABSOLUTE), then fix the aggregate up its ancestor chain. Expected
+     * O(log n): write `_val`, then `_pull` from `v`'s node to its tour root (parent climb, NO rotation,
+     * NO PRNG). Fails closed: a bad vertex id, a non-finite value, or (gcd kind) a negative / non-integer
+     * value each throw `[lite-logn]` as a no-op. Value typeof-guarded FIRST.
+     * @param {number} v  vertex id in [0, capacity)
+     * @param {number} x  a finite number (nonnegative integer for the gcd kind)
+     * @returns {this}
+     */
+    setValue(v, x) {
+        if (typeof x !== 'number' || !Number.isFinite(x)) return this._badValue(x);
+        if (this._k === 3 && (!Number.isInteger(x) || x < 0)) return this._badGcdValue(x);
+        // F7/S1: sum kind bounds |x| so no fold can overflow (checked BEFORE any write).
+        if (this._k === 2 && (x > this._sumBound || x < this._negSumBound)) return this._badSumValue(x);
+        const sv = this._slot('setValue', v);
+        this._val[sv] = x;
+        let cur = sv;
+        while (cur !== 0) { this._pull(cur); cur = this._parent[cur]; }
+        return this;
+    }
+
+    /**
+     * Vertex `v`'s stored value (the fold identity if unset). O(1), NON-mutating. Fails closed on a bad id.
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {number}
+     */
+    at(v) {
+        return this._val[this._slot('at', v)];
+    }
+
+    /**
+     * True iff `u` and `v` are in the SAME component. Expected O(log n): two NON-mutating parent climbs to
+     * the tour roots (no rotation, no PRNG). Fails closed on a bad id BEFORE any climb.
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {boolean}
+     */
+    connected(u, v) {
+        const su = this._slot('connected', u);
+        const sv = this._slot('connected', v);
+        if (su === sv) return true;
+        return this._rootOf(su) === this._rootOf(sv);
+    }
+
+    /**
+     * The fold over EVERY vertex in `v`'s component (the whole tour agg). Expected O(log n): a NON-mutating
+     * parent climb to the tour root, then one read. An empty / all-unset component folds to the identity.
+     * S7: returns a double (<= 1 box/op when not inlined). Fails closed on a bad id.
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {number}
+     */
+    componentAggregate(v) {
+        const sv = this._slot('componentAggregate', v);
+        return this._agg[this._rootOf(sv)];
+    }
+
+    /**
+     * The number of vertices in `v`'s component. Expected O(log n): a NON-mutating parent climb to the tour
+     * root, then one read of the vertex-count column. 0 B/op. Fails closed on a bad id.
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {number}
+     */
+    componentSize(v) {
+        const sv = this._slot('componentSize', v);
+        return this._vcnt[this._rootOf(sv)];
+    }
+
+    /**
+     * The fold over v's side of edge `(v, p)` -- the subtree hanging off `v` when `(v, p)` is removed.
+     * Expected O(log n): find the ranks of arc `p->v` and arc `v->p` by parent climbs, then a top-down
+     * RANGE fold over the cyclic segment between them (one open range, or its complement as two ranges --
+     * works for min / max / gcd, which have no inverse). NON-mutating. S7: returns a double (<= 1 box/op
+     * when not inlined). Fails closed: a bad vertex id, or a `(v, p)` that is NOT an edge, each throw.
+     * @param {number} v  vertex id in [0, capacity)
+     * @param {number} p  vertex id in [0, capacity); the neighbour across the edge
+     * @returns {number}
+     */
+    subtreeAggregate(v, p) {
+        const sv = this._slot('subtreeAggregate', v);
+        this._slot('subtreeAggregate', p);
+        const arcPV = this._arcFind(p, v), arcVP = this._arcFind(v, p);
+        if (arcPV === 0 || arcVP === 0) this._badEdge('subtreeAggregate', v, p);
+        const root = this._rootOf(sv);
+        const i = this._rank(arcPV), j = this._rank(arcVP), N = this._size[root];
+        this._acc[0] = this._idv;
+        if (i < j) {
+            this._foldRange(root, i + 1, j - 1);
+        } else {
+            this._foldRange(root, 0, j - 1);
+            this._foldRange(root, i + 1, N - 1);
+        }
+        return this._acc[0];
+    }
+
+    /**
+     * The number of vertices on v's side of edge `(v, p)`. Expected O(log n): the ranks of the two arcs,
+     * then a top-down vertex-count range sum over the segment between them (or its complement). NON-mutating,
+     * 0 B/op. Fails closed: a bad vertex id, or a `(v, p)` that is NOT an edge, each throw.
+     * @param {number} v  vertex id in [0, capacity)
+     * @param {number} p  vertex id in [0, capacity); the neighbour across the edge
+     * @returns {number}
+     */
+    subtreeSize(v, p) {
+        const sv = this._slot('subtreeSize', v);
+        this._slot('subtreeSize', p);
+        const arcPV = this._arcFind(p, v), arcVP = this._arcFind(v, p);
+        if (arcPV === 0 || arcVP === 0) this._badEdge('subtreeSize', v, p);
+        const root = this._rootOf(sv);
+        const i = this._rank(arcPV), j = this._rank(arcVP), N = this._size[root];
+        if (i < j) return this._rangeVcnt(root, i + 1, j - 1);
+        return this._rangeVcnt(root, 0, j - 1) + this._rangeVcnt(root, i + 1, N - 1);
+    }
+
+    /**
+     * True iff edge `(u, v)` is in the forest. O(1) expected: one NON-mutating arc-table probe. Fails closed
+     * on a bad vertex id (both typeof-guarded FIRST).
+     * @param {number} u  vertex id in [0, capacity)
+     * @param {number} v  vertex id in [0, capacity)
+     * @returns {boolean}
+     */
+    hasEdge(u, v) {
+        this._slot('hasEdge', u);
+        this._slot('hasEdge', v);
+        return this._arcFind(u, v) !== 0;
+    }
+
+    /**
+     * Reset the forest to isolated singleton vertices: every edge dropped, every value + aggregate back to
+     * the fold identity, the arc table emptied, the arc free-list refilled, the LCG reseeded, and the edge
+     * count returned to 0 -- the exact pristine state of a freshly constructed instance. O(n) over the fixed
+     * columns, ZERO allocation (buffers reset IN PLACE), so the instance is immediately reusable.
+     * @returns {this}
+     */
+    clear() {
+        const cap = this._cap, idv = this._idv;
+        this._left.fill(0);
+        this._right.fill(0);
+        this._parent.fill(0);
+        this._prio.fill(0);
+        this._size.fill(0);
+        this._vcnt.fill(0);
+        // F9/S2: values + aggregates return to the fold IDENTITY, not 0 (an unset vertex must not read 0).
+        this._val.fill(idv);
+        this._agg.fill(idv);
+        // vertex slots [1, cap]: each a singleton tour (size 1, one vertex), its own tour root.
+        const SZ = this._size, VC = this._vcnt, PR = this._prio;
+        for (let i = 1; i <= cap; i++) { SZ[i] = 1; VC[i] = 1; }
+        // deterministic vertex priorities from the reset LCG, so clear() == a fresh constructor.
+        let seed = this._seed0;
+        for (let i = 1; i <= cap; i++) { seed = _lcgNext(seed); PR[i] = seed; }
+        this._seed = seed;
+        this._arcSlot.fill(0);                         // every arc-table entry empty
+        this._arcFrom.fill(0);                         // and no stale keys left behind: clear() == fresh
+        this._arcTo.fill(0);
+        this._pool.clear();                            // arc free-list full again
+        this._sl = 0;
+        this._sr = 0;
+        this._edges = 0;
+        return this;
+    }
+
+    // ---- private hot bodies (zero allocation, iterative) ---------------------
+
+    /**
+     * @private Recompute `_size[x]` / `_vcnt[x]` / `_agg[x]` from `x`'s children and own value via the
+     * ctor-frozen inline `_k` switch. A vertex slot (`x <= _cap`) counts 1 toward `_vcnt`; an arc slot
+     * counts 0. `_agg[NIL]` is the fold identity so a missing child folds away. F3: store into `_agg[x]`
+     * in EACH branch -- no shared phi that unifies the pure-double sum arm with segGcd's non-inlined
+     * return into a HeapNumber box per level (RESEARCH 12.2.1). 0 B/op.
+     */
+    _pull(x) {
+        const L = this._left, R = this._right, l = L[x], r = R[x], k = this._k;
+        const SZ = this._size, VC = this._vcnt, A = this._agg, V = this._val;
+        SZ[x] = SZ[l] + SZ[r] + 1;
+        VC[x] = VC[l] + VC[r] + (x <= this._cap ? 1 : 0);
+        const al = A[l], ar = A[r], v = V[x];
+        if (k === 0) { const m = al < v ? al : v; A[x] = m < ar ? m : ar; }
+        else if (k === 1) { const m = al > v ? al : v; A[x] = m > ar ? m : ar; }
+        else if (k === 2) { A[x] = al + v + ar; }
+        else { A[x] = segGcd(segGcd(al, v), ar); }
+    }
+
+    /**
+     * @private Initialize a freshly allocated arc slot `a`: detached single-node tour carrying the fold
+     * identity (vcount 0), with a fresh random priority from the LCG (a mutating op, so a PRNG step is fine).
+     */
+    _initArc(a) {
+        this._left[a] = 0;
+        this._right[a] = 0;
+        this._parent[a] = 0;
+        this._size[a] = 1;
+        this._vcnt[a] = 0;
+        this._val[a] = this._idv;
+        this._agg[a] = this._idv;
+        this._seed = _lcgNext(this._seed);
+        this._prio[a] = this._seed;
+    }
+
+    /**
+     * @private Concatenate implicit treaps `a` (lower ranks) and `b` (higher ranks) into one, returning the
+     * new root. ITERATIVE: descend choosing the higher-priority node, linking the spine into the result, then
+     * `_pull` the spine bottom-up over the preallocated `_stk`. NO recursion, NO per-op allocation. 0 B/op.
+     */
+    _merge(a, b) {
+        if (a === 0) return b;
+        if (b === 0) return a;
+        const L = this._left, R = this._right, PA = this._parent, P = this._prio, stk = this._stk;
+        let top = 0, root = 0, holeNode = 0, holeSide = 0;
+        while (a !== 0 && b !== 0) {
+            let cur, side;
+            if (P[a] >= P[b]) { cur = a; a = R[a]; side = 1; }   // a wins; next hole is R[cur]
+            else { cur = b; b = L[b]; side = 0; }                // b wins; next hole is L[cur]
+            if (holeNode === 0) root = cur;
+            else if (holeSide === 1) R[holeNode] = cur;
+            else L[holeNode] = cur;
+            PA[cur] = holeNode;
+            stk[top++] = cur;
+            holeNode = cur; holeSide = side;
+        }
+        const rem = a !== 0 ? a : b;
+        if (holeNode === 0) root = rem;
+        else if (holeSide === 1) R[holeNode] = rem;
+        else L[holeNode] = rem;
+        if (rem !== 0) PA[rem] = holeNode;
+        while (top > 0) this._pull(stk[--top]);
+        if (root !== 0) PA[root] = 0;
+        return root;
+    }
+
+    /**
+     * @private Split implicit treap `root` by RANK into the first `kk` nodes (ranks [0, kk)) and the rest,
+     * writing the two result roots to `this._sl` / `this._sr`. ITERATIVE: descend, appending each node to the
+     * left- or right-result chain, close the two open child links, then `_pull` the spine bottom-up over
+     * `_stk`. NO recursion, NO per-op allocation. 0 B/op.
+     */
+    _split(root, kk) {
+        const L = this._left, R = this._right, SZ = this._size, PA = this._parent, stk = this._stk;
+        let leftRoot = 0, rightRoot = 0, lPrev = 0, rPrev = 0, top = 0, k = kk, t = root;
+        while (t !== 0) {
+            stk[top++] = t;
+            const lt = L[t];
+            const ls = SZ[lt];
+            if (k <= ls) {                             // t -> right result; descend into its left subtree
+                if (rPrev === 0) rightRoot = t; else L[rPrev] = t;
+                PA[t] = rPrev;
+                rPrev = t;
+                t = lt;
+            } else {                                   // t -> left result; descend into its right subtree
+                if (lPrev === 0) leftRoot = t; else R[lPrev] = t;
+                PA[t] = lPrev;
+                lPrev = t;
+                k = k - ls - 1;
+                t = R[t];
+            }
+        }
+        if (lPrev !== 0) R[lPrev] = 0;                 // close the left-result tail
+        if (rPrev !== 0) L[rPrev] = 0;                 // close the right-result tail
+        while (top > 0) this._pull(stk[--top]);
+        if (leftRoot !== 0) PA[leftRoot] = 0;
+        if (rightRoot !== 0) PA[rightRoot] = 0;
+        this._sl = leftRoot;
+        this._sr = rightRoot;
+    }
+
+    /**
+     * @private Rotate vertex node `sx`'s tour so it starts at `sx` ("reroot at the vertex"): split the tour
+     * at `sx`'s rank, then concat the suffix before the prefix. Returns the new tour root. Used only by
+     * `link` (a mutating op). 0 B/op.
+     */
+    _reroot(sx) {
+        const root = this._rootOf(sx);
+        const r = this._rank(sx);
+        if (r === 0) return root;                      // already first
+        this._split(root, r);
+        return this._merge(this._sr, this._sl);
+    }
+
+    /**
+     * @private The rank (0-based in-order position) of node `x` within its tour. NON-mutating: a parent
+     * climb summing left-subtree sizes. 0 B/op.
+     */
+    _rank(x) {
+        const L = this._left, R = this._right, SZ = this._size, PA = this._parent;
+        let r = SZ[L[x]], cur = x, p = PA[cur];
+        while (p !== 0) {
+            if (R[p] === cur) r += SZ[L[p]] + 1;
+            cur = p; p = PA[cur];
+        }
+        return r;
+    }
+
+    /**
+     * @private The tour root of node `x`. NON-mutating: a parent climb. 0 B/op.
+     */
+    _rootOf(x) {
+        const PA = this._parent;
+        let cur = x, p = PA[cur];
+        while (p !== 0) { cur = p; p = PA[cur]; }
+        return cur;
+    }
+
+    /**
+     * @private Fold the nodes at ranks [lo, hi] (inclusive) of tour `root` INTO `this._acc[0]` (the caller
+     * seeds it with the identity). NON-mutating, ITERATIVE: locate the split node, then two one-sided boundary
+     * walks (O(height), no extra stack). The accumulator stays in the `_acc` slot across every step and each
+     * kind stores directly into it -- no shared phi, no per-level box. All admitted folds are commutative, so
+     * the walk order is irrelevant. 0 B/op internally (the public caller boxes the single returned double).
+     */
+    _foldRange(root, lo, hi) {
+        if (lo > hi) return;
+        const L = this._left, R = this._right, SZ = this._size, A = this._agg, V = this._val, AC = this._acc, k = this._k;
+        // locate the split node: highest node whose rank lies in [lo, hi].
+        let t = root, base = 0;
+        while (t !== 0) {
+            const rt = base + SZ[L[t]];
+            if (hi < rt) t = L[t];
+            else if (lo > rt) { base = rt + 1; t = R[t]; }
+            else break;
+        }
+        if (t === 0) return;
+        const rt = base + SZ[L[t]];
+        { const w = V[t]; if (k === 0) { if (w < AC[0]) AC[0] = w; } else if (k === 1) { if (w > AC[0]) AC[0] = w; } else if (k === 2) { AC[0] = AC[0] + w; } else { AC[0] = segGcd(AC[0], w); } }
+        // left boundary: ranks [lo, rt-1] inside the left subtree of t.
+        let cur = L[t], cb = base;
+        while (cur !== 0) {
+            const cr = cb + SZ[L[cur]];
+            if (cr >= lo) {
+                { const w = V[cur]; if (k === 0) { if (w < AC[0]) AC[0] = w; } else if (k === 1) { if (w > AC[0]) AC[0] = w; } else if (k === 2) { AC[0] = AC[0] + w; } else { AC[0] = segGcd(AC[0], w); } }
+                { const w = A[R[cur]]; if (k === 0) { if (w < AC[0]) AC[0] = w; } else if (k === 1) { if (w > AC[0]) AC[0] = w; } else if (k === 2) { AC[0] = AC[0] + w; } else { AC[0] = segGcd(AC[0], w); } }
+                cur = L[cur];
+            } else { cb = cr + 1; cur = R[cur]; }
+        }
+        // right boundary: ranks [rt+1, hi] inside the right subtree of t.
+        cur = R[t]; cb = rt + 1;
+        while (cur !== 0) {
+            const cr = cb + SZ[L[cur]];
+            if (cr <= hi) {
+                { const w = A[L[cur]]; if (k === 0) { if (w < AC[0]) AC[0] = w; } else if (k === 1) { if (w > AC[0]) AC[0] = w; } else if (k === 2) { AC[0] = AC[0] + w; } else { AC[0] = segGcd(AC[0], w); } }
+                { const w = V[cur]; if (k === 0) { if (w < AC[0]) AC[0] = w; } else if (k === 1) { if (w > AC[0]) AC[0] = w; } else if (k === 2) { AC[0] = AC[0] + w; } else { AC[0] = segGcd(AC[0], w); } }
+                cb = cr + 1; cur = R[cur];
+            } else { cur = L[cur]; }
+        }
+    }
+
+    /**
+     * @private The number of VERTEX nodes at ranks [lo, hi] (inclusive) of tour `root`. NON-mutating,
+     * ITERATIVE, integer-only (no box): the same two-boundary-walk shape as `_foldRange`, summing the
+     * always-on vertex-count column. 0 B/op.
+     */
+    _rangeVcnt(root, lo, hi) {
+        if (lo > hi) return 0;
+        const L = this._left, R = this._right, SZ = this._size, VC = this._vcnt, cap = this._cap;
+        let t = root, base = 0;
+        while (t !== 0) {
+            const rt = base + SZ[L[t]];
+            if (hi < rt) t = L[t];
+            else if (lo > rt) { base = rt + 1; t = R[t]; }
+            else break;
+        }
+        if (t === 0) return 0;
+        const rt = base + SZ[L[t]];
+        let acc = (t <= cap ? 1 : 0);
+        let cur = L[t], cb = base;
+        while (cur !== 0) {
+            const cr = cb + SZ[L[cur]];
+            if (cr >= lo) { acc += (cur <= cap ? 1 : 0) + VC[R[cur]]; cur = L[cur]; }
+            else { cb = cr + 1; cur = R[cur]; }
+        }
+        cur = R[t]; cb = rt + 1;
+        while (cur !== 0) {
+            const cr = cb + SZ[L[cur]];
+            if (cr <= hi) { acc += VC[L[cur]] + (cur <= cap ? 1 : 0); cb = cr + 1; cur = R[cur]; }
+            else { cur = L[cur]; }
+        }
+        return acc;
+    }
+
+    // ---- private arc table (open addressing, backward-shift delete) ----------
+
+    /** @private Mix a directed arc `(from, to)` to a 30-bit hash (caller masks to the table size). The
+     *  `& 0x3FFFFFFF` keeps the return a Smi: a `>>> 0` uint32 >= 2^31 boxes a HeapNumber per probe
+     *  when this helper is not inlined. The table is <= 2^30 slots, so `& mask` probes identically. */
+    _arcHash(from, to) {
+        let h = Math.imul(from + 1, 0x9E3779B1);
+        h ^= Math.imul(to + 1, 0x85EBCA77);
+        h ^= h >>> 15;
+        return h & 0x3FFFFFFF;
+    }
+
+    /** @private The arc-node slot for directed arc `(from, to)`, or 0 if absent. NON-mutating linear probe. */
+    _arcFind(from, to) {
+        const mask = this._arcMask, F = this._arcFrom, T = this._arcTo, S = this._arcSlot;
+        let h = this._arcHash(from, to) & mask;
+        for (;;) {
+            const s = S[h];
+            if (s === 0) return 0;
+            if (F[h] === from && T[h] === to) return s;
+            h = (h + 1) & mask;
+        }
+    }
+
+    /** @private Insert directed arc `(from, to) -> slot` by linear probe (slot is never 0 for a live arc). */
+    _arcInsert(from, to, slot) {
+        const mask = this._arcMask, F = this._arcFrom, T = this._arcTo, S = this._arcSlot;
+        let h = this._arcHash(from, to) & mask;
+        while (S[h] !== 0) h = (h + 1) & mask;
+        F[h] = from; T[h] = to; S[h] = slot;
+    }
+
+    /** @private Delete directed arc `(from, to)` with Knuth 6.4R BACKWARD-SHIFT (no tombstone buildup). */
+    _arcRemove(from, to) {
+        const mask = this._arcMask, F = this._arcFrom, T = this._arcTo, S = this._arcSlot;
+        let i = this._arcHash(from, to) & mask;
+        for (;;) {                                     // locate the entry
+            const s = S[i];
+            if (s === 0) return;                       // absent (defensive: callers only remove live arcs)
+            if (F[i] === from && T[i] === to) break;
+            i = (i + 1) & mask;
+        }
+        let j = i;
+        for (;;) {
+            S[i] = 0;                                  // open a hole at i
+            for (;;) {
+                j = (j + 1) & mask;
+                if (S[j] === 0) return;                // run ended: the hole at i stays empty
+                const home = this._arcHash(F[j], T[j]) & mask;
+                const keep = (i <= j) ? (i < home && home <= j) : (i < home || home <= j);
+                if (!keep) break;                      // S[j] may move back to fill the hole at i
+            }
+            F[i] = F[j]; T[i] = T[j]; S[i] = S[j];     // shift S[j] into the hole, then re-open at j
+            i = j;
+        }
+    }
+
+    // ---- cold path only: id resolution + throw builders ----------------------
+
+    /** @private Validate a public vertex id (typeof-first) and map it to its node slot `id + 1`. */
+    _slot(op, id) {
+        if (typeof id !== 'number' || !Number.isInteger(id) || id < 0 || id >= this._cap) {
+            return this._badId(op, id);
+        }
+        return id + 1;
+    }
+
+    /** @private */
+    _badId(op, id) {
+        throw new RangeError(
+            '[lite-logn] EulerTourTree ' + op + ' needs an integer vertex id in [0, ' + this._cap +
+            '), got ' + String(id));
+    }
+
+    /** @private */
+    _badLink(u, v) {
+        throw new Error(
+            '[lite-logn] EulerTourTree link(' + String(u) + ', ' + String(v) +
+            ') would create a cycle or self-loop (vertices already connected)');
+    }
+
+    /** @private */
+    _badCut(u, v) {
+        throw new Error(
+            '[lite-logn] EulerTourTree cut(' + String(u) + ', ' + String(v) +
+            ') is not an edge of the forest');
+    }
+
+    /** @private */
+    _badEdge(op, v, p) {
+        throw new Error(
+            '[lite-logn] EulerTourTree ' + op + '(' + String(v) + ', ' + String(p) +
+            ') requires (v, p) to be an edge of the forest');
+    }
+
+    /** @private */
+    _badValue(value) {
+        throw new TypeError(
+            '[lite-logn] EulerTourTree value must be a finite number, got ' + String(value));
+    }
+
+    /** @private */
+    _badGcdValue(value) {
+        throw new RangeError(
+            '[lite-logn] EulerTourTree gcd value must be a nonnegative integer, got ' + String(value));
+    }
+
+    /** @private */
+    _badSumValue(value) {
+        throw new RangeError(
+            '[lite-logn] EulerTourTree sum value magnitude exceeds MAX_VALUE / (2 * capacity) (' +
+            this._sumBound + '), got ' + String(value));
+    }
+
+    /** @private */
+    _badKind(kind) {
+        throw new RangeError(
+            '[lite-logn] EulerTourTree kind must be "min", "max", "sum" or "gcd", got ' + String(kind));
     }
 }

@@ -33,16 +33,16 @@ test('VERSION trinity: LogN.js const, package.json, and llms.txt agree byte-for-
     assert.equal(m[1], VERSION, 'llms.txt Version header !== LogN.js VERSION const');
 });
 
-test('VERSION is exactly 1.4.1 at the 1.4.1 release', () => {
-    assert.equal(VERSION, '1.4.1');
+test('VERSION is exactly 1.5.0 at the 1.5.0 release', () => {
+    assert.equal(VERSION, '1.5.0');
 });
 
-// --- frozen export surface: VERSION + the shipped members (19 members) --------
+// --- frozen export surface: VERSION + the shipped members (20 members) --------
 
-test('LogN.js exports exactly VERSION + the nineteen members at v1.4.1', () => {
+test('LogN.js exports exactly VERSION + the twenty members (+ ETT_MAX_CAPACITY) at v1.5.0', () => {
     const exportedNames = Object.keys(LogNModule).sort();
-    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'CartesianTree', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'LinkCutTree', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
-        'LogN.js export surface drifted from the frozen surface (VERSION + the nineteen members incl LinkCutTree)');
+    assert.deepEqual(exportedNames, ['BinaryHeap', 'BinomialHeap', 'CartesianTree', 'ETT_MAX_CAPACITY', 'EulerTourTree', 'Fenwick', 'Fenwick2D', 'FibonacciHeap', 'LinkCutTree', 'MergeSortTree', 'MinMaxHeap', 'PairingHeap', 'PersistentSegTree', 'Scapegoat', 'SegmentTree', 'SegmentTree2D', 'SkipList', 'SortedArray', 'SplayTree', 'Treap', 'VERSION', 'WaveletTree'],
+        'LogN.js export surface drifted from the frozen surface (VERSION + the twenty members incl EulerTourTree + ETT_MAX_CAPACITY)');
     assert.equal(typeof VERSION, 'string');
     assert.equal(typeof LogNModule.BinaryHeap, 'function');
     assert.equal(typeof LogNModule.Fenwick, 'function');
@@ -63,6 +63,8 @@ test('LogN.js exports exactly VERSION + the nineteen members at v1.4.1', () => {
     assert.equal(typeof LogNModule.WaveletTree, 'function');
     assert.equal(typeof LogNModule.CartesianTree, 'function');
     assert.equal(typeof LogNModule.LinkCutTree, 'function');
+    assert.equal(typeof LogNModule.EulerTourTree, 'function');
+    assert.equal(typeof LogNModule.ETT_MAX_CAPACITY, 'number');
 });
 
 // --- six-file pack discipline (D-07 / decisions/0003) -----------------------
@@ -1147,4 +1149,53 @@ test('LinkCutTree fails closed with a [lite-logn]-tagged throw on every coercion
     assert.equal(t.connected(0, 3), false);
     // LinkCutTree answers PATH folds only: NO subtree aggregate (the EulerTourTree asymmetry, 0021).
     assert.equal(typeof t.subtreeAggregate, 'undefined', 'LinkCutTree has no subtreeAggregate (path-only)');
+});
+
+// --- EulerTourTree (v1.5.0): coercion + [lite-logn] fail-closed tag ------------
+
+test('EulerTourTree fails closed with a [lite-logn]-tagged throw on every coercion door', () => {
+    const { EulerTourTree } = LogNModule;
+    const badIds = [-1, 1.5, NaN, Infinity, '1', 1n, Symbol('s'), null, undefined, {}, [], true];
+    for (const bad of badIds) {
+        assert.throws(() => new EulerTourTree(bad), /\[lite-logn\]/, 'ctor capacity ' + String(bad));
+    }
+    for (const bad of ['MIN', 'avg', 1, null, {}, Symbol('k')]) {
+        assert.throws(() => new EulerTourTree(8, bad), /\[lite-logn\]/, 'ctor kind ' + String(bad));
+    }
+    assert.doesNotThrow(() => new EulerTourTree(8));         // kind omitted -> 'min'
+    assert.equal(new EulerTourTree(8).kind, 'min');
+    assert.equal(new EulerTourTree(8, 'sum').kind, 'sum');
+
+    const t = new EulerTourTree(8, 'sum');
+    for (const bad of badIds) {
+        assert.throws(() => t.link(bad, 1), /\[lite-logn\]/, 'link u ' + String(bad));
+        assert.throws(() => t.cut(0, bad), /\[lite-logn\]/, 'cut v ' + String(bad));
+        assert.throws(() => t.connected(bad, 1), /\[lite-logn\]/, 'connected u ' + String(bad));
+        assert.throws(() => t.hasEdge(0, bad), /\[lite-logn\]/, 'hasEdge v ' + String(bad));
+        assert.throws(() => t.componentAggregate(bad), /\[lite-logn\]/, 'componentAggregate ' + String(bad));
+        assert.throws(() => t.subtreeAggregate(bad, 1), /\[lite-logn\]/, 'subtreeAggregate v ' + String(bad));
+        assert.throws(() => t.at(bad), /\[lite-logn\]/, 'at ' + String(bad));
+        assert.throws(() => t.setValue(bad, 1), /\[lite-logn\]/, 'setValue id ' + String(bad));
+    }
+    // bad VALUE doors (setValue): non-finite, gcd / sum domain
+    for (const bad of [NaN, Infinity, -Infinity, '1', 1n, null, {}, Symbol('v')]) {
+        assert.throws(() => t.setValue(0, bad), /\[lite-logn\]/, 'setValue value ' + String(bad));
+    }
+    assert.throws(() => t.setValue(0, t._sumBound * 1.0000001), /\[lite-logn\]/, 'sum value above the bound');
+    const g = new EulerTourTree(8, 'gcd');
+    assert.throws(() => g.setValue(0, -1), /\[lite-logn\]/, 'gcd value negative');
+    assert.throws(() => g.setValue(0, 1.5), /\[lite-logn\]/, 'gcd value non-integer');
+
+    // self-link, link on connected, cut non-edge
+    assert.throws(() => t.link(2, 2), /\[lite-logn\]/, 'self-link');
+    t.link(0, 1);
+    assert.throws(() => t.link(0, 1), /\[lite-logn\]/, 'link on already-connected endpoints');
+    assert.throws(() => t.cut(0, 2), /\[lite-logn\]/, 'cut a non-edge');
+    // subtree over a non-edge throws
+    assert.throws(() => t.subtreeAggregate(0, 2), /\[lite-logn\]/, 'subtreeAggregate over a non-edge');
+
+    // EulerTourTree answers SUBTREE / COMPONENT folds only: NO path fold, NO evert (the LinkCutTree
+    // asymmetry, 0021 / 0022). Keep this next to LinkCutTree's no-subtreeAggregate assertion above.
+    assert.equal(typeof t.pathAggregate, 'undefined', 'EulerTourTree has no pathAggregate (subtree/component-only)');
+    assert.equal(typeof t.evert, 'undefined', 'EulerTourTree has no evert (unrooted forest)');
 });

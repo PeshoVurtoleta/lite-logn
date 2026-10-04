@@ -1,11 +1,11 @@
 # lite-logn -- which structure to pick (GUIDE)
 
 A repo-only decision guide for the O(log n) family: which member, reach-for /
-avoid, and how to measure the logarithm yourself. At v1.4.1 nineteen members have
+avoid, and how to measure the logarithm yourself. At v1.5.0 twenty members have
 shipped -- BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat,
 MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D,
 SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree,
-CartesianTree and LinkCutTree -- so this guide carries their per-member sections. It is NOT an API
+CartesianTree, LinkCutTree and EulerTourTree -- so this guide carries their per-member sections. It is NOT an API
 encyclopedia (that is the README + `LogN.d.ts`); it answers "which member, and is
 my logarithm real?"
 
@@ -34,7 +34,7 @@ gate shape.
 ## Which member? (decision flowchart)
 
 ASCII, routes on the discriminating questions. `(wc)` = worst-case O(log n),
-`(am)` = amortized, `(exp)` = expected. At v1.4.1 all nineteen members have
+`(am)` = amortized, `(exp)` = expected. At v1.5.0 all twenty members have
 shipped; each branch's `[vX.Y.Z]` tag records the release it landed in.
 
 ```
@@ -109,6 +109,12 @@ START -- what do you need?
     evert / reroot) where you fold a PATH (min / max / sum /
     gcd) or ask connectivity as the tree SHAPE changes edge by
     edge? (dynamic connectivity / dynamic MST / LCA under edits) -> LinkCutTree (amortized) [v1.3.0]
+|
++-- A DYNAMIC UNROOTED FOREST under LINK / CUT where you fold a
+    SUBTREE (v's side of edge (v, p)) or a whole COMPONENT
+    (min / max / sum / gcd), or ask read-only connectivity, as
+    the tree SHAPE changes? (the LinkCutTree sibling: subtree /
+    component folds, not path folds)                           -> EulerTourTree (expected) [v1.5.0]
 ```
 
 Heap tiebreak: **BinaryHeap** for ONE frozen extreme (min OR max) with an
@@ -199,10 +205,11 @@ the leanest iteration); reach for a BST when inserts and deletes are frequent.
 | OFFLINE range ORDER STATISTIC over a FIXED sequence: k-th smallest value in an INDEX range (quantile / median), plus access / rank / select + O(log n) rangeCount; build once, immutable | WaveletTree | O(log n) access / rank / select / quantile / rangeCount; O(n log sigma) build + space (disclosed) | 1.1.0 |
 | OFFLINE range MINIMUM / MAXIMUM over a FIXED sequence: the INDEX (or value) of the extreme in an INDEX range (RMQ), AND you want a walkable parent/child/depth tree (RMQ = LCA); build once, immutable | CartesianTree | O(log n) rangeMinIndex / rangeMin via an LCA climb; O(1) at / parent / left / right / depth / root; O(n) build + O(n log n) lift + space (disclosed) | 1.2.0 |
 | DYNAMIC forests: PATH aggregates (min / max / sum / gcd) under link / cut / evert, dynamic connectivity, dynamic MST / LCA under edits -- the tree SHAPE changes | LinkCutTree | amortized O(log n) link / cut / evert / findRoot / connected / pathAggregate / setValue; O(1) at; fixed vertex set, EDGES flip only (0 B/op) | 1.3.0 |
+| DYNAMIC forests: SUBTREE / whole-COMPONENT aggregates (min / max / sum / gcd) + read-only connectivity under link / cut over an UNROOTED forest -- the LinkCutTree sibling (subtree, not path) | EulerTourTree | expected O(log n) link / cut / connected / componentAggregate / componentSize / subtreeAggregate / subtreeSize / hasEdge / setValue; O(1) at; fixed vertex set, NON-mutating reads, EDGES flip only (0 B/op) | 1.5.0 |
 
 Per-member "reach for it / avoid it / measure it yourself" sections land with
 each member release (BinaryHeap's section is pending; Fenwick's, SegmentTree's,
-SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's, WaveletTree's, CartesianTree's and LinkCutTree's are below).
+SkipList's, Treap's, Scapegoat's, MinMaxHeap's, SplayTree's, BinomialHeap's, PairingHeap's, FibonacciHeap's, Fenwick2D's, SegmentTree2D's, SortedArray's, PersistentSegTree's, MergeSortTree's, WaveletTree's, CartesianTree's, LinkCutTree's and EulerTourTree's are below).
 
 ---
 
@@ -232,6 +239,7 @@ The default log2(n)-axis ops, cheapest per level first:
 | `MinMaxHeap.popMin` | 10.3 | 0.99 | 12 | a double-ended priority queue (both extremes), the leanest heap store |
 | `SkipList.set` | 12.1 | 0.985 | 88 | as above -- insert is a double descent + a random-height splice |
 | `LinkCutTree.pathAggregate` | ~56 | 0.99 | ~33 (8 flat columns / vertex) | dynamic forests: PATH folds under link / cut / evert, dynamic connectivity / MST -- amortized, MAX single-op disclosed |
+| `EulerTourTree.subtreeAggregate` | ~92 | 0.98-0.99 | ~188 (node columns + arc table / vertex) | dynamic forests: SUBTREE / COMPONENT folds + read-only connectivity under link / cut -- expected, NON-mutating reads, MAX single link / cut disclosed |
 | `WaveletTree.quantile` | 15.2 | 0.97 | n log sigma bits | offline range ORDER STATISTIC (k-th smallest in an index range) + access / rank / select + O(log n) rangeCount; build-once immutable |
 | `PairingHeap.popMin` | 21.4 | 0.99 | 36 | an addressable mergeable PQ with O(1) meld + decreaseKey (Dijkstra / Prim) |
 | `SplayTree.get` | 27.3 | 0.98 | 28 | skewed / temporally-local access -- hot keys ride near the root (amortized) |
@@ -1031,8 +1039,8 @@ cycle-creating edge, so the structure stays a FOREST.
   are cheaper than a link-cut tree when no edge ever moves. LinkCutTree pays for dynamism you are not
   using.
 - You need a SUBTREE aggregate (fold every descendant of a node), not a PATH aggregate. LinkCutTree
-  is **path-only** -- subtree folds are the documented boundary of a future **EulerTourTree** sibling
-  (an Euler-tour + balanced-BST decomposition). Do not force a subtree query through path folds.
+  is **path-only** -- subtree folds are the shipped **EulerTourTree** sibling's job (v1.5.0,
+  an Euler-tour + balanced-BST decomposition). Reach for EulerTourTree for a subtree or component fold, not path folds.
 - Your fold is NOT commutative (e.g. non-abelian matrix products where order matters). `evert`
   relies on the fold being COMMUTATIVE so that reversal is aggregate-invariant (a lazy `_rev` bit, no
   mirrored aggregate). The four shipped folds (min / max / sum / gcd) are all commutative by
@@ -1057,6 +1065,53 @@ AMORTIZED member: the witness prints the MAX single `pathAggregate` as a disclos
 `node --expose-gc test/torture.mjs` proves link / cut / evert / findRoot / connected / pathAggregate
 / setValue / at at 0 B/op -- the vertex set is fixed and every op flips EDGES only, so even a
 link / cut storm allocates nothing.
+
+
+---
+
+## EulerTourTree -- the dynamic UNROOTED forest (link / cut) with SUBTREE / COMPONENT aggregates
+
+**Reach for it when** your tree TOPOLOGY changes over time and you need, many times, a **subtree or
+whole-component aggregate, or a read-only connectivity query, as edges come and go**. It is the
+**LinkCutTree sibling**: over a FIXED vertex set `[0, capacity)` it keeps an UNROOTED forest under
+`link(u, v)` / `cut(u, v)` and answers `connected(u, v)`, `componentAggregate(v)` /
+`componentSize(v)`, and `subtreeAggregate(v, p)` / `subtreeSize(v, p)` -- v's side of edge (v, p) --
+plus `hasEdge(u, v)`, all in EXPECTED O(log n), zero-allocation. The reads are NON-mutating (parent
+climbs + top-down range folds over a parent-pointer treap holding each tree's Euler tour -- no splay),
+so there is no restructuring-on-read hazard. Canonical uses: **dynamic connectivity** in a forest
+where you also need subtree sums / minima, incremental subtree analytics under edge insert / delete,
+and as the per-level substrate of general-graph dynamic connectivity (Holm-de Lichtenberg-Thorup).
+
+**LCT or ETT?** Path fold or `evert` (re-root) -> **LinkCutTree**. Subtree or component fold, read-only
+connectivity -> **EulerTourTree**.
+
+**Avoid it when:**
+
+- You need a PATH aggregate (fold the vertices on the path between two nodes) or `evert` / re-root.
+  That is **LinkCutTree**'s job; EulerTourTree has NO path fold and NO evert (the sibling asymmetry).
+- Your data is STATIC (build once, never re-link). For offline subtree / range folds over a fixed tree
+  a flat segment tree over an Euler-order linearization is lighter; EulerTourTree pays for dynamism.
+- Your fold is NOT commutative + associative. The subtree fold folds a tour segment (or its complement
+  as two ranges), which needs no inverse but does assume a commutative + associative fold; the four
+  shipped folds (min / max / sum / gcd) qualify.
+- You need worst-case (not expected) per op. EulerTourTree is a randomized **TREAP**, so an unlucky
+  shape spikes a single `link` / `cut` (the witness DISCLOSES the MAX single link + cut). If a single
+  slow op is unacceptable, this is the wrong tool -- the same honesty as SkipList / Treap.
+
+**Measure it yourself:** `npm run witness` fits `subtreeAggregate` (the fold over the parent's side of
+a random edge, over a random recursive tree whose treap shape is kept random by interleaved cut +
+relink churn) against the DEFAULT axis `nsPerOp = intercept + slope*log2(n)`; it must clear the shared
+R^2 floor (0.958) and sit inside its band, over exact power-of-two sizes `[2^9, 2^17]`, while the
+O(component) adjacency-DFS foil (which goes O(n) on a large side) leaves the line. The per-level slope
+band is `[55.16, 128.71]`: the median of 15 warm post-torture fits (91.936 ns/level, R^2 0.975-0.993)
+x `[0.6, 1.4]`, under the frozen 0.958 floor. Because
+the treap climb + range fold reads scattered slots and its post-torture run carries thermal residue,
+this lane opts into the MEDIAN of 9 independent sweep-fits as measurement-quality insurance (see
+[`decisions/0022-eulertourtree.md`](./decisions/0022-eulertourtree.md)). EXPECTED member: the witness
+prints the MAX single `link` + `cut` as a disclosure, never gated. `node --expose-gc test/torture.mjs`
+proves link / cut / setValue / connected / componentSize / subtreeSize / hasEdge at 0 B/op and the
+double-returning folds at <= 1 box/op when not inlined (the S7 boundary) -- the vertex set is fixed and
+every op flips EDGES + arc indices only, so even a link / cut storm allocates nothing.
 
 ---
 

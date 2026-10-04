@@ -38,7 +38,7 @@
  * an OFFLINE proof tool, never a hot-path dependency.
  */
 
-import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../LogN.js';
+import { BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree, EulerTourTree } from '../LogN.js';
 import { fileURLToPath } from 'node:url';
 
 // --- least-squares fit: y = intercept + slope * x --------------------------
@@ -543,6 +543,23 @@ export const CT_RMQ_SLOPE_HI = 3.93;          // median 2.8092 * 1.4
 export const LCT_PATH_SLOPE_LO = 33.74;       // warm median 56.2396 * 0.6
 export const LCT_PATH_SLOPE_HI = 78.74;       // warm median 56.2396 * 1.4
 
+// --- EulerTourTree (v1.5.0): shared R^2 floor, OWN subtreeAggregate band on the DEFAULT log2 axis (0022) --
+// Same procedure (D-08 / decisions/0004): the R^2 floor (0.958) is FROZEN family-wide; EulerTourTree's
+// gated op is subtreeAggregate(v, p) -- the fold over v's side of edge (v, p), a NON-mutating treap read
+// (two parent climbs to rank the arc pair + a top-down range fold). Over a random recursive tree whose treap
+// shape is kept random by interleaved cut + relink churn, the climbs + fold track the treap depth ~ log2 n,
+// so the line fits the DEFAULT log2(n) axis. The naive O(component) DFS foil (adjacency-list walk over v's
+// side) is O(n) on a large component -- exponential on the log2(n) axis -- and MUST miss the floor. An
+// EXPECTED member (randomized treap, like SkipList / Treap), so it DISCLOSES (never gates) its MAX single
+// link + cut. The lane opts into the median-of-fits ETT_FIT_RUNS hook for post-torture thermal robustness.
+// CALIBRATED (release session, 2026-10-04): median of 15 warm post-torture single fits = 91.936
+// ns/level (range 88.39..94.78, R^2 0.9749..0.9931) -> band [55.16, 128.71]. Earlier solo probe (coder B, 3 warm runs on 2^9..2^17, 200000-iter min-over-25-batches, the SHIPPED
+// big-side mulberry32 workload): slopes 85.799 86.183 89.799 ns/level, MEDIAN 86.1830; single-fit R^2
+// 0.9793 / 0.9879 / 0.9906 (all >> the 0.958 floor -- the lane is ON-LINE); the O(component) DFS foil
+// fit R^2 0.789 (comfortably OFF the line).
+export const ETT_SUBTREE_SLOPE_LO = 55.16;    // median-of-15 91.936 * 0.6 (warm post-torture; R^2 0.9749..0.9931)
+export const ETT_SUBTREE_SLOPE_HI = 128.71;   // median-of-15 91.936 * 1.4 (slope range 88.39..94.78)
+
 // Gated pop sweep: pinned to the steady band (L1 micro-floor below and the
 // memory wall above ~1e6 both flake the fit). The foil sweep stays where an
 // O(n^2) sorted-array build is affordable.
@@ -706,6 +723,26 @@ const LCT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
 // median-of-fits rejects it. Odd so the median is a real sample. Measurement-quality only: the frozen 0.958
 // floor and the slope band are UNTOUCHED, and a genuine O(n) shape fails every fit. Scoped to this lane.
 const LCT_FIT_RUNS = 7;
+// EulerTourTree's gated subtreeAggregate sweep: EXACT powers of two 2^9..2^17 (8 levels of log2(n)
+// span -- the 1.4.1 lesson in decisions/0004 "Post-1.4.1": a fast lane needs dynamic range). The bottom
+// starts at 2^9 (dropping the too-fast, noisy sub-L2 points: below ~2^9 the two arc-table probes + the
+// short rank climbs are pure FIXED overhead well under the structural log signal, so the low points sit
+// flat off the line -- the SplayTree.get / SortedArray.get / LinkCutTree "drop the too-fast low point"
+// lesson). subtreeAggregate is a NON-mutating treap read (two parent climbs to rank the arc pair + a
+// top-down range fold) whose cost tracks the treap depth ~ log2 n once memory latency dominates the fixed
+// overhead. The top is pinned at 2^17 (above it the ~200 B/vertex columns leave the steady band and DRAM
+// latency curves the fit -- lite-o1 ADR-0004). Exact powers keep the expected depth an integer so the
+// staircase maps cleanly onto the continuous log2(n) axis. Its O(component) DFS foil stays on the small
+// O(n^2)-affordable sweep.
+const ETT_SWEEP = [9, 10, 11, 12, 13, 14, 15, 16, 17].map((k) => 2 ** k);
+const ETT_FOIL_SWEEP = [1e3, 2e3, 4e3, 8e3, 1.6e4, 3.2e4];
+// EulerTourTree.subtreeAggregate gates on the MEDIAN of ETT_FIT_RUNS independent sweep-fits (the
+// registry `fitRuns` hook), same mechanism as SplayTree / WaveletTree / CartesianTree / LinkCutTree:
+// the witness runs right after torture (2M+ ops across 20 members), whose scheduler / thermal residue
+// tilts the occasional sweep; the median-of-fits rejects it. Odd so the median is a real sample.
+// Measurement-quality only: the frozen 0.958 floor and the slope band are UNTOUCHED, and a genuine
+// O(n) shape fails every fit. Scoped to this lane.
+const ETT_FIT_RUNS = 9;
 // MergeSortTree.countLE gates on the MEDIAN of MST_FIT_RUNS independent sweep-fits (the registry
 // `fitRuns` hook), same mechanism as Fenwick2D / SegmentTree.update / PST: the witness runs right after
 // torture (2M+ ops across 16 members), whose scheduler / thermal residue tilts the occasional sweep;
@@ -1838,6 +1875,137 @@ function measureLctPathAggFoil(n) {
     return elapsed / count;
 }
 
+// --- EulerTourTree measurement (subtreeAggregate hot op, its O(component) DFS foil, MAX single link/cut) ---
+// The forest is built OUTSIDE timing: a RANDOM RECURSIVE TREE over n vertices (vertex i > 0 picks a
+// uniform-random parent in [0, i)), each vertex seeded a bounded Smi value. The treap shape is then kept
+// RANDOM by an interleaved cut + relink churn pass (cut each tree edge and relink it, which reroots +
+// re-splits the tour so the treap re-randomizes). The timed window is subtreeAggregate only, hammered over
+// a FIXED (v, p) edge set captured OUTSIDE timing -- the n-1 tree edges in a power-of-two-padded Int32Array,
+// cycled by a mask -- min-over-batches (SplayTree.get's discipline). Every op reads a DIFFERENT edge so no
+// tour segment stays hot. Seeded values are & 0xff and a subtree holds <= n vertices, so the fold stays a Smi
+// (no HeapNumber boxed per op -- the D6 / S7 discipline).
+const ETT_ITERS = 200000;   // hammered ops per timed batch
+const ETT_BATCH = 25;       // min-over-batches
+
+// Module-level captures for the MAX single link + cut observed across the sweep -- the honesty hook an
+// EXPECTED member must not hide behind its mean (an unlucky-shape split/merge chain).
+let EULERTOURTREE_MAX_LINK_NS = 0;
+let EULERTOURTREE_MAX_CUT_NS = 0;
+
+// Build a random recursive tree + churn it, returning { ett, vArr, pArr, mask }: vArr/pArr are the fixed
+// (v, p) edge set padded to a power of two, mask = that length - 1. Alloc-free scratch is built OUTSIDE timing.
+function buildEttRandomTree(n, seedBase) {
+    const ett = new EulerTourTree(n, 'sum');
+    const rng = mulberry32(seedBase ^ n);
+    for (let k = 0; k < n; k++) ett.setValue(k, (rng() * 256) | 0);
+    const par = new Int32Array(n);
+    par[0] = -1;
+    for (let i = 1; i < n; i++) { const p = (rng() * i) | 0; par[i] = p; ett.link(i, p); }
+    // churn: cut + relink each edge once so the treap re-randomizes (shape stays random, tree unchanged).
+    for (let i = 1; i < n; i++) { ett.cut(i, par[i]); ett.link(i, par[i]); }
+    const m = n - 1;                                   // edge count
+    let sz = 1; while (sz < m) sz *= 2;                // power-of-two pad for the cycle mask
+    const vArr = new Int32Array(sz), pArr = new Int32Array(sz);
+    // Fold the PARENT's side of each edge (subtreeAggregate(par[e], e)): over a random recursive tree a
+    // child's subtree averages O(log n), so the parent's side is the big O(n) part. That keeps the O(component)
+    // DFS foil genuinely super-logarithmic (it MUST miss the floor) while the treap still folds it in O(log n)
+    // (the complement = two ranges). Both the lane and the foil fold the SAME (v, p) set -- a fair rival.
+    for (let i = 0; i < sz; i++) { const e = 1 + (i % m); vArr[i] = par[e]; pArr[i] = e; }
+    return { ett, vArr, pArr, mask: sz - 1 };
+}
+
+// subtreeAggregate: hammer v's-side folds over the fixed edge set. Return the MIN per-op time over
+// ETT_BATCH batches. Also samples the MAX single link + cut (disclosure).
+function measureEttSubtreeAgg(n) {
+    const { ett, vArr, pArr, mask } = buildEttRandomTree(n, 0x5A17);
+    let sink = 0;
+    for (let w = 0; w < ETT_ITERS; w++) sink += ett.subtreeAggregate(vArr[w & mask], pArr[w & mask]) | 0; // warm
+    let best = Infinity;
+    for (let b = 0; b < ETT_BATCH; b++) {
+        const t0 = nowNs();
+        for (let i = 0; i < ETT_ITERS; i++) sink += ett.subtreeAggregate(vArr[i & mask], pArr[i & mask]) | 0;
+        const e = (nowNs() - t0) / ETT_ITERS;
+        if (e < best) best = e;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    sampleEttMaxLinkCut(n);
+    return best;
+}
+
+// Build a fresh random recursive tree, then time EVERY individual link (during build) and cut (during a
+// teardown pass), keeping the tallest of each. The random parent picks make this the realistic worst single
+// op an EXPECTED member must disclose. DISCLOSURE, not gated.
+function sampleEttMaxLinkCut(n) {
+    const ett = new EulerTourTree(n, 'sum');
+    const rng = mulberry32(0xF00D ^ n);
+    for (let k = 0; k < n; k++) ett.setValue(k, (rng() * 256) | 0);
+    const par = new Int32Array(n);
+    par[0] = -1;
+    for (let i = 1; i < n; i++) {
+        const p = (rng() * i) | 0; par[i] = p;
+        const t0 = nowNs();
+        ett.link(i, p);
+        const e = nowNs() - t0;
+        if (e > EULERTOURTREE_MAX_LINK_NS) EULERTOURTREE_MAX_LINK_NS = e;
+    }
+    for (let i = n - 1; i >= 1; i--) {
+        const t0 = nowNs();
+        ett.cut(i, par[i]);
+        const e = nowNs() - t0;
+        if (e > EULERTOURTREE_MAX_CUT_NS) EULERTOURTREE_MAX_CUT_NS = e;
+    }
+}
+
+// subtreeAggregate FOIL: the naive default before you know the Euler-tour trick -- a DFS over an adjacency
+// list from v, NOT crossing to p, folding each vertex value. O(component) per query, O(n) on a large side, so
+// on the log2(n) axis its per-op cost is exponential and a straight-line fit MUST MISS the R^2 floor. O(n^2)
+// total, so the sweep stays small. A random recursive tree + an iterative stack (no recursion), the honest baseline.
+function measureEttSubtreeAggFoil(n) {
+    const reps = Math.max(3, Math.ceil(2e8 / (n * n)));
+    // adjacency as a flat CSR over the random recursive tree (each i>0 has an edge to a uniform parent).
+    const par = new Int32Array(n);
+    const val = new Float64Array(n);
+    const rng = mulberry32(0x2468 ^ n);
+    const deg = new Int32Array(n);
+    par[0] = -1; val[0] = (rng() * 256) | 0;
+    for (let i = 1; i < n; i++) { const p = (rng() * i) | 0; par[i] = p; val[i] = (rng() * 256) | 0; deg[i]++; deg[p]++; }
+    const head = new Int32Array(n + 1);
+    for (let i = 0; i < n; i++) head[i + 1] = head[i] + deg[i];
+    const adj = new Int32Array(head[n]);
+    const cur = head.slice(0, n);
+    for (let i = 1; i < n; i++) { const p = par[i]; adj[cur[i]++] = p; adj[cur[p]++] = i; }
+    // the fixed edge set (par[v], v); fold the PARENT's (big, O(n)) side by an iterative DFS from par[v],
+    // never crossing to v -- the same side the ETT lane folds, so the rival is fair.
+    { let s = 0; for (let v = 1; v < n; v++) s += foilSubtreeSum(par[v], v, head, adj, val) | 0; if (s < 0) throw new Error('unreachable'); } // warm
+    let elapsed = 0, count = 0, sink = 0;
+    for (let r = 0; r < reps; r++) {
+        const t0 = nowNs();
+        for (let v = 1; v < n; v++) sink += foilSubtreeSum(par[v], v, head, adj, val) | 0;
+        elapsed += nowNs() - t0;
+        count += n - 1;
+    }
+    if (sink < 0) throw new Error('unreachable'); // keep sink live
+    return elapsed / count;
+}
+
+// O(component) recursive-free subtree sum of v's side of edge (v, p) over the CSR adjacency. A fixed
+// preallocated stack of (node, parent) pairs packed into one Int32Array keeps it allocation-free per call.
+const FOIL_STACK = new Int32Array(1 << 17);   // (node, parent) pairs; sized for the small foil sweep (<= 3.2e4)
+function foilSubtreeSum(v, p, head, adj, val) {
+    let s = 0, top = 0;
+    FOIL_STACK[top++] = v; FOIL_STACK[top++] = p;
+    while (top > 0) {
+        const par = FOIL_STACK[--top];
+        const x = FOIL_STACK[--top];
+        s += val[x];
+        for (let e = head[x]; e < head[x + 1]; e++) {
+            const y = adj[e];
+            if (y !== par) { FOIL_STACK[top++] = y; FOIL_STACK[top++] = x; }
+        }
+    }
+    return s;
+}
+
 // --- PersistentSegTree measurement (query hot op + its O(n) linear-scan foil) -
 // The tree is built OUTSIDE timing: v0 plus PST_VERS path-copying updates so several versions
 // coexist, then the timed window is the range query [1, n-2] over a RANDOM existing version
@@ -2677,6 +2845,22 @@ export const MEMBERS = [
         // of-LCT_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
         fitRuns: LCT_FIT_RUNS,
     },
+    {
+        name: 'EulerTourTree',
+        op: 'subtreeAggregate',
+        sweep: ETT_SWEEP,
+        foilSweep: ETT_FOIL_SWEEP,
+        r2Floor: BINARYHEAP_R2_FLOOR,          // shared floor (0022 inherits D-08)
+        slopeLo: ETT_SUBTREE_SLOPE_LO,         // own band (median-of-15 calibrated; 0022)
+        slopeHi: ETT_SUBTREE_SLOPE_HI,
+        run: measureEttSubtreeAgg,
+        foil: measureEttSubtreeAggFoil,
+        foilName: 'adjacency DFS (O(component) per subtree fold)',
+        // MEDIAN-OF-FITS (0022, measurement-quality only): a non-mutating treap range fold over a randomized
+        // shape can dip a single fit's R^2 below the floor in a minority of post-torture runs; the median-of-
+        // ETT_FIT_RUNS clears it reliably. Floor + band unchanged; an O(n) shape fails every fit.
+        fitRuns: ETT_FIT_RUNS,
+    },
 ];
 
 // Measure one lane's main-sweep fit (honoring its median-of-fits `fitRuns` opt-in).
@@ -2703,7 +2887,7 @@ function laneFit(m, xOf) {
 }
 
 async function main() {
-    process.stdout.write('lite-logn O(log n) Witness -- v1.4.1\n');
+    process.stdout.write('lite-logn O(log n) Witness -- v1.5.0\n');
     process.stdout.write('fit: nsPerOp = intercept + slope * log2(n)  (Fenwick2D / SegmentTree2D / MergeSortTree: slope * (log2 n)^2)\n');
     // Offline hygiene: quiesce before timing. This is an OFFLINE proof tool, and in
     // the `verify` chain it runs right after torture (2M+ ops across three members),
@@ -2794,6 +2978,20 @@ async function main() {
         process.stdout.write(
             'LinkCutTree MAX single pathAggregate observed = ' + LINKCUTTREE_MAX_PATH_NS.toFixed(0) +
             ' ns (amortized O(log n) -- disclosed, not gated)\n');
+    }
+    // EulerTourTree honesty prints: the MAX single link + cut (an unlucky-shape split/merge chain) observed
+    // across the sweep. An EXPECTED-O(log n) member (randomized treap) must not masquerade as per-op worst-
+    // case -- a single link/cut can touch a long treap spine even while the mean holds the fitted line. Both
+    // are DISCLOSURES, not gates (the SkipList / Treap randomized precedent).
+    if (EULERTOURTREE_MAX_LINK_NS > 0) {
+        process.stdout.write(
+            'EulerTourTree MAX single link observed = ' + EULERTOURTREE_MAX_LINK_NS.toFixed(0) +
+            ' ns (expected O(log n) -- disclosed, not gated)\n');
+    }
+    if (EULERTOURTREE_MAX_CUT_NS > 0) {
+        process.stdout.write(
+            'EulerTourTree MAX single cut observed = ' + EULERTOURTREE_MAX_CUT_NS.toFixed(0) +
+            ' ns (expected O(log n) -- disclosed, not gated)\n');
     }
     // PairingHeap honesty print: the MAX single popMin (a long two-pass fold) observed across the
     // popMin sweep. An AMORTIZED-O(log n) member must not masquerade as per-op worst-case -- a

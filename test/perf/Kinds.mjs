@@ -33,7 +33,7 @@ import {
     BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap,
     SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D,
     SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree,
-    LinkCutTree,
+    LinkCutTree, EulerTourTree,
 } from '../../LogN.js';
 
 // --- constants (G2) ---------------------------------------------------------
@@ -156,6 +156,9 @@ function fillHeap(Cls, kind, kd) { const h = new Cls(CAP, kd || 'min'); const v 
 function fillMinMax(kind) { const h = new MinMaxHeap(CAP); const v = makeInputs(kind); for (let i = 0; i < CAP; i++) h.push(i, v[i & INMASK]); return h; }
 function fillStaticSrc(kind) { const v = makeInputs(kind); const src = new Float64Array(CAP); for (let i = 0; i < CAP; i++) src[i] = v[i & INMASK]; return src; }
 function fillLct(kind, fold) { const t = new LinkCutTree(CAP, fold); const v = makeInputs(kind); for (let i = 0; i < CAP; i++) t.setValue(i, v[i & INMASK]); for (let i = 1; i < CAP; i++) t.link(i, i - 1); return t; }
+// EulerTourTree: a CAP-vertex CHAIN (link i -> i-1) so subtreeAggregate(v, v-1) and subtreeSize(v, v-1)
+// address a real edge for every v in [1, CAP). Values from the kind, so a frac / p31 fold boxes its return.
+function fillEtt(kind, fold) { const t = new EulerTourTree(CAP, fold); const v = makeInputs(kind); for (let i = 0; i < CAP; i++) t.setValue(i, v[i & INMASK]); for (let i = 1; i < CAP; i++) t.link(i, i - 1); return t; }
 // N2: warm segGcd across gcd / min / max BEFORE building the sum instance.
 function fillLctN2(kind, fold) {
     for (const wf of ['gcd', 'min', 'max', 'sum']) {
@@ -435,6 +438,31 @@ const RAW_LANES = [
     // N2 warmed-polymorphic twin of pathAggregate(u,v).
     { id: 'LCT.pathAggregate(u,v)/n2', io: 'doubleIO', group: 'lct-n2', fold: 'sum', warm: 'n2', make: (k) => fillLctN2(k, 'sum'),
       run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; a += t.pathAggregate(k & MASK, (k * 3 + 7) & MASK); } sink[si & SINKMASK] = a; } },
+
+    // ---- EulerTourTree (v1.5.0, born box-clean: slot-form `_acc` + per-kind `_pull`, no tagged phi) ----
+    // setValue is one double ARG (k=1 for a non-Smi kind). The folds return one double (k=1 for a non-Smi
+    // fold value): subtreeAggregate / componentAggregate are 'sum' returns, at is an 'idv' return. connected /
+    // cut/link / componentSize / subtreeSize / hasEdge cross no double and return a Smi (k=0). NONE is in
+    // BOUNDARY: in the normal shard the public call inlines so the return never crosses (reads 0, gated at
+    // ZERO); the ni- shard never inlines, so laneK grants the k=1 budget the single S7 box fits.
+    { id: 'ETT.setValue', io: 'doubleIO', group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; t.setValue(k & MASK, IN[k & INMASK]); a += (k & MASK); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.subtreeAggregate', io: 'doubleIO', group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; const v = 1 + (k & (MASK >> 1)); a += t.subtreeAggregate(v, v - 1); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.componentAggregate', io: 'doubleIO', group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; a += t.componentAggregate(k & MASK); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.at', io: 'doubleIO', group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; a += t.at(k & MASK); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.connected', io: 'zero', k: 0, group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; if (t.connected(k & MASK, (k * 3 + 7) & MASK)) a += 1; } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.cut/link', io: 'zero', group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; const v = 1 + (k & (MASK >> 1)); t.cut(v, v - 1); t.link(v, v - 1); a += v; } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.componentSize', io: 'zero', k: 0, group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; a += t.componentSize(k & MASK); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.subtreeSize', io: 'zero', k: 0, group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; const v = 1 + (k & (MASK >> 1)); a += t.subtreeSize(v, v - 1); } sink[si & SINKMASK] = a; } },
+    { id: 'ETT.hasEdge', io: 'zero', k: 0, group: 'ett', fold: 'sum', make: (k) => fillEtt(k, 'sum'),
+      run: (t, IN, base, sink, si) => { let a = 0; for (let j = 0; j < CHUNK; j++) { const k = (base + j) | 0; const v = 1 + (k & (MASK >> 1)); if (t.hasEdge(v, v - 1)) a += 1; } sink[si & SINKMASK] = a; } },
 ];
 
 // v1.4.0 API lanes exist ONLY when the runtime has the method (they auto-skip when the gate is run
@@ -503,6 +531,10 @@ const SIG = {
     'CartesianTree.rangeMin': [0, 'min'], 'CartesianTree.rangeMinIndex': [0, 'none'], 'CartesianTree.at': [0, 'idv'],
     'LCT.setValue': [1, 'none'], 'LCT.pathAggregate(v)': [0, 'sum'], 'LCT.pathAggregate(u,v)': [0, 'sum'], 'LCT.at': [0, 'idv'],
     'LCT.findRoot': [0, 'none'], 'LCT.cut/link': [0, 'none'], 'LCT.connected': [0, 'none'], 'LCT.pathAggregate(u,v)/n2': [0, 'sum'],
+    // EulerTourTree: setValue one double ARG; subtreeAggregate / componentAggregate 'sum' returns; at 'idv';
+    // connected / cut/link / componentSize / subtreeSize / hasEdge cross no double, return a Smi (k=0).
+    'ETT.setValue': [1, 'none'], 'ETT.subtreeAggregate': [0, 'sum'], 'ETT.componentAggregate': [0, 'sum'], 'ETT.at': [0, 'idv'],
+    'ETT.connected': [0, 'none'], 'ETT.cut/link': [0, 'none'], 'ETT.componentSize': [0, 'none'], 'ETT.subtreeSize': [0, 'none'], 'ETT.hasEdge': [0, 'none'],
 };
 // map lanes (Treap / Scapegoat / SkipList / SplayTree / SortedArray) share a signature by op.
 const MAP_SIG = { get: [1, 'none'], has: [1, 'none'], set: [1, 'none'], delete: [1, 'none'], successor: [1, 'idv'], predecessor: [1, 'idv'], rank: [1, 'none'], select: [0, 'idv'] };
@@ -582,6 +614,11 @@ export const BOUNDARY = new Set([
     // (Kinds.test.mjs) forced this removal. pathAggregate(u, v) still carries its single S7 return box
     // (~13, within the k=1 budget), so it stays.
     'LCT.pathAggregate(u,v)', 'LCT.pathAggregate(u,v)/n2',
+    // ETT.subtreeAggregate carries its single S7 return box in the NORMAL shard too (its body -- two arcFind
+    // probes + two rank climbs + a range fold -- does NOT inline into the measurement loop, so the 'sum'
+    // return crosses the boundary and boxes ~1/op, within the k=1 budget). componentAggregate / at DO inline
+    // (they read ~0 at ZERO), so they stay OUT of BOUNDARY -- the LCT.pathAggregate(u,v)-in vs (v)-out split.
+    'ETT.subtreeAggregate',
 ]);
 // Removed (stage-G QA item 4): SegmentTree.query/gcd ([0,none]), LCT.findRoot / cut/link /
 // connected ([0,none]) all have k=0 for EVERY kind and shard, so being in BOUNDARY changed
@@ -676,7 +713,7 @@ export function staleZeroBoundary() {
 const MEASURE_FLAGS = ['--max-semi-space-size=4', '--min-semi-space-size=4', '--no-concurrent-recompilation'];
 const GROUPS = ['binheap', 'fenwick', 'fenwick2d', 'seg', 'seg2d', 'pst', 'treap',
     'scapegoat', 'skiplist', 'splay', 'sortedarray', 'minmax', 'binomial', 'pairing',
-    'fib', 'mst', 'wt', 'cartesian', 'lct'];
+    'fib', 'mst', 'wt', 'cartesian', 'lct', 'ett'];
 
 const NOINLINE_FLAGS = MEASURE_FLAGS.concat(['--max-inlined-bytecode-size=0']);
 export const SHARDS = {};

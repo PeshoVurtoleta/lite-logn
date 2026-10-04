@@ -5,7 +5,7 @@
  * session appends a type-level assertion block for its class here. ASCII-only.
  */
 
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, EulerTourTree, ETT_MAX_CAPACITY } from '../../LogN.js';
 
 // VERSION is a string.
 const v: string = VERSION;
@@ -432,3 +432,34 @@ mst.countLE(0, 4, 'x');
 
 // @ts-expect-error -- MergeSortTree is immutable: no set.
 mst.set(0, 1);
+
+// --- EulerTourTree (v1.5.0) -------------------------------------------------
+const ettCap: number = ETT_MAX_CAPACITY;
+const ett = new EulerTourTree(1024, 'sum');
+const ettDefault = new EulerTourTree(1024);          // kind defaults to 'min'
+const ettCapacity: number = ett.capacity;
+const ettKind: 'min' | 'max' | 'sum' | 'gcd' = ett.kind;
+const ettEdges: number = ett.edges;
+const ettLink: EulerTourTree = ett.link(0, 1);       // fluent -> this
+const ettCut: EulerTourTree = ett.cut(0, 1);         // fluent -> this
+const ettSet: EulerTourTree = ett.setValue(0, 2.5);  // fluent -> this
+const ettAt: number = ett.at(0);
+const ettConn: boolean = ett.connected(0, 1);
+const ettCompAgg: number = ett.componentAggregate(0);
+const ettCompSize: number = ett.componentSize(0);
+const ettSubAgg: number = ett.subtreeAggregate(0, 1);
+const ettSubSize: number = ett.subtreeSize(0, 1);
+const ettHasEdge: boolean = ett.hasEdge(0, 1);
+const ettClear: EulerTourTree = ett.clear();         // fluent -> this
+void ettCap; void ettDefault; void ettCapacity; void ettKind; void ettEdges;
+void ettLink; void ettCut; void ettSet; void ettAt; void ettConn; void ettCompAgg;
+void ettCompSize; void ettSubAgg; void ettSubSize; void ettHasEdge; void ettClear;
+
+// @ts-expect-error -- set value must be a number.
+ett.setValue(0, 'x');
+
+// @ts-expect-error -- EulerTourTree answers SUBTREE folds, not PATH folds (that is LinkCutTree).
+ett.pathAggregate(0, 1);
+
+// @ts-expect-error -- EulerTourTree has no evert (that is LinkCutTree).
+ett.evert(0);

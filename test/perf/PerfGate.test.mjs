@@ -20,7 +20,7 @@
  */
 
 import { zgcSuite } from '@zakkster/lite-perf-gate';
-import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree } from '../../LogN.js';
+import { VERSION, BinaryHeap, Fenwick, SegmentTree, SkipList, Treap, Scapegoat, MinMaxHeap, SplayTree, BinomialHeap, PairingHeap, FibonacciHeap, Fenwick2D, SegmentTree2D, SortedArray, PersistentSegTree, MergeSortTree, WaveletTree, CartesianTree, LinkCutTree, EulerTourTree } from '../../LogN.js';
 
 const CAP = 1 << 14;        // heap capacity 16384
 const MASK = CAP - 1;       // power-of-2 mask: id & MASK is always in [0, CAP)
@@ -1740,6 +1740,78 @@ const lctEvertChurn = {
     statsOf(s) { return { grows: lctGrows(s) }; },
 };
 
+/** EulerTourTree's zero-alloc counter: its `_agg` Float64 column, fixed at construction. link / cut flip
+ *  EDGES + arc indices only and split / merge use the preallocated `_stk` scratch, so the window delta is 0. */
+function ettGrows(s) { return s.ett._agg.buffer.byteLength; }
+
+const ETT_LEN = 1 << 12;        // 4096 vertices
+const ETTMASK = ETT_LEN - 1;
+
+/** A warmed EulerTourTree over ETT_LEN vertices: a balanced binary-ish tree (each vertex linked to its halved
+ *  index), values seeded, so subtree folds climb + fold a ~log n treap. */
+function ettFill() {
+    const ett = new EulerTourTree(ETT_LEN, 'sum');
+    for (let i = 0; i < ETT_LEN; i++) ett.setValue(i, (i * 2654435761) & ETTMASK);
+    for (let i = 1; i < ETT_LEN; i++) ett.link(i, i >> 1);
+    return ett;
+}
+
+/** subtreeAggregate churn: the GATED witness op -- fold v's side of edge (v, v>>1), a NON-mutating treap
+ *  read, folded. An escaping probe rides alongside so escape analysis cannot elide it. */
+const ettSubtreeAggChurn = {
+    name: 'EulerTourTree subtreeAggregate churn (v-side subtree fold, the gated op)',
+    setup() { return { ett: ettFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ett;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const v = 1 + (tick & (ETTMASK >> 1));   // a non-root vertex; edge (v, v>>1) exists
+            acc = (acc + (t.subtreeAggregate(v, v >> 1) | 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+        const probe = new Array(1); probe[0] = acc; globalThis.__ettProbe = probe; // escaping: no EA elision
+    },
+    statsOf(s) { return { grows: ettGrows(s) }; },
+};
+
+/** cut/link churn: the dynamic-forest hot loop -- cut the child edge, re-link it. Flips EDGES + arc slots
+ *  only (the arc free-list hands out indices), so the backing columns never grow. */
+const ettCutLinkChurn = {
+    name: 'EulerTourTree cut/link churn (cut + re-link an edge, the dynamic-forest loop)',
+    setup() { return { ett: ettFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ett;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            const x = 1 + (tick & (ETTMASK >> 1));   // a non-root vertex in [1, ETT_LEN/2)
+            const p = x >> 1;
+            t.cut(x, p);
+            t.link(x, p);
+            acc = (acc + x) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: ettGrows(s) }; },
+};
+
+/** connected churn: read-only connectivity over two NON-mutating parent climbs (k=0, no restructuring). */
+const ettConnectedChurn = {
+    name: 'EulerTourTree connected churn (read-only connectivity, non-mutating)',
+    setup() { return { ett: ettFill(), tick: 0, acc: 0 }; },
+    hot(s, n) {
+        const t = s.ett;
+        let tick = s.tick | 0, acc = s.acc | 0;
+        for (let i = 0; i < n; i++) {
+            acc = (acc + (t.connected(tick & ETTMASK, (tick * 2246822519) & ETTMASK) ? 1 : 0)) | 0;
+            tick = (tick + 1) | 0;
+        }
+        s.tick = tick | 0; s.acc = acc | 0;
+    },
+    statsOf(s) { return { grows: ettGrows(s) }; },
+};
+
 /**
  * The teeth (G8 / N4): exactly ONE HeapNumber box per op -- a non-Smi double stored
  * into a PACKED_ELEMENTS (tagged) array slot. This is the 16 B/op signal the audit
@@ -1815,6 +1887,7 @@ zgcSuite({
         mstCountLEChurn, mstRangeCountChurn,
         wtAccessChurn, wtRankChurn, wtSelectChurn, wtQuantileChurn, wtRangeCountChurn,
         ctRangeMinIndexChurn, ctRangeMinChurn, ctTopologyChurn,
-        lctPathAggChurn, lctLinkCutChurn, lctEvertChurn].map(chunked),
+        lctPathAggChurn, lctLinkCutChurn, lctEvertChurn,
+        ettSubtreeAggChurn, ettCutLinkChurn, ettConnectedChurn].map(chunked),
     mustFail: [chunked(teethOneBoxAlloc)],
 });
