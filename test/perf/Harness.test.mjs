@@ -52,6 +52,11 @@ function run(args, env, timeoutMs) {
     return new Promise((resolve) => {
         const envAll = { ...process.env, ...env };
         delete envAll.NODE_TEST_CONTEXT;               // the child is its own test run
+        // Colourless children: an inherited FORCE_COLOR (IDE runners, CI) makes the spec reporter wrap
+        // the pass / fail glyphs in ANSI escapes, so the verdict parser below would read every test as
+        // undefined. NO_COLOR pins plain output whatever the parent environment is.
+        delete envAll.FORCE_COLOR;
+        envAll.NO_COLOR = '1';
         for (const k of Object.keys(env)) if (env[k] === undefined) delete envAll[k];
         const child = spawn(process.execPath, args, { cwd: ROOT, env: envAll, stdio: ['ignore', 'pipe', 'pipe'] });
         let out = '', err = '', timedOut = false;
@@ -66,6 +71,7 @@ function run(args, env, timeoutMs) {
 }
 
 const TORTURE = 'test/torture.mjs';
+const ANSI = /\x1b\[[0-9;]*m/g;                   // SGR colour escapes (\x1b = ESC)
 
 // One injected Kinds.test.mjs shard, parsed: LANE rows by id, node:test verdicts by name
 // (the spec reporter, as Lanes.mjs runs it, passes the LANE / CALIB lines through raw).
@@ -75,7 +81,8 @@ async function shard(id, flags) {
     const lanes = {};
     const tap = {};
     let calib = null, calibEnd = null, inject = null;
-    for (const line of r.out.split('\n')) {
+    for (const raw of r.out.split('\n')) {
+        const line = raw.replace(ANSI, '');            // belt and braces: strip any colour that slips through
         if (line.startsWith('LANE\t')) {
             const p = line.split('\t');
             lanes[p[2]] = { kind: p[3], k: p[4], scav: +p[5], budget: +p[6], verdict: p[7] };

@@ -4,6 +4,17 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Test harness: `test/perf/Harness.test.mjs` failed 18 of 44 when the parent environment set
+  `FORCE_COLOR` (IDE runners, some terminals). The child shards inherited it, the spec reporter wrapped
+  the pass / fail glyphs in ANSI escapes, and the verdict parser read every test as `undefined`. Children
+  now run with `NO_COLOR=1` (and no `FORCE_COLOR`), and the parser strips ANSI escapes. Test-only, so no
+  module change. Reproduced at 26/44 with `FORCE_COLOR=1`; 44/44 after, with and without it.
+- README: the test count read 762; `npm test` runs 765.
+
 ## [1.5.1] - 2026-10-04
 
 Docs and demo patch. No runtime behaviour changes: the only `LogN.js` edit is a JSDoc comment, and every

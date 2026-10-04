@@ -1239,7 +1239,7 @@ Gated witness numbers (this machine, shared R^2 floor 0.958): BinaryHeap `pop` R
 
 ## Testing
 
-`node:test` only, zero runtime deps. `npm test` runs 762 tests -- the per-member contract, boundary, and fuzz-vs-oracle suites plus the cross-member `QaAudit` block; the torture, witness, perf-gate, KIND-crossed allocation, and demo harnesses run under their own scripts (below).
+`node:test` only, zero runtime deps. `npm test` runs 765 tests -- the per-member contract, boundary, and fuzz-vs-oracle suites plus the cross-member `QaAudit` block; the torture, witness, perf-gate, KIND-crossed allocation, and demo harnesses run under their own scripts (below).
 
 - `npm test` -- per-member contract + boundary + fuzz-vs-oracle suites, plus the cross-member `QaAudit` block (VERSION trinity, author-spelling guard, ASCII-only source, the six-file pack).
 - `npm run torture` -- `node --expose-gc test/torture.mjs`: 0 B/op on every hot path, `gc major = 0`, leak tracker `size 0/0`.
