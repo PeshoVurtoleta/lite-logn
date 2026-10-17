@@ -317,7 +317,8 @@ log, so they do not belong here:
   comparable guarantees with far less code, per the user's steer. Ship an RB/AVL only if a member proves
   it needs strict per-op worst-case that Scapegoat's amortization cannot provide.
 - **B-tree / LSM-tree** -- O(log n) but block/disk-oriented; a different niche (a `lite-store`-adjacent
-  package), out here.
+  package), out here. *(2026-10-18: reconsideration of the in-memory B+tree PROPOSED, not decided --
+  see section 14.1 and ROADMAP section 11, C1. LSM stays out.)*
 
 If a sibling "sub-logarithmic but not constant" family (vEB and friends) is ever wanted, it is its own
 package. lite-logn holds the line at the logarithm, just as lite-o1 holds it at the constant.
@@ -734,6 +735,199 @@ chain. The planner picks one.
 **Lessons applied from birth:** no tagged phi in `_pull` (12.2.1); `<= 1 box/op` for double returns
 from non-inlined calls, disclosed (12.2.2-3); iterative everywhere, with clear() tested on a 2^20
 path (12.2.5); no views, so no shared-clear hazard (12.2.6); the sum bound from S1 (12.2.7).
+
+---
+
+## 14. Cache-conscious track -- research intake (2026-10-18)
+
+Sources: `../Research/CACHE_RESEARCH.md` (2026-10-07, lite-logn 1.5.1) and
+`../Research/BITWISE_RESEARCH.md` sections 1 and 8. The plan these feed is
+ROADMAP section 11.
+
+**The question asked:** can combining lite-logn structures reduce the
+cache-miss factor, at a price?
+
+**Tier of every number below: REPORTED.** They were measured on another host
+(4 vCPU Xeon @ 2.3 GHz, L2 2 MB/core, **L3 260 MB shared**, Node 22.22.0,
+shared VM, best of 5, uniform random keys, no hardware counters). Run-to-run
+variation was 30-50% at >= 1e6, so ratios under ~1.3x there are not
+conclusive. The prototypes (Eytzinger, S-tree, d-ary heaps) are short,
+unoptimised scripts: compare prototype with prototype for layout effects,
+and use the shipped-class rows as anchors. Nothing here was re-measured this
+cycle.
+
+### 14.0 Short answer
+
+- **Point lookups: no.** Replacing an O(1) hash with any O(log n) structure
+  adds misses. The best ordered layout is 2-3x slower than hashing at every
+  size, and Treap is ~19x slower than CuckooMap at 4e6.
+- **Yes, at a price, in three situations:**
+  1. workloads with **key locality** (range scans, successor walks);
+  2. making lite-logn's own structures cheaper **per level**;
+  3. succinct encodings once the plain data leaves the cache. This one is
+     untested; that host's L3 held everything.
+
+The rule behind all of it: **a lookup's misses ~= the number of levels whose
+data is not already hot.** Ordered layouts can cut levels (B-trees, d-ary
+heaps) and keep the top levels hot (Eytzinger, B-trees). They cannot reach a
+hash's one level.
+
+### 14.1 E1 point `has()` on random present keys (ns/op)
+
+| n | CuckooMap (lite-o1) | `Map` | SortedArray | Treap | binary search (proto) | Eytzinger (proto) | S-tree B=8 (proto) |
+|---|---|---|---|---|---|---|---|
+| 1e3 | 26.5 | 27.7 | 64.3 | 55.6 | 66.6 | 61.4 | 76.7 |
+| 1e4 | 42.6 | 28.6 | 93.1 | 127.9 | 101.6 | 90.3 | 107.4 |
+| 1e5 | 51.1 | 78.2 | 121.8 | 240.8 | 125.6 | 109.6 | 134.2 |
+| 1e6 | 77.4 | 107.2 | 259.4 | 1075.7 | 262.5 | 181.5 | 193.9 |
+| 4e6 | 116.3 | 242.1 | 376.6 | 2191.7 | 348.6 | 225.6 | 361.0 (noise?) |
+
+- **Pointer trees collapse at scale.** Treap is 40x slower at 4e6 than at
+  1e3. Node key / left / right live in separate columns at scattered slots,
+  so the reads cannot overlap.
+- **Eytzinger beats binary search** by 1.45x at 1e6 and 1.55x at 4e6, and
+  never loses.
+- The scalar S-tree helps at 1e6 (1.35x) and is noisy at 4e6. Without SIMD
+  its in-node scan is branchy.
+- `SortedArray` tracks the binary-search prototype closely, so lite-logn's
+  guards cost almost nothing. The gap is all layout.
+
+**On the B-tree boundary (section 4).** The exclusion reads "block / disk
+oriented". That holds for LSM trees but misreads in-memory B-trees, which
+are the standard cache-conscious ordered map: Rust's
+`std::collections::BTreeMap`, Abseil `btree_map`, Google cpp-btree. A
+fixed-capacity, zero-GC typed-array `BPlusTree` would offer:
+
+- internal nodes: a `Float64Array` key block plus an `Int32Array` child
+  block, with B = 8-16;
+- linked leaves for range scans;
+- a private free-list node pool, following the SkipList / Treap precedent.
+
+Expected properties:
+
+- ~log_B n lines per lookup (the S-tree / Eytzinger class);
+- `SortedArray`-class range scans;
+- O(B + log n) inserts against `SortedArray`'s O(n) shift. That is the
+  decisive difference for dynamic ordered data.
+
+The price:
+
+- the most complex member yet (split / merge / borrow, fail-closed at every
+  step);
+- 50-70% node fill;
+- a scalar in-node search, so B stays <= ~16;
+- amortized cascading splits, which need the family's max-single-op
+  disclosure.
+
+The witness claim would be the same `a + b*log2 n` class as the other
+ordered members, with a **shallower slope per level** than Treap /
+Scapegoat. Reversing the exclusion is a maintainer decision (ROADMAP 11,
+C1).
+
+### 14.2 E2 16-key range scan from a random start (ns per key returned)
+
+The hash does 16 point gets. `SortedArray` does one `rank()` plus 15
+contiguous `valueAt()` reads.
+
+| n | CuckooMap 16x get | `Map` 16x get | SortedArray rank + valueAt | ordered vs best hash |
+|---|---|---|---|---|
+| 1e3 | 21.8 | 28.5 | 12.4 | 1.8x |
+| 1e4 | 41.8 | 28.6 | 13.9 | 2.1x |
+| 1e5 | 54.4 | 56.8 | 18.0 | 3.0x |
+| 1e6 | 138.8 | 135.7 | 35.0 | 3.9x |
+| 4e6 | 213.5 | 246.0 | 57.1 | 3.7x |
+
+This is the real answer to the question. Hashing scatters neighbouring keys,
+so every key in a range is a fresh miss. An ordered layout pays one O(log n)
+search, then streams lines the prefetcher sees coming. Workloads with this
+shape:
+
+- time-ordered event logs;
+- Morton / Hilbert-keyed tiles;
+- pagination and leaderboards (rank / select);
+- interval scheduling;
+- id spaces where related entities get adjacent ids.
+
+### 14.3 E3 priority-queue hold model, pop-min + re-push (ns/op)
+
+| n | lite-logn BinaryHeap | proto 2-ary | proto 4-ary | proto 8-ary |
+|---|---|---|---|---|
+| 1e3 | 99.6 | 113.2 | 143.5 | 142.5 |
+| 1e4 | 141.5 | 199.2 | 175.1 | 177.2 |
+| 1e5 | 197.6 | 278.3 | 241.5 | 238.4 |
+| 1e6 | 343.3 | 461.8 | 333.7 | 379.5 |
+| 4e6 | 500.9 | 668.0 | 502.9 | 620.1 |
+
+- The tuned `BinaryHeap` is 1.15-1.4x faster than the plain 2-ary
+  prototype, so implementation quality is already high.
+- Prototype vs prototype: 4-ary beats 2-ary by 1.14x (1e4), 1.15x (1e5),
+  1.38x (1e6) and 1.33x (4e6), and loses at 1e3.
+- 8-ary is past the sweet spot.
+- **Projected, not shown on lite-logn's code:** an `arity: 4` option gains
+  ~1.2-1.35x at >= 1e6, with a small-n regression. It would be an option,
+  not a new default.
+
+### 14.4 E4 a filter in front of an index (absent-key rejection)
+
+Mostly a loss. A lite-filter probe (hash plus 1-2 lines) costs about what
+the in-memory index probe it skips costs. The best case is 1.1-1.4x at 90%
+absent keys, and positives always pay double. Filters pay off in front of
+disk, network, a `postMessage`, a long string hash, or DRAM on a small-L3
+machine (to be re-tested there). This does not change lite-logn's scope. It
+rules out a "filter + ordered index" combination as a speed member.
+
+### 14.5 The pasted-list verdicts that touch lite-logn
+
+- **HAMT / CHAMP / RRB.** 4-8 dependent node reads per lookup, so not a miss
+  reducer. `PersistentSegTree` already shows the zero-GC route (path copying
+  into a bump arena), and its slope sits with the pointer-chasing members.
+  Persistence is worth its misses only for snapshots / undo.
+- **"Epoch" SparseTable.** Meaningless: it is a static, build-once RMQ, and
+  rebuilding is its only mutation.
+- **Succinct structures** (`WaveletTree` here; lite-o1 `RankSelect` /
+  `EliasFano`). Plausible once the plain representation leaves the cache.
+  Test on a laptop with <= 36 MB L3 at n ~ 1e7-1e8. It could not be shown on
+  the 260 MB-L3 host.
+
+### 14.6 Witness disclosure
+
+The witness already gates SkipList `set` over the cache-resident
+2^9..2^14 window "so the fit sees the structural level count, not DRAM
+latency" (`test/witness.mjs:173-176, 595`). That is honest gating. The
+matching disclosure is a **published, ungated random-access curve beyond the
+gated window** (1e5 -> 1e7), so users see what a level costs once data
+leaves the cache. That is also where 14.1-14.3's layouts would show their
+value. Same idea as the lite-o1 cache-tier line
+(`../Research/RESEARCH_EPOCH_O1.md` section 3.5).
+
+### 14.7 Test-harness finding (`BITWISE_RESEARCH.md` section 1)
+
+- **The library is safe.** `LogN.js:1371-1380` steps the Numerical Recipes
+  LCG `s * 1664525 + 1013904223` with `Math.imul`, which is an exact 32-bit
+  multiply, and folds the result with `| 0`. The doc comment there says why
+  (no large intermediate double, no boxing). `BITWISE_RESEARCH.md` called it
+  safe because the product stays under 2^53. The shipped code goes further
+  and never forms the double at all.
+- **`benchmark/Dimensions.mjs` uses the broken form** for heap priorities at
+  lines 84, 262, 276, 290 and 304:
+  `t = (t * 1103515245 + 12345) & 0x7fffffff`.
+  - The double multiply loses low bits once the product passes 2^53, so the
+    priority stream repeats with period ~10 k (10,466 from seed 1, measured
+    for lite-lru).
+  - The effect on a heap benchmark is minor, since priorities still vary.
+    But it is the same bug class that, in lite-lru's tests, left ten
+    "heavy churn" tests never evicting.
+  - Fix: `Math.imul(t, 1103515245)` (ROADMAP 11, C6). It is not applied yet
+    because it changes the benchmark's input stream, so the next
+    `bench:report` should be re-run after it.
+
+### 14.8 Explicitly don't (measured)
+
+- Pointer trees (Treap, SkipList, Splay) for point lookups at large n
+  (~19x worse than hashing at 4e6).
+- HAMTs for speed.
+- Filters in front of in-memory indexes.
+- 8-ary and wider heaps.
 
 ---
 

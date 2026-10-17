@@ -1677,3 +1677,63 @@ main session fixed one more display bug (an unfilled ring read as 0 ns).
 
 **Order for the demo session:** DM2 (one line) -> DM1 (the honesty of the page) -> DM3 / DM5 claims + tests ->
 DM4 -> new-member scenes, if wanted -> DM6 / DM7. The same cost rules as 8.5 apply.
+
+## 11. Cache-conscious track -- research intake (2026-10-18)  [PROPOSED, nothing scheduled]
+
+Evidence: RESEARCH.md section 14. Sources: `../Research/CACHE_RESEARCH.md`
+and `../Research/BITWISE_RESEARCH.md` section 1. Every speed number there is
+REPORTED from another host (260 MB L3). None enters README, GUIDE, llms.txt
+or CHANGELOG until a run from this cycle reproduces it under
+`quiet-lock.mjs`, interleaved, with provenance. Prototype ratios are
+projections for lite-logn's tuned code, not measurements of it.
+
+| id | item | needs | size |
+| --- | --- | --- | --- |
+| C1 | `BPlusTree`: fixed-capacity, zero-GC typed-array B+tree (B = 8-16, linked leaves, private node pool). Reverses the RESEARCH section 4 B-tree exclusion for the in-memory case only; LSM stays out | **maintainer decision** (reverse the boundary) + ADR | large |
+| C2 | `EytzingerArray`: static, read-optimised sibling of `SortedArray` (O(n) build from sorted input; `k = 2k + (e[k] < x)`) | ADR (loses O(1) `keyAt` / `select`) | small-medium |
+| C3 | `arity: 2 \| 4` option on `BinaryHeap` (maybe `MinMaxHeap`) | measure on the tuned code first | small |
+| C4 | Witness disclosure: a published, ungated random-access curve beyond each gated window (1e5 -> 1e7) | none | small |
+| C5 | Dual-index recipe in GUIDE.md: a lite-o1 / lite-lru hash for point access + a `SortedArray` (later `BPlusTree`) side index for range / successor access | none (docs) | tiny |
+| C6 | `benchmark/Dimensions.mjs:84,262,276,290,304`: `t * 1103515245` -> `Math.imul(t, 1103515245)` (double-precision LCG, period ~10 k) | re-run `bench:report` after | tiny |
+
+### Order (recommended)
+
+1. **C6 + C4:** cheap, and they make every later claim measurable.
+2. **C3:** decide from a STATISTICAL-tier A/B on `BinaryHeap` itself at
+   1e3..4e6, with K rounds and a HOST verdict. Expect a small-n loss, so it
+   stays an option, never the default.
+3. **C2:** a static member under the existing static-member honesty
+   contract.
+4. **C1:** only after the boundary decision.
+5. **C5** at any time (docs only).
+
+### C1 -- what must be true before code
+
+- **Boundary decision recorded.** RESEARCH section 4 is amended to "B-tree:
+  in-memory B+tree IN (cache-conscious ordered map); LSM / disk B-trees OUT".
+  The pointer at section 4 already marks this as proposed, not decided.
+- **ADR covering:**
+  - node layout (key block `Float64Array`, child block `Int32Array`,
+    leaf links);
+  - B and the reason for it (one or two cache lines of keys; scalar in-node
+    search, so B stays <= 16);
+  - fill policy;
+  - split / merge / borrow, fail-closed at every step;
+  - the node pool (private free list, SkipList / Treap precedent);
+  - the max-single-op disclosure for cascading splits (amortized class).
+- **Witness claim.** The same `a + b*log2 n` class as Treap / Scapegoat,
+  with a shallower slope per level. The foil is Treap on the same keys.
+  Gate over a cache-resident window as the SkipList gate does; C4 publishes
+  the curve beyond it.
+- **Differential oracle** against `SortedArray`, plus a torture lane at
+  every split / merge boundary.
+
+### Declined (measured, do not reopen without new evidence)
+
+- Pointer trees as point-lookup structures at large n (Treap ~19x worse
+  than CuckooMap at 4e6).
+- HAMT / CHAMP for speed. `PersistentSegTree` is the persistence route.
+- A filter in front of an in-memory ordered index (1.1-1.4x at best, at
+  90% absent keys).
+- 8-ary and wider heaps.
+- An "epoch" SparseTable: static RMQ, so nothing to invalidate.
