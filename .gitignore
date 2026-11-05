@@ -4,3 +4,6 @@
 # generated benchmark artifacts (machine/time-specific; regenerate with `npm run bench:report`)
 /benchmark/results.json
 /benchmark/report.html
+
+# burst state (NEXT.md, research probes, evidence); never committed
+/.handoff/

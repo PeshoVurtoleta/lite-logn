@@ -1368,18 +1368,34 @@ export class SegmentTree {
     }
 }
 
+/** `Math.imul` hoisted once, so the `_lcgNext` body skips the `Math` global load. */
+const _imul = Math.imul;
+/** Numerical-Recipes LCG multiplier (`_lcgNext`). */
+const LCG_A = 1664525;
+/** Numerical-Recipes LCG increment (`_lcgNext`). */
+const LCG_C = 1013904223;
+
 /**
  * Advance a 32-bit Numerical-Recipes LCG one step: `s' = (s*1664525 + 1013904223)
  * mod 2^32`, kept as a SIGNED int32. The repo's single PRNG -- deterministic,
- * instance-local, no Math.random, no module state, no new generator. Two integer
- * disciplines keep it zero-alloc:
+ * instance-local, no Math.random, no mutable module state, no new generator. Two
+ * integer disciplines keep it zero-alloc:
  *   - `Math.imul` does the multiply as a 32-bit integer op (the low 32 bits of the
  *     product), so no large intermediate double is ever formed (`s * 1664525` would
  *     reach ~7.1e15); and
  *   - the result is folded with `| 0` (a SIGNED int32), NOT `>>> 0`: a `>>> 0`
  *     Uint32 exceeds the Smi range (2^31) about half the time and would box as a
  *     transient HeapNumber every step (the perf-gate scavenge counter catches it),
- *     whereas an `| 0` signed int32 always stays an unboxed Smi.
+ *     on every V8 build. An `| 0` signed int32 is a Smi on 32-bit-Smi builds
+ *     (Node), but NOT always: on pointer-compressed V8 builds (Chrome / Edge /
+ *     Electron, desktop and Android; 31-bit Smi, range [-2^30, 2^30)) about half of
+ *     all states are HeapNumbers, which cost an allocation only where `_lcgNext` is
+ *     NOT inlined (expected; no pointer-compressed lane on this host). Hence the
+ *     body is kept <= 27 bytecode bytes (`Math.imul` and both constants hoisted
+ *     into module consts; 36 bytes before), inside V8 14.6's small-function inline
+ *     limits (TurboFan <= 30, Maglev <= 27; node v26.8.2), and TurboFan still
+ *     reduces the aliased `_imul` call to NumberImul (one `madd` on arm64,
+ *     measured).
  * The 32-BIT WORD is identical either way, so the sequence is unchanged: `Math.imul`
  * gives the same low 32 bits as the plain multiply, and mod-2^32 addition is
  * sign-agnostic. SkipList draws a node level from the HIGH bits via `Math.clz32`,
@@ -1392,7 +1408,7 @@ export class SegmentTree {
  * @returns {number} the next state, a signed 32-bit integer (same 32-bit word)
  */
 function _lcgNext(s) {
-    return (Math.imul(s, 1664525) + 1013904223) | 0;
+    return (_imul(s, LCG_A) + LCG_C) | 0;
 }
 
 /** SkipList tower-height ceiling: at most this many parallel `_next` columns. */
@@ -1565,7 +1581,7 @@ export class SkipList {
         } else {
             s = seed >>> 0;
         }
-        s = s | 0; // store the LCG state as a SIGNED int32 (an unboxed Smi) -- see _lcgNext
+        s = s | 0; // store the LCG state as a SIGNED int32 (a Smi on Node, not always on Chrome) -- see _lcgNext
         const cols = _levelCap(capacity);
         this._cap = capacity;                        // max live entries
         this._stride = capacity + 1;                 // slots 0..capacity (0 = head)
@@ -1933,7 +1949,7 @@ export class Treap {
         } else {
             s = seed >>> 0;
         }
-        s = s | 0; // store the LCG state as a SIGNED int32 (an unboxed Smi) -- see _lcgNext
+        s = s | 0; // store the LCG state as a SIGNED int32 (a Smi on Node, not always on Chrome) -- see _lcgNext
         this._cap = capacity;                         // max live entries
         this._key = new Float64Array(capacity + 1);   // key at each slot
         this._value = new Float64Array(capacity + 1); // value at each slot
@@ -9159,7 +9175,7 @@ export class EulerTourTree {
         this._arcSlot = new Uint32Array(tableSize);    // arc table value column: arc node slot (0 = empty)
         this._pool = new NodePool(2 * (capacity - 1)); // arc free-list; hands out [1, 2V-2], 0 when V = 1
         this._seed0 = TR_DEFAULT_SEED | 0;             // initial LCG seed (clear resets to it)
-        this._seed = this._seed0;                      // live LCG state (signed int32 Smi -- see _lcgNext)
+        this._seed = this._seed0;                      // live LCG state (signed int32; a Smi on Node, not always on Chrome -- see _lcgNext)
         this._sl = 0;                                  // split scratch: left result root
         this._sr = 0;                                  // split scratch: right result root
         this._edges = 0;                               // live edge count

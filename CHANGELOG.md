@@ -6,14 +6,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `_lcgNext`, the internal PRNG step behind Treap / SkipList / EulerTourTree priorities and levels,
+  now reads `Math.imul` and its two constants from module consts. Its bytecode drops from 36 to 27 bytes
+  (node v26.8.2, V8 14.6), which fits V8's small-function inline limits (TurboFan <= 30, Maglev <= 27).
+  Before, it was charged to the caller's 920-byte inlining budget. TurboFan still reduces the call to
+  NumberImul (one `madd` on arm64). The 32-bit sequence is unchanged, so every seeded shape is the same.
+  New `test/LcgParity.test.mjs` (5 tests): Treap and SkipList LCG state, priorities and levels against an independent
+  reference LCG (7 seeds x 1e5 steps), EulerTourTree priorities (4096 vertices), a must-fail control,
+  and a bytecode-length gate (<= 27, pinned to node v26.8.2; it fails on the 1.5.1 build at 36).
+  Speed A/B: not run (busy host), PENDING.
+
 ### Fixed
+
+- Source comments said the signed int32 LCG state "always stays an unboxed Smi". That holds only where
+  V8 Smis are 32-bit (Node). On pointer-compressed builds (Chrome / Edge / Electron, desktop and Android:
+  31-bit Smi) about half of all states are HeapNumbers, which are expected to cost an allocation only
+  where `_lcgNext` is not inlined. That case is not measured: there is no pointer-compressed lane on
+  this host.
 
 - Test harness: `test/perf/Harness.test.mjs` failed 18 of 44 when the parent environment set
   `FORCE_COLOR` (IDE runners, some terminals). The child shards inherited it, the spec reporter wrapped
   the pass / fail glyphs in ANSI escapes, and the verdict parser read every test as `undefined`. Children
   now run with `NO_COLOR=1` (and no `FORCE_COLOR`), and the parser strips ANSI escapes. Test-only, so no
   module change. Reproduced at 26/44 with `FORCE_COLOR=1`; 44/44 after, with and without it.
-- README: the test count read 762; `npm test` runs 765.
+- README: the test count read 762; `npm test` now runs 770 (765 plus the 5 in `test/LcgParity.test.mjs`).
 
 ## [1.5.1] - 2026-10-04
 
