@@ -931,6 +931,28 @@ value. Same idea as the lite-o1 cache-tier line
 
 ---
 
+## 15. 32-way min pyramid ("first index with capacity >= x") -- candidate, on hold (2026-10-20)
+
+Source: `../Research/BITWISE_RESEARCH.md` section 10.2 J (a maintainer Q&A in the lite-o1
+session of 2026-10-20). Not measured; not on the ROADMAP until a consumer is named.
+
+- **Shape:** a B-way (B = 32) segment tree that stores the max (or min) of each block. "First
+  index whose value is >= x" descends one level at a time, comparing up to 32 children per
+  level. It is bounded at O(log_32 U), but not one `clz32` per level the way lite-o1 BitSet is:
+  x is a query parameter, so it cannot be baked into a summary bit.
+- **Point update:** recompute one block aggregate per level, up to 32 reads each. Bounded.
+- **Where it pays:** INDEX-ordered first fit -- shelf atlas packing, "the first worker or slot
+  with spare capacity", left-most bin packing.
+- **Where it does not:** variable-size BYTE allocation. TLSF (`../Research/SUMMARY.md` #20,
+  on hold) answers "a free block of at least `size`" in O(1) with two bitmap reads.
+- **Overlap:** a binary segment tree with a descend-to-first query does the same job in O(log2 n).
+  The only argument for B = 32 is fewer levels, a cache-tier claim that the C4 curve (`ROADMAP.md`
+  section 11) would have to show at the consumer's real size.
+- **Verdict: hold.** It is the weakest of BITWISE 10.2's candidates. Revisit only with a named
+  consumer and a C4 cache-tier curve.
+
+---
+
 *This document consolidates the design identity, the logarithmic-growth-witness anchor, the full
 candidate roster with its explicit boundary, reference implementations, and the demo direction for the
 lite-logn project. It is an internal research reference, modeled on lite-o1/RESEARCH.md, and is a PLAN,

@@ -1680,6 +1680,11 @@ DM4 -> new-member scenes, if wanted -> DM6 / DM7. The same cost rules as 8.5 app
 
 ## 11. Cache-conscious track -- research intake (2026-10-18)  [PROPOSED, nothing scheduled]
 
+**Sequencing (maintainer, 2026-10-18):** the lite-signal 1.6.0 release has the
+highest priority. Nothing in this section starts before it ships. Suite-wide
+order: `../Research/SUMMARY.md` section 1 (C6 in wave 0, C4 in wave 1, then
+C3 -> C2 -> C1 in wave 4).
+
 Evidence: RESEARCH.md section 14. Sources: `../Research/CACHE_RESEARCH.md`
 and `../Research/BITWISE_RESEARCH.md` section 1. Every speed number there is
 REPORTED from another host (260 MB L3). None enters README, GUIDE, llms.txt
