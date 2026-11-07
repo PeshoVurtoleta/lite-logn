@@ -55,7 +55,7 @@
  */
 
 /** Package version. One of the three version sites (package.json / VERSION / llms.txt). */
-export const VERSION = '1.5.1';
+export const VERSION = '1.5.2';
 
 // --- members land here, append-only, one tree-shakeable class each -----------
 // BinaryHeap        -- indexed O(log n) min|max heap  (BELOW)

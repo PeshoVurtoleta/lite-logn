@@ -4,7 +4,7 @@ All notable changes to `@zakkster/lite-logn` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.2] - 2026-11-07
 
 ### Changed
 
@@ -16,7 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   New `test/LcgParity.test.mjs` (5 tests): Treap and SkipList LCG state, priorities and levels against an independent
   reference LCG (7 seeds x 1e5 steps), EulerTourTree priorities (4096 vertices), a must-fail control,
   and a bytecode-length gate (<= 27, pinned to node v26.8.2; it fails on the 1.5.1 build at 36).
-  Speed A/B: not run (busy host), PENDING.
+  Speed A/B (REPORTED; 7 interleaved rounds, 1.5.1 build vs this one): median B/A ns/op treap 0.916,
+  skiplist 0.909, inside the A/A null of the same runs (treap 0.894, skiplist 0.944; A/A range 0.82-1.25).
+  No speed change is resolvable at this noise level; the gain is the inline classification, not a timing.
+  Provenance: 2026-11-07, Apple arm64 12-core host, node v26.8.2, load1 2.89 -> 2.74, no other busy node.
 
 ### Fixed
 

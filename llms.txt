@@ -1,6 +1,6 @@
 # @zakkster/lite-logn
 
-Version: 1.5.1
+Version: 1.5.2
 License: MIT (c) Zahary Shinikchiev <shinikchiev@yahoo.com>
 Runtime dependencies: none. ESM only. ASCII-only source. sideEffects: false.
 Node: >= 18.
